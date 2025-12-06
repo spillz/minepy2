@@ -95,7 +95,7 @@ class CoalOre(Block):
     coords = ((2,13),)
 
 class DiamondOre(Block):
-    name = 'Iron Ore'
+    name = 'Diamond Ore'
     coords = ((2,12),)
 
 class RedstoneOre(Block):

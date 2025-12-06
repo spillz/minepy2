@@ -75,6 +75,8 @@ class WorldLoader(object):
         cpipe = self.client_pipe
         spipe = self.server_pipe
         mapgen.initialize_map_generator(seed = self.world_seed)
+        if getattr(config, 'USE_EXPERIMENTAL_BIOME_GEN', False):
+            mapgen.initialize_biome_map_generator(seed=self.world_seed)
         while True:
             try:
                 msg, data = cpipe.recv()
@@ -122,7 +124,10 @@ class WorldLoader(object):
         simplex noise.
 
         """
-        self.blocks = mapgen.generate_sector(position, None, None)
+        if getattr(config, 'USE_EXPERIMENTAL_BIOME_GEN', False):
+            self.blocks = mapgen.generate_biome_sector(position, None, None)
+        else:
+            self.blocks = mapgen.generate_sector(position, None, None)
         if sector_block_delta is not None:
             for p in sector_block_delta:
                 self.blocks[p] = sector_block_delta[p]

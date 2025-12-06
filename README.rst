@@ -26,6 +26,16 @@ Has much better performance than fogleman's original version and world size is u
 
 Currently uses minecraft style textures and you can easily add new block types. Take a look at blocks.py
 
+Experimental biome map generator
+--------------------------------
+
+An alternative terrain generator adds blended biomes (plains-forward, forest, desert, highlands, canyon lines), varied elevation including plateaus and cliffs, sparser walkable forests, and occasional cabins using the existing block set. To try it, set ``USE_EXPERIMENTAL_BIOME_GEN = True`` in ``config.py``; the legacy generator remains the default.
+
+Performance toggle
+------------------
+
+Set ``BIOME_FAST_MODE = True`` in ``config.py`` (default when the experimental generator is enabled) to skip heavy caves/ores and limit structures/trees for faster loading. Turn it off if you prefer the full feature set and can tolerate slower generation.
+
 
 How to Run (Python 3)
 =====================

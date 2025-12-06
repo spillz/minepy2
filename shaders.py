@@ -48,6 +48,9 @@ void main() {
     vec3 n = normalize(v_normal);
     float light = max(dot(n, normalize(u_light_dir)), 0.0);
     vec4 tex_color = texture(u_texture, v_tex_coords);
+    if (tex_color.a < 0.2) {
+        discard;
+    }
     vec3 base_color = tex_color.rgb * v_color;
     vec3 lit_color = base_color * (0.3 + 0.7 * light);
     float distance = length(v_view_position);

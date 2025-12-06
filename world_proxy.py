@@ -28,6 +28,7 @@ from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS
 from util import normalize, sectorize, FACES, cube_v, cube_v2
 from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH
 import mapgen
+import numpy
 
 #import logging
 #logging.basicConfig(level = logging.INFO)
@@ -95,6 +96,11 @@ class SectorProxy(object):
                 color=('f', tri_col.ravel().astype('f4')),
             )
             self.vt_data = None
+        elif add_to_batch and self.vt_data is None and self.invalidate_vt:
+            # Lazy rebuild when vt data was cleared for seam sync.
+            self.model._recompute_vt(self)
+            self.invalidate_vt = False
+            return self.check_show(add_to_batch)
 
 
 class ModelProxy(object):
@@ -142,6 +148,80 @@ class ModelProxy(object):
                 loader_server_pipe = self.server.loader_pipe
             print ('Starting sector loader')
             self.loader = world_loader.start_loader(loader_server_pipe)
+
+    def _compute_exposed(self, blocks):
+        air = (BLOCK_SOLID[blocks] == 0)
+        solid = (blocks > 0)
+        exposed_faces = numpy.zeros(blocks.shape + (6,), dtype=bool)
+        exposed_faces[:,:-1,:,0] = air[:,1:,:]   # up
+        exposed_faces[:,1:,:,1] = air[:,:-1,:]   # down
+        exposed_faces[1:,:,:,2] = air[:-1,:,:]   # left
+        exposed_faces[:-1,:,:,3] = air[1:,:,:]   # right
+        exposed_faces[:,:,:-1,4] = air[:,:,1:]   # front
+        exposed_faces[:,:,1:,5] = air[:,:,:-1]   # back
+        exposed_faces = exposed_faces & solid[..., None]
+
+        exposed_light = numpy.zeros(blocks.shape+(6,),dtype=numpy.float32)
+        exposed_light[:,:-1,:,0] = 1.0
+        exposed_light[:,1:,:,1] = 1.0
+        exposed_light[1:,:,:,2] = 1.0
+        exposed_light[:-1,:,:,3] = 1.0
+        exposed_light[:,:,:-1,4] = 1.0
+        exposed_light[:,:,1:,5] = 1.0
+        return exposed_faces, exposed_light
+
+    def _recompute_vt(self, sector):
+        exposed_faces, exposed_light = self._compute_exposed(sector.blocks)
+        exposed_faces = exposed_faces[1:-1,:,1:-1]
+        exposed_light = exposed_light[1:-1,:,1:-1]
+
+        sx, sy, sz, _ = exposed_faces.shape
+        face_mask = exposed_faces.reshape(sx*sy*sz, 6)
+        light_flat = exposed_light.reshape(sx*sy*sz, 6)
+        block_mask = face_mask.any(axis=1)
+        if not block_mask.any():
+            sector.vt_data = (0, [], [], [], [])
+            sector.invalidate()
+            return
+        sector_grid = numpy.indices((SECTOR_SIZE, SECTOR_HEIGHT, SECTOR_SIZE)).transpose(1,2,3,0).reshape((SECTOR_SIZE*SECTOR_HEIGHT*SECTOR_SIZE,3))
+        pos = sector_grid[block_mask] + numpy.array(sector.position)
+        face_mask = face_mask[block_mask]
+        light_flat = light_flat[block_mask]
+        b = sector.blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
+        verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos[:,None,None,:]).astype(numpy.float32)
+        tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+        normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
+        colors = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
+        v = verts[face_mask].reshape(-1,3).ravel()
+        t = tex[face_mask].reshape(-1,2).ravel()
+        n = normals[face_mask].reshape(-1,3).ravel()
+        c = colors[face_mask].reshape(-1,3).ravel()
+        count = len(v)//3
+        sector.vt_data = (count, v, t, n, c)
+        sector.invalidate()
+
+    def _sync_edges_and_rebuild(self, sector):
+        # Copy boundary columns between this sector and loaded neighbors, then rebuild both.
+        neighbors = list(self.neighbor_sectors(sector.position))
+        for dx, dz, n in neighbors:
+            if dx == 1:
+                # neighbor to the east
+                n.blocks[0,:,:] = sector.blocks[SECTOR_SIZE,:,:]
+                sector.blocks[SECTOR_SIZE+1,:,:] = n.blocks[1,:,:]
+            elif dx == -1:
+                n.blocks[SECTOR_SIZE+1,:,:] = sector.blocks[1,:,:]
+                sector.blocks[0,:,:] = n.blocks[SECTOR_SIZE,:,:]
+            if dz == 1:
+                # neighbor to the south (positive z)
+                n.blocks[:,:,0] = sector.blocks[:,:,SECTOR_SIZE]
+                sector.blocks[:,:,SECTOR_SIZE+1] = n.blocks[:,:,1]
+            elif dz == -1:
+                n.blocks[:,:,SECTOR_SIZE+1] = sector.blocks[:,:,1]
+                sector.blocks[:,:,0] = n.blocks[:,:,SECTOR_SIZE]
+            n.vt_data = None
+            n.invalidate()
+        sector.vt_data = None
+        sector.invalidate()
 
     def set_matrices(self, projection, view):
         self.program['u_projection'] = numpy.array(projection, dtype='f4')
@@ -290,14 +370,14 @@ class ModelProxy(object):
                 s = self.sectors[spos]
                 s.blocks[:,:,:] = b
                 s.vt_data = v
-                s.invalidate()
+                self._sync_edges_and_rebuild(s)
             else:
                 print('setting new sector data',spos)
                 s = SectorProxy(spos, self.get_batch(), self.group, self)
                 s.blocks[:,:,:] = b
                 s.vt_data = v
                 self.sectors[sectorize(spos)] = s
-                s.invalidate()
+                self._sync_edges_and_rebuild(s)
 
     def hit_test(self, position, vector, max_distance=8):
         """ Line of sight search from current position. If a block is

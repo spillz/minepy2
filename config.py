@@ -40,3 +40,8 @@ LIGHT_DECAY = 0.75  # per-step attenuation for flood-fill lighting
 AMBIENT_LIGHT = 0.2  # minimum light level (0-1 range)
 # Optional block light emitters: map block id -> light level (0-1)
 BLOCK_LIGHT_LEVELS = {}
+
+# Terrain generation
+USE_EXPERIMENTAL_BIOME_GEN = True
+# Performance toggle for biome generator: skip caves/ores and limit structures/trees.
+BIOME_FAST_MODE = False
