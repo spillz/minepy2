@@ -31,6 +31,7 @@ def loader_log(msg, *args):
 SECTOR_ARRAY = numpy.indices((SECTOR_SIZE, SECTOR_HEIGHT, SECTOR_SIZE)).transpose(1, 2, 3, 0)
 SH = SECTOR_ARRAY.shape
 SECTOR_GRID = SECTOR_ARRAY.reshape((SH[0]*SH[1]*SH[2],3))
+WATER = BLOCK_ID['Water']
 
 class WorldLoader(object):
     def __init__(self, client_pipe, server_pipe):
@@ -135,7 +136,7 @@ class WorldLoader(object):
 
     def _calc_exposed_faces(self):
         air = (BLOCK_SOLID[self.blocks] == 0)
-        solid = (self.blocks > 0)
+        solid = (self.blocks > 0) & (self.blocks != WATER)
 
         # Face exposure booleans: up, down, left, right, front, back
         exposed_faces = numpy.zeros(self.blocks.shape + (6,), dtype=bool)
@@ -208,29 +209,59 @@ class WorldLoader(object):
         light_flat = exposed_light.reshape(sx*sy*sz, 6)
 
         block_mask = face_mask.any(axis=1)
-        if not block_mask.any():
-            self.vt_data = (0, [], [], [], [])
-            return
+        v = numpy.array([], dtype=numpy.float32)
+        t = numpy.array([], dtype=numpy.float32)
+        n = numpy.array([], dtype=numpy.float32)
+        c = numpy.array([], dtype=numpy.float32)
+        count = 0
+        if block_mask.any():
+            pos = SECTOR_GRID[block_mask] + position  # (N,3)
+            face_mask = face_mask[block_mask]
+            light_flat = light_flat[block_mask]
 
-        pos = SECTOR_GRID[block_mask] + position  # (N,3)
-        face_mask = face_mask[block_mask]
-        light_flat = light_flat[block_mask]
+            b = self.blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
 
-        b = self.blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
+            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos[:,None,None,:]).astype(numpy.float32)
+            tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+            light = light_flat[:, :, None, None]  # (N,6,1,1)
+            colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
+            ambient = config.AMBIENT_LIGHT
+            colors = numpy.clip(colors_base*(ambient + (1.0-ambient)*light), 0, 255)
+            normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
 
-        verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos[:,None,None,:]).astype(numpy.float32)
-        tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
-        light = light_flat[:, :, None, None]  # (N,6,1,1)
-        colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
-        ambient = config.AMBIENT_LIGHT
-        colors = numpy.clip(colors_base*(ambient + (1.0-ambient)*light), 0, 255)
-        normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
+            v = verts[face_mask].reshape(-1,3).ravel()
+            t = tex[face_mask].reshape(-1,2).ravel()
+            n = normals[face_mask].reshape(-1,3).ravel()
+            c = colors[face_mask].reshape(-1,3).ravel()
+            count = len(v)//3
 
-        v = verts[face_mask].reshape(-1,3).ravel()
-        t = tex[face_mask].reshape(-1,2).ravel()
-        n = normals[face_mask].reshape(-1,3).ravel()
-        c = colors[face_mask].reshape(-1,3).ravel()
-        count = len(v)//3
+        # Water surface quads (top only) so shorelines don't leave holes.
+        water_top = numpy.zeros_like(self.blocks, dtype=bool)
+        water_top[:, :-1, :] = (self.blocks[:, :-1, :] == WATER) & (self.blocks[:, 1:, :] != WATER)
+        water_top[:, -1, :] = (self.blocks[:, -1, :] == WATER)
+        wt_int = water_top[1:-1, :, 1:-1]
+        wt_flat = wt_int.reshape(sx*sy*sz)
+        if wt_flat.any():
+            pos_w = SECTOR_GRID[wt_flat] + position
+            wcount = len(pos_w)
+            b = numpy.full(wcount, WATER, dtype=numpy.int32)
+            verts = (0.5*BLOCK_VERTICES[b].reshape(wcount,6,4,3) + pos_w[:,None,None,:]).astype(numpy.float32)
+            tex = BLOCK_TEXTURES[b][:,:6].reshape(wcount,6,4,2).astype(numpy.float32)
+            normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (wcount,6,4,3)).astype(numpy.float32)
+            colors = BLOCK_COLORS[b][:,:6].reshape(wcount,6,4,3).astype(numpy.float32)
+            face_mask = numpy.zeros((wcount,6), dtype=bool)
+            face_mask[:,0] = True  # top face
+
+            wv = verts[face_mask].reshape(-1,3).ravel()
+            wtcoords = tex[face_mask].reshape(-1,2).ravel()
+            wn = normals[face_mask].reshape(-1,3).ravel()
+            wc = colors[face_mask].reshape(-1,3).ravel()
+
+            v = numpy.concatenate([v, wv])
+            t = numpy.concatenate([t, wtcoords])
+            n = numpy.concatenate([n, wn])
+            c = numpy.concatenate([c, wc])
+            count += len(wv)//3
 
         self.vt_data = (count, v, t, n, c)
 

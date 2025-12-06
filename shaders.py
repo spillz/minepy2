@@ -48,7 +48,11 @@ void main() {
     vec3 n = normalize(v_normal);
     float light = max(dot(n, normalize(u_light_dir)), 0.0);
     vec4 tex_color = texture(u_texture, v_tex_coords);
-    if (tex_color.a < 0.2) {
+    // Detect atlas tile (16x16 layout) so we can treat water specially.
+    ivec2 tile = ivec2(floor(v_tex_coords * 16.0 + 1e-4));
+    bool is_water = (tile.x == 3 && tile.y == 4); // WATER tile coords in blocks.py
+    float alpha = tex_color.a * (is_water ? 0.45 : 1.0);
+    if (alpha < 0.05) {
         discard;
     }
     vec3 base_color = tex_color.rgb * v_color;
@@ -56,7 +60,7 @@ void main() {
     float distance = length(v_view_position);
     float fog_factor = clamp((u_fog_end - distance) / (u_fog_end - u_fog_start), 0.0, 1.0);
     vec3 fogged_color = mix(u_fog_color, lit_color, fog_factor);
-    out_color = vec4(fogged_color, tex_color.a);
+    out_color = vec4(fogged_color, alpha);
 }
 """
 

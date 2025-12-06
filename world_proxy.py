@@ -30,6 +30,7 @@ from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, 
 import mapgen
 import numpy
 
+WATER = BLOCK_ID['Water']
 #import logging
 #logging.basicConfig(level = logging.INFO)
 #def world_log(msg, *args):
@@ -151,7 +152,7 @@ class ModelProxy(object):
 
     def _compute_exposed(self, blocks):
         air = (BLOCK_SOLID[blocks] == 0)
-        solid = (blocks > 0)
+        solid = (blocks > 0) & (blocks != WATER)
         exposed_faces = numpy.zeros(blocks.shape + (6,), dtype=bool)
         exposed_faces[:,:-1,:,0] = air[:,1:,:]   # up
         exposed_faces[:,1:,:,1] = air[:,:-1,:]   # down
@@ -179,24 +180,52 @@ class ModelProxy(object):
         face_mask = exposed_faces.reshape(sx*sy*sz, 6)
         light_flat = exposed_light.reshape(sx*sy*sz, 6)
         block_mask = face_mask.any(axis=1)
-        if not block_mask.any():
-            sector.vt_data = (0, [], [], [], [])
-            sector.invalidate()
-            return
+        v = numpy.array([], dtype=numpy.float32)
+        t = numpy.array([], dtype=numpy.float32)
+        n = numpy.array([], dtype=numpy.float32)
+        c = numpy.array([], dtype=numpy.float32)
+        count = 0
         sector_grid = numpy.indices((SECTOR_SIZE, SECTOR_HEIGHT, SECTOR_SIZE)).transpose(1,2,3,0).reshape((SECTOR_SIZE*SECTOR_HEIGHT*SECTOR_SIZE,3))
-        pos = sector_grid[block_mask] + numpy.array(sector.position)
-        face_mask = face_mask[block_mask]
-        light_flat = light_flat[block_mask]
-        b = sector.blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
-        verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos[:,None,None,:]).astype(numpy.float32)
-        tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
-        normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
-        colors = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
-        v = verts[face_mask].reshape(-1,3).ravel()
-        t = tex[face_mask].reshape(-1,2).ravel()
-        n = normals[face_mask].reshape(-1,3).ravel()
-        c = colors[face_mask].reshape(-1,3).ravel()
-        count = len(v)//3
+        if block_mask.any():
+            pos = sector_grid[block_mask] + numpy.array(sector.position)
+            face_mask = face_mask[block_mask]
+            light_flat = light_flat[block_mask]
+            b = sector.blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
+            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos[:,None,None,:]).astype(numpy.float32)
+            tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+            normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
+            colors = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
+            v = verts[face_mask].reshape(-1,3).ravel()
+            t = tex[face_mask].reshape(-1,2).ravel()
+            n = normals[face_mask].reshape(-1,3).ravel()
+            c = colors[face_mask].reshape(-1,3).ravel()
+            count = len(v)//3
+        # water surface quads (top only)
+        water_top = numpy.zeros_like(sector.blocks, dtype=bool)
+        water_top[:, :-1, :] = (sector.blocks[:, :-1, :] == WATER) & (sector.blocks[:, 1:, :] != WATER)
+        water_top[:, -1, :] = (sector.blocks[:, -1, :] == WATER)
+        wt_int = water_top[1:-1, :, 1:-1]
+        wt_flat = wt_int.reshape(sx*sy*sz)
+        if wt_flat.any():
+            pos_w = sector_grid[wt_flat] + numpy.array(sector.position)
+            wcount = len(pos_w)
+            b = numpy.full(wcount, WATER, dtype=numpy.int32)
+            verts = (0.5*BLOCK_VERTICES[b].reshape(wcount,6,4,3) + pos_w[:,None,None,:]).astype(numpy.float32)
+            tex = BLOCK_TEXTURES[b][:,:6].reshape(wcount,6,4,2).astype(numpy.float32)
+            normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (wcount,6,4,3)).astype(numpy.float32)
+            colors = BLOCK_COLORS[b][:,:6].reshape(wcount,6,4,3).astype(numpy.float32)
+            face_mask = numpy.zeros((wcount,6), dtype=bool)
+            face_mask[:,0] = True
+
+            wv = verts[face_mask].reshape(-1,3).ravel()
+            wtcoords = tex[face_mask].reshape(-1,2).ravel()
+            wn = normals[face_mask].reshape(-1,3).ravel()
+            wc = colors[face_mask].reshape(-1,3).ravel()
+            v = numpy.concatenate([v, wv])
+            t = numpy.concatenate([t, wtcoords])
+            n = numpy.concatenate([n, wn])
+            c = numpy.concatenate([c, wc])
+            count += len(wv)//3
         sector.vt_data = (count, v, t, n, c)
         sector.invalidate()
 
@@ -262,7 +291,41 @@ class ModelProxy(object):
             self.loader_requests.insert(0,['set_block', [notify_server, position, block, sector_data]])
 
     def remove_block(self, position, notify_server = True):
-        self.add_block(position, 0)
+        pos = normalize(position)
+        existing = self[pos]
+        if existing == WATER:
+            if not self._can_remove_water(pos):
+                return
+        self.add_block(pos, 0)
+        # If we removed terrain below the waterline and there's adjacent water, flow in.
+        if existing != WATER and pos[1] < self._water_level():
+            if any(self[normalize((pos[0]+dx, pos[1]+dy, pos[2]+dz))] == WATER for dx, dy, dz in FACES):
+                self.add_block(pos, WATER, notify_server)
+
+    def _can_remove_water(self, pos):
+        """Allow removal only if water pocket is smaller than 4 contiguous blocks."""
+        seen = set()
+        q = [pos]
+        water_count = 0
+        while q:
+            cur = q.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            if self[cur] != WATER:
+                continue
+            water_count += 1
+            if water_count >= 4:
+                return False
+            cx, cy, cz = cur
+            for dx, dy, dz in FACES:
+                npos = (cx + dx, cy + dy, cz + dz)
+                if npos not in seen:
+                    q.append(npos)
+        return True
+
+    def _water_level(self):
+        return getattr(mapgen, 'GLOBAL_WATER_LEVEL', getattr(mapgen, 'WATER_LEVEL', 70))
 
     def draw(self, position, frustum_circle):
         draw_invalid = True

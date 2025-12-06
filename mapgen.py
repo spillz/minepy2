@@ -27,6 +27,10 @@ JACK = BLOCK_ID["Jack O'Lantern"]
 TNT = BLOCK_ID['TNT']
 CAKE = BLOCK_ID['Cake']
 ROSE = BLOCK_ID['Rose']
+WATER = BLOCK_ID['Water']
+
+WATER_LEVEL = 70
+GLOBAL_WATER_LEVEL = WATER_LEVEL
 
 
 class SectorNoise2D(object):
@@ -505,6 +509,8 @@ class BiomeGenerator:
         elevation, canyon_noise = self._height_field(position)
         moisture = self.moisture(position)
         temperature = self.temperature(position)
+        moist01 = 0.5 + 0.5 * numpy.tanh(moisture)
+        temp01 = 0.5 + 0.5 * numpy.tanh(temperature)
         structure = self.structure_mask(position)
         structure_fine = self.structure_fine(position)
         tree_jitter = self.tree_jitter(position)
@@ -524,6 +530,8 @@ class BiomeGenerator:
         forest_mask = biome == 1
         highland_mask = biome == 3
         canyon_mask = biome == 4
+        water_biome = elevation <= WATER_LEVEL
+        biome[water_biome] = 5
 
         surface_block[desert_mask] = SAND
         filler_block[desert_mask] = SAND
@@ -541,6 +549,9 @@ class BiomeGenerator:
         grad = numpy.hypot(gx, gz)
         cliff_mask = grad > 0.85
 
+        # Flat global water level to avoid seams.
+        water_level_i = numpy.full_like(elevation, WATER_LEVEL, dtype=int)
+
         # Plan buildings on mostly flat plains; gate density with multiple noises.
         building_spots = []
         building_mask = numpy.zeros_like(biome, dtype=bool)
@@ -550,6 +561,8 @@ class BiomeGenerator:
             for z in range(2, SECTOR_SIZE - 6, step):
                 if len(building_spots) >= max_buildings:
                     break
+                if elevation[x, z] < WATER_LEVEL:
+                    continue
                 if biome[x, z] != 0:
                     continue
                 if building_cluster[x, z] < 0.55 or structure[x, z] < 0.65 or structure_fine[x, z] < 0.1:
@@ -582,6 +595,15 @@ class BiomeGenerator:
         ground_h = numpy.clip(elevation, 2, SECTOR_HEIGHT - 3).astype(int)
         depth = soil_depth.astype(int)
         stone_cap = numpy.maximum(1, ground_h - depth)
+        # Fill all columns below the global water level; building placement already avoids these.
+        water_mask = (ground_h <= water_level_i)
+        if water_mask.any():
+            sandy = (~highland_mask) & (~canyon_mask)
+            surface_block = numpy.where(water_mask & sandy, SAND, surface_block)
+            filler_block = numpy.where(water_mask & sandy, SAND, filler_block)
+            soil_depth = numpy.where(water_mask & sandy, numpy.maximum(soil_depth, 4), soil_depth)
+            depth = soil_depth.astype(int)
+            stone_cap = numpy.maximum(1, ground_h - depth)
 
         blocks = numpy.zeros((SECTOR_HEIGHT, sx, sz), dtype='u2')
         # vectorized bulk fill
@@ -591,11 +613,18 @@ class BiomeGenerator:
         blocks[mid_mask] = filler_broadcast[mid_mask]
         xs, zs = numpy.meshgrid(numpy.arange(sx), numpy.arange(sz), indexing='ij')
         blocks[ground_h, xs, zs] = surface_block
+        # Underwater columns: sandier bottoms and water fill up to water line.
+        if water_mask.any():
+            wl = numpy.clip(water_level_i, 1, SECTOR_HEIGHT - 1)
+            water_fill = (y_grid > ground_h[None, :, :]) & (y_grid <= wl[None, :, :]) & water_mask[None, :, :]
+            blocks[water_fill] = WATER
 
         # Per-column decorations that need decisions.
         for x in range(sx):
             for z in range(sz):
                 ground = ground_h[x, z]
+                if water_mask[x, z]:
+                    continue
                 # Forest canopy: sparse, jittered placement for walkability.
                 if forest_mask[x, z] and not building_mask[x, z]:
                     allow_tree = (structure[x, z] > 0.35 if self.fast else structure[x, z] > 0.32) and tree_jitter[x, z] > 0.05
@@ -641,6 +670,32 @@ class BiomeGenerator:
             centers.append((x + w // 2, gh + 1, z + d // 2))
         for i in range(1, len(centers)):
             self._draw_path(blocks, centers[i - 1], centers[i])
+
+        # Final water seal: ensure any air pockets below water level are filled.
+        y_grid = numpy.arange(SECTOR_HEIGHT)[:, None, None]
+        water_cols = (ground_h <= water_level_i)
+        if water_cols.any():
+            wl = numpy.clip(water_level_i, 1, SECTOR_HEIGHT - 1)
+            below_surface = (y_grid <= wl[None, :, :]) & water_cols[None, :, :]
+            air_pockets = below_surface & (blocks == 0)
+            blocks[air_pockets] = WATER
+            # Let water flow sideways into shallow cave openings at/below sea level.
+            water_mask = blocks == WATER
+            air_mask = (blocks == 0) & (y_grid <= wl[None, :, :])
+            for _ in range(4):  # limited iterations to avoid flooding far inland
+                neighbor = numpy.zeros_like(water_mask, dtype=bool)
+                neighbor[:-1, :, :] |= water_mask[1:, :, :]
+                neighbor[1:, :, :] |= water_mask[:-1, :, :]
+                neighbor[:, :-1, :] |= water_mask[:, 1:, :]
+                neighbor[:, 1:, :] |= water_mask[:, :-1, :]
+                neighbor[:, :, :-1] |= water_mask[:, :, 1:]
+                neighbor[:, :, 1:] |= water_mask[:, :, :-1]
+                spread = air_mask & neighbor
+                if not spread.any():
+                    break
+                blocks[spread] = WATER
+                water_mask |= spread
+                air_mask &= ~spread
 
         return blocks.swapaxes(0,1).swapaxes(0,2)
 

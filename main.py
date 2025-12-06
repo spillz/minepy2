@@ -28,7 +28,8 @@ from blocks import TEXTURE_PATH
 from config import DIST, TICKS_PER_SEC, FLYING_SPEED, GRAVITY, JUMP_SPEED, \
         MAX_JUMP_HEIGHT, PLAYER_HEIGHT, TERMINAL_VELOCITY, TICKS_PER_SEC, \
         WALKING_SPEED
-from blocks import BLOCK_ID, BLOCK_TEXTURES, BLOCK_VERTICES, BLOCK_COLORS
+from blocks import BLOCK_ID, BLOCK_TEXTURES, BLOCK_VERTICES, BLOCK_COLORS, BLOCK_SOLID
+WATER = BLOCK_ID['Water']
 
 
 class Window(pyglet.window.Window):
@@ -275,7 +276,7 @@ class Window(pyglet.window.Window):
                     op[1] -= dy
                     op[i] += face[i]
                     b = self.model[util.normalize(op)]
-                    if b==0 or b is None:
+                    if b is None or b==0 or not BLOCK_SOLID[b]:
                         continue
                     p[i] -= (d - pad) * face[i]
                     if face == (0, -1, 0) or face == (0, 1, 0):
@@ -528,6 +529,8 @@ class Window(pyglet.window.Window):
         self.draw_reticle()
         self.draw_inventory_item()
         self.draw_focused_block()
+        if self._is_underwater():
+            self.draw_underwater_overlay()
 
     def draw_label(self):
         """ Draw the label in the top left of the screen.
@@ -553,6 +556,21 @@ class Window(pyglet.window.Window):
         if self.inventory_item:
             self.inventory_item.draw()
 
+    def _is_underwater(self):
+        """Return True if the camera is currently inside a water block."""
+        pos = util.normalize(self.position)
+        if self.model[pos] == WATER:
+            return True
+        head_pos = (pos[0], pos[1] + 1, pos[2])
+        return self.model[head_pos] == WATER
+
+    def draw_underwater_overlay(self):
+        """Render a full-viewport tint when submerged to avoid per-block transparency."""
+        width, height = self.get_size()
+        overlay = shapes.Rectangle(0, 0, width, height, color=(40, 110, 170))
+        overlay.opacity = 90
+        overlay.draw()
+
 
 
 def setup_fog():
@@ -570,8 +588,9 @@ def setup():
     """
     # Set the color of "clear", i.e. the sky, in rgba.
     gl.glClearColor(0.5, 0.69, 1.0, 1)
-    # Disable face culling to avoid winding issues with generated geometry.
-    gl.glDisable(gl.GL_CULL_FACE)
+    # Cull back faces for better fill-rate; geometry is built with consistent winding.
+    gl.glEnable(gl.GL_CULL_FACE)
+    gl.glCullFace(gl.GL_BACK)
 
     #gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_DST_ALPHA)
     #gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)

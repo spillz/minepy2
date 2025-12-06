@@ -7,6 +7,7 @@ gr = [50,150,70]
 white = numpy.tile(numpy.array([255,255,255]),6*4).reshape(6,3*4)
 green = numpy.tile(numpy.array(gr),6*4).reshape(6,3*4)
 grass_top = numpy.array([77,244,44]*4+[255,255,255]*5*4).reshape(6,3*4)
+water_blue = numpy.tile(numpy.array([140,190,255]),6*4).reshape(6,3*4)
 
 
 class Block(object):
@@ -120,6 +121,12 @@ class Cake(Block):
     vertices = cb_v_cake
     solid = False
 
+class Water(Block):
+    name = 'Water'
+    coords = ((3, 11), (3, 11), (3, 11))
+    colors = water_blue
+    solid = False
+
 # Explicit ordering keeps block IDs stable and ensures the initial inventory
 # starts with grass instead of whichever subclass happens to register first.
 BLOCKS = [
@@ -146,6 +153,7 @@ BLOCKS = [
     Bookshelf,
     TNT,
     Cake,
+    Water,
 ]
 i = 1
 BLOCK_ID = {}
