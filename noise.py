@@ -245,7 +245,8 @@ class SimplexNoise:
 
         #skew the Z data and store in z0
         s = Z.sum(-1) * Fn # Factor for skewing
-        i = fastfloor(Z+s[:,numpy.newaxis]) #nearest value
+        # Wrap lattice coordinates to permutation size to avoid overflow on large inputs
+        i = numpy.mod(fastfloor(Z+s[:,numpy.newaxis]), 256) #nearest value wrapped to 0..255
         t = (i.sum(-1) * Gn) # Factor for unskewing
         Z0 = i - t[:,numpy.newaxis]
         z0 = Z - Z0
