@@ -120,8 +120,34 @@ class Cake(Block):
     vertices = cb_v_cake
     solid = False
 
+# Explicit ordering keeps block IDs stable and ensures the initial inventory
+# starts with grass instead of whichever subclass happens to register first.
+BLOCKS = [
+    DirtWithGrass,
+    Leaves,
+    Sand,
+    Brick,
+    Stone,
+    CobbleStone,
+    IronBlock,
+    Wood,
+    Plank,
+    CraftingTable,
+    Pumpkin,
+    JackOLantern,
+    Rose,
+    GobbleDeBlock,
+    IronOre,
+    GoldOre,
+    CoalOre,
+    DiamondOre,
+    RedstoneOre,
+    EmeraldOre,
+    Bookshelf,
+    TNT,
+    Cake,
+]
 i = 1
-BLOCKS = [b for b in Block.__subclasses__() if b.name != None]
 BLOCK_ID = {}
 for x in BLOCKS:
     BLOCK_ID[x.name] = i
