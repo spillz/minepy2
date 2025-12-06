@@ -6,9 +6,10 @@ import sys
 # pyglet imports
 import pyglet
 image = pyglet.image
-from pyglet.graphics import TextureGroup
 from pyglet.window import key, mouse
 import pyglet.gl as gl
+import pyglet.shapes as shapes
+from pyglet.math import Mat4, Vec3
 
 GLfloat3 = gl.GLfloat*3
 GLfloat4 = gl.GLfloat*4
@@ -22,6 +23,8 @@ import itertools
 import world_proxy as world
 import util
 import config
+import shaders
+from blocks import TEXTURE_PATH
 from config import DIST, TICKS_PER_SEC, FLYING_SPEED, GRAVITY, JUMP_SPEED, \
         MAX_JUMP_HEIGHT, PLAYER_HEIGHT, TERMINAL_VELOCITY, TICKS_PER_SEC, \
         WALKING_SPEED
@@ -51,7 +54,14 @@ class Window(pyglet.window.Window):
 
         # Current (x, y, z) position in the world, specified with floats. Note
         # that, perhaps unlike in math class, the y-axis is the vertical axis.
-        self.position = (0, 160, 0)
+        if config.DEBUG_SINGLE_BLOCK:
+            bx = config.SECTOR_SIZE//2
+            by = config.SECTOR_HEIGHT//2
+            bz = config.SECTOR_SIZE//2 + 2
+            self.position = (bx, by, bz)
+            print(f"[DEBUG] Starting at {self.position} for single-block debug")
+        else:
+            self.position = (0, 160, 0)
 
         # First element is rotation of the player in the x-z plane (ground
         # plane) measured from the z-axis down. The second is the rotation
@@ -65,10 +75,12 @@ class Window(pyglet.window.Window):
         self.sector = None
 
         # The crosshairs at the center of the screen.
-        self.reticle = None
+        self.reticle = []
 
-        self.inventory_batch = pyglet.graphics.Batch()
         self.inventory_item = None
+
+        # Debug flags
+        self._printed_mats = False
 
         # Velocity in the y (upward) direction.
         self.dy = 0
@@ -84,12 +96,23 @@ class Window(pyglet.window.Window):
             key._1, key._2, key._3, key._4, key._5,
             key._6, key._7, key._8, key._9, key._0]
 
-        # Instance of the model that handles the world.
-        self.model = world.ModelProxy()
+        # Shader program used for world rendering.
+        self.block_program = shaders.create_block_shader()
+        self.block_program['u_texture'] = 0
+        self.block_program['u_light_dir'] = (0.35, 1.0, 0.65)
+        self.block_program['u_fog_color'] = (0.5, 0.69, 1.0)
+        if config.DEBUG_SINGLE_BLOCK:
+            self.block_program['u_fog_start'] = 1e6
+            self.block_program['u_fog_end'] = 2e6
+        else:
+            self.block_program['u_fog_start'] = 0.75 * DIST
+            self.block_program['u_fog_end'] = DIST
 
-        self.inventory_group = util.InventoryGroup(parent = self.model.group)
-#        line_group = util.LineDrawGroup(thickness = 3)
-#        self.inventory_outline_group = util.InventoryOutlineGroup(parent = line_group)
+        # Instance of the model that handles the world.
+        self.model = world.ModelProxy(self.block_program)
+
+        # Texture atlas for UI previews.
+        self.texture_atlas = image.load(TEXTURE_PATH)
 
         # The label that is displayed in the top left of the canvas.
         self.label = pyglet.text.Label('', font_name='Arial', font_size=18,
@@ -178,8 +201,9 @@ class Window(pyglet.window.Window):
         """
 #        self.model.process_queue()
         sector = util.sectorize(self.position)
-        self.model.update_sectors(self.sector, sector)
-        self.sector = sector
+        if self.model.loader is not None:
+            self.model.update_sectors(self.sector, sector)
+            self.sector = sector
         m = 20
         dt = min(dt, 0.2)
         for _ in range(m):
@@ -263,7 +287,10 @@ class Window(pyglet.window.Window):
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
         ind = self.inventory.index(self.block)
-        ind += scroll_y
+        step = int(scroll_y)
+        if step == 0:
+            step = 1 if scroll_y > 0 else -1
+        ind += step
         if ind >= len(self.inventory):
             ind -= len(self.inventory)
         if ind < 0:
@@ -317,10 +344,12 @@ class Window(pyglet.window.Window):
         """
         if self.exclusive:
             m = 0.15
-            x, y = self.rotation
-            x, y = x + dx * m, y + dy * m
-            y = max(-90, min(90, y))
+            x, y = self.rotation  # x = yaw (degrees), y = pitch (degrees)
+            x = x + dx * m
+            y = max(-90, min(90, y + dy * m))
             self.rotation = (x, y)
+            if config.DEBUG_SINGLE_BLOCK:
+                print(f"[DEBUG] rotation yaw={x:.2f} pitch={y:.2f}")
 
     def on_key_press(self, symbol, modifiers):
         """ Called when the player presses a key. See pyglet docs for key
@@ -390,32 +419,31 @@ class Window(pyglet.window.Window):
         """
         # label
         self.label.y = height - 10
-        # reticle
-        if self.reticle:
-            self.reticle.delete()
-        x, y = self.width / 2, self.height / 2
+        # reticle uses shader-based shapes instead of deprecated vertex_list
+        self.reticle_batch = None
+        cx, cy = self.width / 2, self.height / 2
         n = 10
-        self.reticle = pyglet.graphics.vertex_list(4,
-            ('v2i', (x - n, y, x + n, y, x, y - n, x, y + n))
-        )
+        self.reticle = [
+            shapes.Line(cx - n, cy, cx + n, cy, thickness=2, color=(0, 0, 0)),
+            shapes.Line(cx, cy - n, cx, cy + n, thickness=2, color=(0, 0, 0)),
+        ]
         #inventory item
         self.update_inventory_item_batch()
 
     def update_inventory_item_batch(self):
-        size = 64
         if self.inventory_item is not None:
             self.inventory_item.delete()
-#            self.inventory_item_outline.delete()
-        #texture cube
-        t = BLOCK_TEXTURES[BLOCK_ID[self.block]][:6].ravel()
-        v = size/2+size/2*BLOCK_VERTICES[BLOCK_ID[self.block]] + numpy.tile(numpy.array([16,16+size/2,0]),4)
-        v = v.ravel()
-        c = BLOCK_COLORS[BLOCK_ID[self.block]][:6].ravel()
-        self.inventory_item = self.inventory_batch.add(len(t)/2, gl.GL_QUADS, self.inventory_group,
-            ('v3f/static', v),
-            ('t2f/static', t),
-            ('c3B/static', c),
-        )
+        # Draw a textured preview of the selected block using the atlas.
+        t = BLOCK_TEXTURES[BLOCK_ID[self.block]][0]  # first face tex coords
+        tex = self.texture_atlas.get_texture()
+        x0, y0, x1, y1 = t[0]*tex.width, t[1]*tex.height, t[4]*tex.width, t[5]*tex.height
+        region = tex.get_region(x=int(x0), y=int(y0), width=int(x1 - x0), height=int(y1 - y0))
+        size = 64
+        sprite = pyglet.sprite.Sprite(region, x=16, y=16)
+        scale_x = size / sprite.width
+        scale_y = size / sprite.height
+        sprite.scale = min(scale_x, scale_y)
+        self.inventory_item = sprite
         #outline
 #        v = size/2+(size/2+0.1)*BLOCK_VERTICES[BLOCK_ID[self.block]] + numpy.tile(numpy.array([16,16+size/2,0]),4)
 #        v = numpy.hstack((v[:,:3],v,v[:,-3:]))
@@ -435,14 +463,22 @@ class Window(pyglet.window.Window):
 
         """
         width, height = self.get_size()
-        gl.glDisable(gl.GL_LIGHTING)
         gl.glDisable(gl.GL_DEPTH_TEST)
         gl.glViewport(0, 0, width, height)
-        gl.glMatrixMode(gl.GL_PROJECTION)
-        gl.glLoadIdentity()
-        gl.glOrtho(0, width, 0, height, -200, 200)
-        gl.glMatrixMode(gl.GL_MODELVIEW)
-        gl.glLoadIdentity()
+
+    def get_view_projection(self):
+        """Return projection and view matrices using pyglet Mat4 (column-major)."""
+        width, height = self.get_size()
+        aspect = width / float(height)
+        fovy_rad = math.radians(30.0)
+        near, far = 0.1, 512.0
+        projection = Mat4.perspective_projection(aspect, near, far, 65)
+        x, y, z = self.position
+        dx, dy, dz = self.get_sight_vector()
+        eye = Vec3(x, y, z)
+        target = Vec3(x + dx, y + dy, z + dz)
+        view = Mat4.look_at(eye, target, Vec3(0.0, 1.0, 0.0))
+        return projection, view
 
     def set_3d(self):
         """ Configure OpenGL to draw in 3d.
@@ -453,28 +489,15 @@ class Window(pyglet.window.Window):
         gl.glEnable(gl.GL_DEPTH_TEST)
 
         gl.glViewport(0, 0, width, height)
-        gl.glMatrixMode(gl.GL_PROJECTION)
-        gl.glLoadIdentity()
-        gl.gluPerspective(65.0, width / float(height), 0.1, DIST)
-        gl.glMatrixMode(gl.GL_MODELVIEW)
-        gl.glLoadIdentity()
-
-        x, y = self.rotation
-        gl.glRotatef(x, 0, 1, 0)
-        gl.glRotatef(-y, math.cos(math.radians(x)), 0, math.sin(math.radians(x)))
-        x, y, z = self.position
-        gl.glTranslatef(-x, -y, -z)
-
-        gl.glEnable(gl.GL_LIGHTING)
-        gl.glDisable(gl.GL_LIGHT0)
-        gl.glEnable(gl.GL_LIGHT1)
-#        gl.glLightModelfv(gl.GL_LIGHT_MODEL_AMBIENT, GLfloat4(0.05,0.05,0.05,1.0))
-        gl.glEnable(gl.GL_COLOR_MATERIAL)
-        gl.glColorMaterial(gl.GL_FRONT_AND_BACK, gl.GL_AMBIENT_AND_DIFFUSE)
-#        gl.glColorMaterial(gl.GL_FRONT_AND_BACK, gl.GL_AMBIENT)
-        #gl.glLightfv(gl.GL_LIGHT1,gl.GL_SPOT_DIRECTION, GLfloat3(0,0,-1))
-        gl.glLightfv(gl.GL_LIGHT1, gl.GL_AMBIENT, GLfloat4(0.5,0.5,0.5,1.0))
-        gl.glLightfv(gl.GL_LIGHT1, gl.GL_DIFFUSE, GLfloat4(1.0,1.0,1.0,1.0))
+        projection, view = self.get_view_projection()
+        # pyglet Mat4 supports direct upload; ensure contiguous float32 arrays
+        self.model.set_matrices(projection, view)
+        if config.DEBUG_SINGLE_BLOCK and not self._printed_mats:
+            dx, dy, dz = self.get_sight_vector()
+            print("[DEBUG] projection matrix:\n", numpy.array(projection))
+            print("[DEBUG] view matrix:\n", numpy.array(view))
+            print(f"[DEBUG] position {self.position} rotation {self.rotation} sight {(dx, dy, dz)}")
+            self._printed_mats = True
 ##        gl.glLightfv(gl.GL_LIGHT1, gl.GL_POSITION, GLfloat4(0.35,1.0,0.65,0.0))
         #gl.glLightfv(gl.GL_LIGHT0,gl.GL_SPECULAR, GLfloat4(1,1,1,1))
 
@@ -499,62 +522,36 @@ class Window(pyglet.window.Window):
         """
         self.clear()
         self.set_3d()
-        gl.glColor3d(1, 1, 1)
-        gl.glEnable(gl.GL_POLYGON_OFFSET_FILL)
-        gl.glPolygonOffset(0,1)
-
-#        gl.glDepthRange(0.1,1.0)
         self.model.draw(self.position,self.get_frustum_circle())
-#        gl.glDepthRange(0.0,0.9)
-        gl.glDisable(gl.GL_POLYGON_OFFSET_FILL)
-        self.draw_focused_block()
-#        gl.glDepthRange(0.0,1.0)
         self.set_2d()
         self.draw_label()
         self.draw_reticle()
         self.draw_inventory_item()
-
-    def draw_focused_block(self):
-        """ Draw black edges around the block that is currently under the
-        crosshairs.
-
-        """
-        vector = self.get_sight_vector()
-        block = self.model.hit_test(self.position, vector)[0]
-        if block:
-            x, y, z = block
-            vertex_data=[]
-            for v in util.cube_v([x, y, z], 0.51):
-                vertex_data.extend(v)
-            gl.glLineWidth(3)
-            gl.glColor3d(0, 0, 0)
-            #gl.glDepthMask(gl.GL_FALSE)
-            gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_LINE)
-            #gl.glPolygonOffset(-.1,-.1)
-            pyglet.graphics.draw(24, gl.GL_QUADS, ('v3f/static', vertex_data))
-            gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
-            #gl.glDepthMask(gl.GL_TRUE)
-            gl.glLineWidth(1)
+        self.draw_focused_block()
 
     def draw_label(self):
         """ Draw the label in the top left of the screen.
 
         """
         x, y, z = self.position
-        self.label.text = '%02d (%.2f, %.2f, %.2f) %d / %d' % (
-            pyglet.clock.get_fps(), x, y, z,
-            0,0)#len(self.model._shown), len(self.model.world))
+        rx, ry = self.rotation
+        self.label.text = '(%.2f, %.2f, %.2f) rot(%.1f, %.1f)' % (x, y, z, rx, ry)
         self.label.draw()
+
+    def draw_focused_block(self):
+        """ Draw edges around the block under the crosshairs for placement feedback. """
+        return  # temporarily disabled due to pyglet draw API mismatch
 
     def draw_reticle(self):
         """ Draw the crosshairs in the center of the screen.
 
         """
-        gl.glColor3d(0, 0, 0)
-        self.reticle.draw(gl.GL_LINES)
+        for line in self.reticle:
+            line.draw()
 
     def draw_inventory_item(self):
-        self.inventory_batch.draw()
+        if self.inventory_item:
+            self.inventory_item.draw()
 
 
 
@@ -562,19 +559,8 @@ def setup_fog():
     """ Configure the OpenGL fog properties.
 
     """
-    # Enable fog. Fog "blends a fog color with each rasterized pixel fragment's
-    # post-texturing color."
-    gl.glEnable(gl.GL_FOG)
-    # Set the fog color.
-    gl.glFogfv(gl.GL_FOG_COLOR, (gl.GLfloat * 4)(0.5, 0.69, 1.0, 1))
-    # Say we have no preference between rendering speed and quality.
-    gl.glHint(gl.GL_FOG_HINT, gl.GL_DONT_CARE)
-    # Specify the equation used to compute the blending factor.
-    gl.glFogi(gl.GL_FOG_MODE, gl.GL_LINEAR)
-    # How close and far away fog starts and ends. The closer the start and end,
-    # the denser the fog in the fog range.
-    gl.glFogf(gl.GL_FOG_START, 0.75*DIST)
-    gl.glFogf(gl.GL_FOG_END, DIST)
+    # Fixed-function fog isn't available on modern/core profiles; skip if missing.
+    return
 
 
 
@@ -584,16 +570,14 @@ def setup():
     """
     # Set the color of "clear", i.e. the sky, in rgba.
     gl.glClearColor(0.5, 0.69, 1.0, 1)
-    # Enable culling (not rendering) of back-facing facets -- facets that aren't
-    # visible to you.
-    gl.glEnable(gl.GL_CULL_FACE)
+    # Disable face culling to avoid winding issues with generated geometry.
+    gl.glDisable(gl.GL_CULL_FACE)
 
     #gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_DST_ALPHA)
     #gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
 #    gl.glBlendFunc(gl.GL_ZERO, gl.GL_SRC_COLOR)
-#    gl.glEnable(gl.GL_BLEND)
-    gl.glAlphaFunc(gl.GL_GREATER, 0.5);
-    gl.glEnable(gl.GL_ALPHA_TEST);
+    gl.glEnable(gl.GL_BLEND)
+    gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
     # Set the texture minification/magnification function to GL_NEAREST (nearest
     # in Manhattan distance) to the specified texture coordinates. GL_NEAREST
     # "is generally faster than GL_LINEAR, but it can produce textured images
@@ -601,17 +585,26 @@ def setup():
     # as smooth."
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
-    gl.glTexEnvi(gl.GL_TEXTURE_ENV, gl.GL_TEXTURE_ENV_MODE, gl.GL_MODULATE)
+    # Fixed-function texture env not needed with shaders.
     setup_fog()
 
 
 def main():
     if len(sys.argv)>1:
-        config.SERVER_IP = sys.argv[1]
+        arg = sys.argv[1]
+        if ':' in arg:
+            host, port = arg.split(':', 1)
+            config.SERVER_IP = host
+            try:
+                config.SERVER_PORT = int(port)
+            except ValueError:
+                pass
+        else:
+            config.SERVER_IP = arg
         print('Using server IP address',config.SERVER_IP,':',config.SERVER_PORT)
     window = Window(width=300, height=200, caption='Pyglet', resizable=True)
     # Hide the mouse cursor and prevent the mouse from leaving the window.
-    window.set_exclusive_mouse(False)
+    window.set_exclusive_mouse(True)
     setup()
     try:
         pyglet.app.run()

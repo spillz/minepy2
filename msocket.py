@@ -8,31 +8,29 @@ def get_network_ip():
 def broadcast_server(port):
     #UDP server responds to broadcast packets
     #you can have more than one instance of these running
-    import socket
     address = ('', port)
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1)
     server_socket.bind(address)
 
     while True:
-        print "Listening"
+        print("Listening")
         recv_data, addr = server_socket.recvfrom(2048)
-        print addr,':',recv_data
-        server_socket.sendto("*"+recv_data, addr)
+        print(addr, ':', recv_data)
+        server_socket.sendto(b"*" + recv_data, addr)
 
 def broadcast_client(port):
     #UDP client broadcasts to server(s)
-    import socket
 
     address = ('<broadcast>', port)
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-    data = "Request"
+    data = b"Request"
     client_socket.sendto(data, address)
     while True:
         recv_data, addr = client_socket.recvfrom(2048)
-        print addr,recv_data
+        print(addr, recv_data)
 
 use_multiprocessing = True
 
@@ -42,13 +40,13 @@ if use_multiprocessing:
 
     class Listener(multiprocessing.connection.Listener):
         def __init__(self, ip, port):
-            multiprocessing.connection.Listener.__init__(self, address = (ip, port), authkey = 'password')
+            multiprocessing.connection.Listener.__init__(self, address = (ip, port), authkey = b'password')
             
         def fileno(self):
             return self._listener._socket.fileno()
 
     def Client(ip, port):
-        return multiprocessing.connection.Client(address = (ip, port), authkey = 'password')
+        return multiprocessing.connection.Client(address = (ip, port), authkey = b'password')
 
 else:
     
@@ -70,9 +68,9 @@ else:
             self._sock = sock
             self._sock.setblocking(0)
             self._addr = addr
-            self.send_buffer= ''
-            self.recv_buffer = ''
-            self.recv_count_buffer = ''
+            self.send_buffer= b''
+            self.recv_buffer = b''
+            self.recv_count_buffer = b''
             self.recv_count = 0
             self.recv_finished = True
 
@@ -153,3 +151,4 @@ else:
             Connection.__init__(self,sock,(ip, port))
 
         
+import socket

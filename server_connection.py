@@ -48,19 +48,13 @@ class ClientServerConnectionHandler(object):
     def communicate_loop(self):
         alive = True
         while alive:
-            w = []
             try:
-                if len(self._server_message_queue)>0 or self._conn.unfinished_send()>0:
-                    w.append(self._conn)
-            except AttributeError: #multiprocessing version is blocking
-                if len(self._server_message_queue)>0:
-                    w.append(self._conn)
-            if len(self._client_message_queue)>0:
-                w.append(self._pipe)
-            if len(self._loader_message_queue)>0:
-                w.append(self._loader_pipe)
-            r,w,x = select.select([self._conn, self._pipe, self._loader_pipe], w, [])
-            if self._conn in r:
+                rlist = multiprocessing.connection.wait(
+                    [self._conn, self._pipe, self._loader_pipe], timeout=0.1
+                )
+            except (EOFError, OSError):
+                break
+            if self._conn in rlist:
                 try:
                     sconn_log('msg from server')
                     result = self._conn.recv()
@@ -78,27 +72,23 @@ class ClientServerConnectionHandler(object):
                             else:
                                 self._client_message_queue.append((msg, data))
                 except EOFError:
-                    ##TODO: disconnect from server / tell parent / try to reconnect
                     alive = False
-            if self._pipe in r:
+            if self._pipe in rlist:
                 msg, data = self._pipe.recv()
                 sconn_log('msg from client %s',msg)
                 if msg == 'quit':
-                    ##TODO: disconnect from server
                     alive = False
                 self._server_message_queue.append((msg, data))
-            if self._loader_pipe in r:
+            if self._loader_pipe in rlist:
                 msg, data = self._loader_pipe.recv()
                 sconn_log('msg from loader %s',msg)
                 self._server_message_queue.append((msg, data))
-            if self._conn in w:
-                sconn_log('msg from loader %s',msg)
+            # attempt queued sends each loop
+            if len(self._server_message_queue)>0:
                 self.dispatch_top_server_message()
-            if self._pipe in w:
-                sconn_log('msg from loader %s',msg)
+            if len(self._client_message_queue)>0:
                 self.dispatch_top_client_message()
-            if self._loader_pipe in w:
-                sconn_log('msg from loader %s',msg)
+            if len(self._loader_message_queue)>0:
                 self.dispatch_top_loader_message()
         self._conn.close()
         self._pipe.close()

@@ -5,7 +5,7 @@ except ImportError:
 import numpy
 
 #database interface
-import leveldb
+import rocksdbpy as rocksdb
 
 # local imports
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS
@@ -14,23 +14,33 @@ from blocks import BLOCK_ID
 
 class SectorDB(object):
     def __init__(self, filename):
-        self.db = leveldb.LevelDB(filename)
+        options = rocksdb.Option()
+        options.create_if_missing(True)
+        self.db = rocksdb.open(filename, options)
+
+    def _key(self, key):
+        if isinstance(key, bytes):
+            return key
+        return str(key).encode('utf-8')
 
     def get(self, key):
-        return pickle.loads(self.db.Get(key))
+        value = self.db.get(self._key(key))
+        if value is None:
+            raise KeyError(key)
+        return pickle.loads(value)
         
     def put(self, key, value):
-        return self.db.Put(key, pickle.dumps(value, -1))
+        return self.db.set(self._key(key), pickle.dumps(value, -1))
 
     def get_sector(self, position):
-        try:
-            return pickle.loads(self.db.Get(self.sector_position_to_string(position)))
-        except KeyError:
+        value = self.db.get(self._key(self.sector_position_to_string(position)))
+        if value is None:
             return None
+        return pickle.loads(value)
 
     def put_sector(self, position, data):
         data = pickle.dumps(data, -1)
-        self.db.Put(self.sector_position_to_string(position), data)
+        self.db.set(self._key(self.sector_position_to_string(position)), data)
 
     def string_to_sector_position(self, str_position):
         p = str_position.split(':')
@@ -107,8 +117,8 @@ class World(object):
     def get_sector(self, sector_position):
         sector_position = sectorize(sector_position)
         if sector_position in self.sectors:
-            return self.sectors
-        s = Sector(sector_position, db)
+            return self.sectors[sector_position]
+        s = Sector(sector_position, self.db)
         self.sectors[sector_position] = s
         return s
 

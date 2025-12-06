@@ -16,7 +16,7 @@ Known Issues
    framerate more consistent on reasonably modern hardware)
 2. Lighting is very simple, no shadows or dark areas of the terrain yet. (The "light" branch has a very rudimentary
    and incomplete attempt at implementing terrain shadows.)
-3. Nothing is saved, but I plan to save changed sectors to a level DB database
+3. Changed sectors are saved to a RocksDB database (via rocksdb-py) for persistence and Windows compatibility.
 
 Technical
 -----------
@@ -27,11 +27,12 @@ Has much better performance than fogleman's original version and world size is u
 Currently uses minecraft style textures and you can easily add new block types. Take a look at blocks.py
 
 
-How to Run
-==========
+How to Run (Python 3)
+=====================
 
     pip install pyglet
     pip install numpy
+    pip install rocksdb-py
     git clone https://github.com/spillz/minepy.git
     cd minepy
     python main.py

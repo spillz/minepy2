@@ -1,7 +1,6 @@
 import numpy
 import time
 import pyglet
-import pyglet.graphics as gl
 
 import noise
 from config import SECTOR_SIZE
@@ -123,70 +122,23 @@ def sectorize(position):
 
     """
     x, y, z = normalize(position)
-    x, y, z = x / SECTOR_SIZE, y / SECTOR_SIZE, z / SECTOR_SIZE
+    x, y, z = x // SECTOR_SIZE, y // SECTOR_SIZE, z // SECTOR_SIZE
     return (x*SECTOR_SIZE, 0, z*SECTOR_SIZE)
 
-##monkey patch IndirectArrayRegion.__setitem__ to make it a bit quick for numpy arrays
-orig_indirect_array_region_setitem = pyglet.graphics.vertexbuffer.IndirectArrayRegion.__setitem__
-def numpy__setitem__(self, index, value):
-    if isinstance(value, numpy.ndarray) and isinstance(index, slice) \
-          and index.start is None and index.stop is None and index.step is None:
-        arr = numpy.ctypeslib.as_array(self.region.array)
-        for i in range(self.count):
-            arr[i::self.stride] = value[i::self.count]
-        return
-    orig_indirect_array_region_setitem(self, index, value)
-pyglet.graphics.vertexbuffer.IndirectArrayRegion.__setitem__ = numpy__setitem__
+## monkey patch IndirectArrayRegion.__setitem__ to make it quicker for numpy arrays (pyglet 1.x only)
+try:
+    orig_indirect_array_region_setitem = pyglet.graphics.vertexbuffer.IndirectArrayRegion.__setitem__
+    def numpy__setitem__(self, index, value):
+        if isinstance(value, numpy.ndarray) and isinstance(index, slice) \
+              and index.start is None and index.stop is None and index.step is None:
+            arr = numpy.ctypeslib.as_array(self.region.array)
+            for i in range(self.count):
+                arr[i::self.stride] = value[i::self.count]
+            return
+        orig_indirect_array_region_setitem(self, index, value)
+    pyglet.graphics.vertexbuffer.IndirectArrayRegion.__setitem__ = numpy__setitem__
+except AttributeError:
+    # IndirectArrayRegion not present in pyglet 2.x; skip the monkey patch
+    pass
 
 
-class LineDrawGroup(pyglet.graphics.Group):
-    def __init__(self, thickness = 1, parent=None):
-        pyglet.graphics.Group.__init__(self, parent)
-        self.thickness = thickness
-    
-    def set_state(self):
-        gl.glLineWidth(self.thickness)
-        gl.glColor3d(0, 0, 0)
-        gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_LINE)
-        
-    def unset_state(self):
-        gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
-        gl.glLineWidth(1)
-        
-class DrawTranslateGroup(pyglet.graphics.Group):
-    def __init__(self, translate = (0,0,0), parent=None):
-        pyglet.graphics.Group.__init__(self, parent)
-        self.translate = translate
-    
-    def set_state(self):
-        gl.glPushMatrix()
-        gl.glTranslatef(*self.translate)
-        
-    def unset_state(self):
-        gl.glPopMatrix()
-        
-class InventoryGroup(pyglet.graphics.Group):
-    def __init__(self, parent=None):
-        pyglet.graphics.Group.__init__(self, parent)
-    
-    def set_state(self):
-        gl.glPushMatrix()
-        gl.glTranslatef(0, 0, -64)
-        gl.glRotatef(45, 1, 0, 0)
-        gl.glRotatef(45, 0, 1, 0)
-        
-    def unset_state(self):
-        gl.glPopMatrix()
-
-class InventoryOutlineGroup(pyglet.graphics.Group):
-    def __init__(self, parent=None):
-        pyglet.graphics.Group.__init__(self, parent)
-    
-    def set_state(self):
-        gl.glPushMatrix()
-        gl.glTranslatef(0, 0, -60)
-        gl.glRotatef(45, 1, 0, 0)
-        gl.glRotatef(45, 0, 1, 0)
-        
-    def unset_state(self):
-        gl.glPopMatrix()

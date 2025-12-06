@@ -17,6 +17,7 @@ import socket
 import sys
 
 # local imports
+import config
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS, SERVER_IP, SERVER_PORT, LOADER_IP, LOADER_PORT
 from util import normalize, sectorize, FACES, cube_v, cube_v2
 from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH
@@ -27,7 +28,7 @@ logging.basicConfig(level = logging.INFO)
 def loader_log(msg, *args):
     logging.log(logging.INFO, 'LOADER: '+msg, *args)
 
-SECTOR_ARRAY = numpy.mgrid[:SECTOR_SIZE,:SECTOR_HEIGHT,:SECTOR_SIZE].T
+SECTOR_ARRAY = numpy.indices((SECTOR_SIZE, SECTOR_HEIGHT, SECTOR_SIZE)).transpose(1, 2, 3, 0)
 SH = SECTOR_ARRAY.shape
 SECTOR_GRID = SECTOR_ARRAY.reshape((SH[0]*SH[1]*SH[2],3))
 
@@ -128,78 +129,103 @@ class WorldLoader(object):
 
 
     def _calc_exposed_faces(self):
-        #TODO: The 3D bitwise ops are slow
-        air = BLOCK_SOLID[self.blocks] == 0
-        tr = air*(self.blocks>0)
-        tr = tr | air
+        air = (BLOCK_SOLID[self.blocks] == 0)
+        solid = (self.blocks > 0)
 
-        #computes the faces that have at least one face exposed
-        #and, hence, need to be drawn
-        exposed = numpy.zeros(air.shape,dtype=numpy.uint8)
-        exposed[:,:-1,:] |= (tr[:,:-1,:] | air[:,1:,:])<<7 #up
-        exposed[:,1:,:] |= (tr[:,1:,:] | air[:,:-1,:])<<6 #down
-        exposed[1:,:,:] |= (tr[1:,:,:] | air[:-1,:,:])<<5 #left
-        exposed[:-1,:,:] |= (tr[:-1,:,:] | air[1:,:,:])<<4 #right
-        exposed[:,:,:-1] |= (tr[:,:,:-1] | air[:,:,1:])<<3 #forward
-        exposed[:,:,1:] |= (tr[:,:,1:] | air[:,:,:-1])<<2 #back
-        self.exposed = exposed*(self.blocks>0)
+        # Face exposure booleans: up, down, left, right, front, back
+        exposed_faces = numpy.zeros(self.blocks.shape + (6,), dtype=bool)
+        exposed_faces[:,:-1,:,0] = air[:,1:,:]   # up
+        exposed_faces[:,1:,:,1] = air[:,:-1,:]   # down
+        exposed_faces[1:,:,:,2] = air[:-1,:,:]   # left
+        exposed_faces[:-1,:,:,3] = air[1:,:,:]   # right
+        exposed_faces[:,:,:-1,4] = air[:,:,1:]   # front
+        exposed_faces[:,:,1:,5] = air[:,:,:-1]   # back
+        self.exposed_faces = exposed_faces & solid[..., None]
 
-        #first compute the air blocks that are directly exposed
-        #to light from above
-        direct_lit = numpy.cumproduct(air[:,::-1,:], axis=1)[:,::-1,:]>0
-        unlit = (~direct_lit) & tr #& (self.exposed>0)
+        # Flood-fill lighting (skylight + optional block emitters), vectorized relaxation
+        light = numpy.zeros(self.blocks.shape, dtype=numpy.float32)
+        decay = config.LIGHT_DECAY
+        top_y = self.blocks.shape[1] - 1
+        # Skylight vertical pass (no decay straight down until blocked)
+        for x in range(self.blocks.shape[0]):
+            for z in range(self.blocks.shape[2]):
+                for y in range(top_y, -1, -1):
+                    if air[x, y, z]:
+                        light[x, y, z] = 1.0
+                    else:
+                        break
+        # Block light emitters
+        if config.BLOCK_LIGHT_LEVELS:
+            for bid, lvl in config.BLOCK_LIGHT_LEVELS.items():
+                emitters = numpy.argwhere(self.blocks == bid)
+                for ex, ey, ez in emitters:
+                    light[ex, ey, ez] = max(light[ex, ey, ez], float(lvl))
+
+        # Relax until convergence or max iterations
+        for _ in range(64):
+            neighbor_max = numpy.zeros_like(light)
+            # +x
+            neighbor_max[:-1,:,:] = numpy.maximum(neighbor_max[:-1,:,:], light[1:,:,:])
+            # -x
+            neighbor_max[1:,:,:] = numpy.maximum(neighbor_max[1:,:,:], light[:-1,:,:])
+            # +y
+            neighbor_max[:,:-1,:] = numpy.maximum(neighbor_max[:,:-1,:], light[:,1:,:])
+            # -y
+            neighbor_max[:,1:,:] = numpy.maximum(neighbor_max[:,1:,:], light[:,:-1,:])
+            # +z
+            neighbor_max[:,:,:-1] = numpy.maximum(neighbor_max[:,:,:-1], light[:,:,1:])
+            # -z
+            neighbor_max[:,:,1:] = numpy.maximum(neighbor_max[:,:,1:], light[:,:,:-1])
+            new_light = numpy.where(air, numpy.maximum(light, neighbor_max - decay), 0.0)
+            if numpy.array_equal(new_light, light):
+                break
+            light = new_light
+        self.light = light
 
         ##TODO: For more even light, calculate a separate light value for the 24 vertices not the 6 faces
-        unlit_pos = SECTOR_ARRAY[unlit[1:-1,1:-1,1:-1]] + [1,1,1] ##TODO: FILTER OUT EDGES
-        lit = numpy.array(direct_lit, dtype = numpy.float32)
-        for i in range(16): #propagate light up to 16 blocks, light level falls at each step
-            if unlit_pos.shape[0]==0:
-                break
-            #find all unlit blocks that neighbor a lit block and give them a light value
-            z,y,x = unlit_pos.T ##TODO: don't really understand why axes need to be reversed
-            for f in FACES:
-                z1,y1,x1 = (unlit_pos+f).T ##TODO: don't really understand why axes need to be reversed
-                b = lit[x1,y1,z1]*0.75
-                a = lit[x,y,z]
-                lit[x,y,z] = a + (a<b)*(b-a)
-            #now filter to remaining unlit blocks
-            unlit_pos = unlit_pos[lit[x,y,z] == 0]
-        #now we mark the block faces that are exposed to a lit air block
-        exposed_light = numpy.zeros(lit.shape+(6,),dtype=numpy.float32)
-        exposed_light[:,:-1,:,0] = lit[:,1:,:] #up -- was 7
-        exposed_light[:,1:,:,1] = lit[:,:-1,:] #down -- was 6
-        exposed_light[1:,:,:,2] = lit[:-1,:,:] #left -- ...
-        exposed_light[:-1,:,:,3] = lit[1:,:,:] #right
-        exposed_light[:,:,:-1,4] = lit[:,:,1:] #forward
-        exposed_light[:,:,1:,5] = lit[:,:,:-1] #back
+        exposed_light = numpy.zeros(self.blocks.shape+(6,),dtype=numpy.float32)
+        exposed_light[:,:-1,:,0] = light[:,1:,:] # up
+        exposed_light[:,1:,:,1] = light[:,:-1,:] # down
+        exposed_light[1:,:,:,2] = light[:-1,:,:] # left
+        exposed_light[:-1,:,:,3] = light[1:,:,:] # right
+        exposed_light[:,:,:-1,4] = light[:,:,1:] # front
+        exposed_light[:,:,1:,5] = light[:,:,:-1] # back
         self.exposed_light = exposed_light
 
     def _calc_vertex_data(self,position):
         self._calc_exposed_faces()
-        exposed = self.exposed[1:-1,:,1:-1]
+        # interior (skip padding) shapes: (SECTOR_SIZE, SECTOR_HEIGHT, SECTOR_SIZE, 6)
+        exposed_faces = self.exposed_faces[1:-1,:,1:-1]
         exposed_light = self.exposed_light[1:-1,:,1:-1]
-        sh = exposed.shape
-        exposed = exposed.swapaxes(0,2).reshape(sh[0]*sh[1]*sh[2]) ##TODO: don't really understand why axes need to be reversed
-        exposed_light = exposed_light.swapaxes(0,2).reshape(sh[0]*sh[1]*sh[2],6)
-        egz = exposed>0
-        pos = SECTOR_GRID[egz] + position
-        exposed = exposed[egz]
-        exposed_light = exposed_light[egz]
-        exposed = numpy.unpackbits(exposed[:,numpy.newaxis],axis=1)
-        exposed = numpy.array(exposed,dtype=bool)
-        exposed = exposed[:,:6]
-        p = (pos - numpy.array(position)).T
-        b = self.blocks[1:-1,:,1:-1][p[0],p[1],p[2]]
-        texture_data = BLOCK_TEXTURES[b]
-        color_data = numpy.array(BLOCK_COLORS[b]*(0.025 + 0.975*exposed_light[:,:,numpy.newaxis]),dtype = numpy.int32)
-        normal_data = numpy.tile(BLOCK_NORMALS, (len(b),1,4))#*exposed_light[:,:,numpy.newaxis]
-        vertex_data = 0.5*BLOCK_VERTICES[b] + numpy.tile(pos, 4)[:,numpy.newaxis,:]
 
-        v = vertex_data[exposed].ravel()
-        t = texture_data[exposed].ravel()
-        n = normal_data[exposed].ravel()
-        c = color_data[exposed].ravel()
-        count = len(v)/3
+        sx, sy, sz, _ = exposed_faces.shape
+        face_mask = exposed_faces.reshape(sx*sy*sz, 6)
+        light_flat = exposed_light.reshape(sx*sy*sz, 6)
+
+        block_mask = face_mask.any(axis=1)
+        if not block_mask.any():
+            self.vt_data = (0, [], [], [], [])
+            return
+
+        pos = SECTOR_GRID[block_mask] + position  # (N,3)
+        face_mask = face_mask[block_mask]
+        light_flat = light_flat[block_mask]
+
+        b = self.blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
+
+        verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos[:,None,None,:]).astype(numpy.float32)
+        tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+        light = light_flat[:, :, None, None]  # (N,6,1,1)
+        colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
+        ambient = config.AMBIENT_LIGHT
+        colors = numpy.clip(colors_base*(ambient + (1.0-ambient)*light), 0, 255)
+        normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
+
+        v = verts[face_mask].reshape(-1,3).ravel()
+        t = tex[face_mask].reshape(-1,2).ravel()
+        n = normals[face_mask].reshape(-1,3).ravel()
+        c = colors[face_mask].reshape(-1,3).ravel()
+        count = len(v)//3
 
         self.vt_data = (count, v, t, n, c)
 

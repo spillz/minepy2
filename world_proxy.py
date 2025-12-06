@@ -73,20 +73,40 @@ class SectorProxy(object):
                 print('deleting vt',self.position)
                 self.vt.delete()
             (count, v, t, n, c) = self.vt_data
-            self.vt = self.batch.add(count, gl.GL_QUADS, self.group,
-                ('v3f/static', v.copy()),
-                ('t2f/static', t.copy()),
-                ('n3f/static', n.copy()),
-                ('c3B/static', c.copy()))
+            # Convert quads to triangles for core profile and build a shader-driven vertex list
+            quad_verts = numpy.array(v, dtype='f4').reshape(-1, 4, 3)
+            quad_tex = numpy.array(t, dtype='f4').reshape(-1, 4, 2)
+            quad_norm = numpy.array(n, dtype='f4').reshape(-1, 4, 3)
+            quad_col = numpy.array(c, dtype='f4').reshape(-1, 4, 3)
+            order = [0, 1, 2, 0, 2, 3]
+            tri_verts = quad_verts[:, order, :].reshape(-1, 3)
+            tri_tex = quad_tex[:, order, :].reshape(-1, 2)
+            tri_norm = quad_norm[:, order, :].reshape(-1, 3)
+            tri_col = quad_col[:, order, :].reshape(-1, 3)
+            tri_count = len(tri_verts)
+            self.vt = self.model.program.vertex_list(
+                tri_count,
+                gl.GL_TRIANGLES,
+                batch=self.batch,
+                group=self.group,
+                position=('f', tri_verts.ravel().astype('f4')),
+                tex_coords=('f', tri_tex.ravel().astype('f4')),
+                normal=('f', tri_norm.ravel().astype('f4')),
+                color=('f', tri_col.ravel().astype('f4')),
+            )
             self.vt_data = None
 
 
 class ModelProxy(object):
 
-    def __init__(self):
+    def __init__(self, program):
 
         # A TextureGroup manages an OpenGL texture.
-        self.group = TextureGroup(image.load(TEXTURE_PATH).get_texture())
+        texture = image.load(TEXTURE_PATH).get_texture()
+        self.program = program
+        shader_group = pyglet.graphics.ShaderGroup(self.program)
+        # Bind texture via TextureGroup under the shader group.
+        self.group = TextureGroup(texture, parent=shader_group, order=0)
         self.unused_batches = []
 
         # The world is stored in sector chunks.
@@ -101,12 +121,31 @@ class ModelProxy(object):
 
         loader_server_pipe = None
         self.server = None
-        if config.SERVER_IP is not None:
-            print ('Starting server on %s'%(config.SERVER_IP,))
-            self.server = server_connection.start_server_connection(config.SERVER_IP)
-            loader_server_pipe = self.server.loader_pipe
-        print ('Starting sector loader')
-        self.loader = world_loader.start_loader(loader_server_pipe)
+        if config.DEBUG_SINGLE_BLOCK:
+            # Create a single sector with one visible block for debugging.
+            batch = self.get_batch()
+            s = SectorProxy((0,0,0), batch, self.group, self, shown=True)
+            s.blocks[:] = 0
+            cx, cy, cz = SECTOR_SIZE//2, SECTOR_HEIGHT//2, SECTOR_SIZE//2
+            block_id = 1  # dirt
+            s.blocks[cx+1, cy, cz+1] = block_id
+            vt_data = self._build_block_vt(block_id, numpy.array([cx, cy, cz], dtype=numpy.float32))
+            s.vt_data = vt_data
+            s.check_show()
+            self.sectors[s.position] = s
+            self.loader = None
+            print(f"[DEBUG] Single block spawned at world coords {(cx, cy, cz)}")
+        else:
+            if config.SERVER_IP is not None:
+                print ('Starting server on %s'%(config.SERVER_IP,))
+                self.server = server_connection.start_server_connection(config.SERVER_IP)
+                loader_server_pipe = self.server.loader_pipe
+            print ('Starting sector loader')
+            self.loader = world_loader.start_loader(loader_server_pipe)
+
+    def set_matrices(self, projection, view):
+        self.program['u_projection'] = numpy.array(projection, dtype='f4')
+        self.program['u_view'] = numpy.array(view, dtype='f4')
 
     def get_batch(self):
         if len(self.unused_batches)>0:
@@ -145,15 +184,11 @@ class ModelProxy(object):
     def remove_block(self, position, notify_server = True):
         self.add_block(position, 0)
 
-    def draw(self, position, (center, radius)):
-        #t = time.time()
+    def draw(self, position, frustum_circle):
         draw_invalid = True
-        for s in self.sectors:
-            spos = numpy.array([s[0], s[2]])+SECTOR_SIZE/2
-            if ((center-spos)**2).sum()>(radius+SECTOR_SIZE/2)**2:
-                continue
-            if self.sectors[s].shown:
-                draw_invalid = self.sectors[s].draw(draw_invalid)
+        for s in self.sectors.values():
+            if s.shown:
+                draw_invalid = s.draw(draw_invalid)
 
     def neighbor_sectors(self, pos):
         """
@@ -227,11 +262,26 @@ class ModelProxy(object):
                 if msg == 'connected':
                     self.player, self.players = data
                 if msg == 'player_set_block':
-                    print data
+                    print(data)
                     pos, block = data
                     self.add_block(pos, block, False)
             except EOFError:
                 print('server returned EOF')
+
+    def _build_block_vt(self, block_id, pos):
+        verts = (0.5*BLOCK_VERTICES[block_id][:6].reshape(6,4,3) + pos[None,None,:]).astype(numpy.float32)
+        tex = BLOCK_TEXTURES[block_id][:6].reshape(6,4,2).astype(numpy.float32)
+        normals = numpy.broadcast_to(BLOCK_NORMALS[:,None,:], (6,4,3)).astype(numpy.float32)
+        colors = BLOCK_COLORS[block_id][:6].reshape(6,4,3).astype(numpy.float32)
+        face_mask = numpy.ones((6,4), dtype=bool)
+        v = verts[face_mask].reshape(-1,3).ravel().astype('f4')
+        t = tex[face_mask].reshape(-1,2).ravel().astype('f4')
+        n = normals[face_mask].reshape(-1,3).ravel().astype('f4')
+        c = colors[face_mask].reshape(-1,3).ravel().astype('f4')
+        count = len(v)//3
+        if config.DEBUG_SINGLE_BLOCK:
+            print("[DEBUG] block vertex sample:", v[:18], "tex:", t[:8])
+        return count, v, t, n, c
 
     def _update_sector(self, spos, b, v):
         if b is not None:
@@ -268,7 +318,7 @@ class ModelProxy(object):
         x, y, z = position
         dx, dy, dz = vector
         previous = None
-        for _ in xrange(max_distance * m):
+        for _ in range(max_distance * m):
             key = normalize((x, y, z))
             if key != previous:
                 b = self[key]
