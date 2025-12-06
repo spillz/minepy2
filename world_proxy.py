@@ -125,6 +125,7 @@ class ModelProxy(object):
         self.active_loader_request = [None, None]
         self.n_requests = 0
         self.n_responses = 0
+        self._skip_active_sector = False  # allow dropping a long-running sector load when edits arrive
 
         loader_server_pipe = None
         self.server = None
@@ -288,6 +289,11 @@ class ModelProxy(object):
                 if nspos != spos and nspos in self.sectors:
                     nblocks = self.sectors[nspos].blocks
                     sector_data.append((nspos, nblocks))
+            # Purge queued background sector loads so edits jump the line.
+            self.loader_requests = [req for req in self.loader_requests if req[0] != 'sector_blocks']
+            # If the loader is busy with a sector load, mark it as skippable once it returns.
+            if self.active_loader_request[0] == 'sector_blocks':
+                self._skip_active_sector = True
             self.loader_requests.insert(0,['set_block', [notify_server, position, block, sector_data]])
 
     def remove_block(self, position, notify_server = True):
@@ -328,9 +334,12 @@ class ModelProxy(object):
         return getattr(mapgen, 'GLOBAL_WATER_LEVEL', getattr(mapgen, 'WATER_LEVEL', 70))
 
     def draw(self, position, frustum_circle):
+        """Draw only sectors intersecting the current view frustum projection."""
         draw_invalid = True
         for s in self.sectors.values():
-            if s.shown:
+            visible = self._sector_overlaps_frustum(s.position, frustum_circle)
+            s.shown = visible
+            if visible:
                 draw_invalid = s.draw(draw_invalid)
 
     def neighbor_sectors(self, pos):
@@ -343,7 +352,47 @@ class ModelProxy(object):
             if npos in self.sectors:
                 yield x[0],x[1],self.sectors[npos]
 
-    def update_sectors(self, old, new):
+    def _sector_overlaps_frustum(self, sector_pos, frustum_circle):
+        """Return True if the sector AABB intersects the 2D frustum circle."""
+        if not frustum_circle:
+            return True
+        (center, rad) = frustum_circle
+        cx, cz = center
+        min_x = sector_pos[0] - 1
+        max_x = sector_pos[0] + SECTOR_SIZE + 1
+        min_z = sector_pos[2] - 1
+        max_z = sector_pos[2] + SECTOR_SIZE + 1
+        # Clamp circle center to sector bounds to find closest point
+        nearest_x = min(max(cx, min_x), max_x)
+        nearest_z = min(max(cz, min_z), max_z)
+        dx = cx - nearest_x
+        dz = cz - nearest_z
+        return (dx * dx + dz * dz) <= (rad * rad)
+
+    def _sector_priority(self, ref_sector, sector_pos, player_pos, look_vec):
+        """Weight sector load priority by distance and look direction."""
+        dist = (sector_pos[0] - ref_sector[0]) ** 2 + (sector_pos[2] - ref_sector[2]) ** 2
+        if player_pos is None or look_vec is None:
+            return float(dist)
+        view = numpy.array([look_vec[0], look_vec[2]], dtype=float)
+        vnorm = numpy.linalg.norm(view)
+        if vnorm < 1e-5:
+            return float(dist)
+        view /= vnorm
+        sector_center = numpy.array([sector_pos[0] + SECTOR_SIZE / 2.0,
+                                     sector_pos[2] + SECTOR_SIZE / 2.0],
+                                    dtype=float)
+        to_sector = sector_center - numpy.array([player_pos[0], player_pos[2]], dtype=float)
+        tnorm = numpy.linalg.norm(to_sector)
+        if tnorm < 1e-5:
+            facing = 1.0
+        else:
+            to_sector /= tnorm
+            facing = float(numpy.dot(view, to_sector))
+        angle_penalty = 1.0 - facing  # 0 front, 2 back
+        return float(dist + angle_penalty * (SECTOR_SIZE ** 2))
+
+    def update_sectors(self, old, new, player_pos=None, look_vec=None):
         """
         the observer has moved from sector old to new
         """
@@ -357,15 +406,17 @@ class ModelProxy(object):
                     pos = numpy.array([new[0],new[1],new[2]]) \
                         + numpy.array([dx*SECTOR_SIZE,dy,dz*SECTOR_SIZE])
                     pos = sectorize(pos)
-                    dist = (pos[0]-new[0])**2 + (pos[2]-new[2])**2
+                    priority = self._sector_priority(new, pos, player_pos, look_vec)
                     if pos not in self.sectors and pos != self.active_loader_request[1]:
-                        self.update_sectors_pos.append((dist,pos))
+                        self.update_sectors_pos.append((priority,pos))
                 for s in list(self.sectors):
                     if abs(new[0] - s[0])>LOADED_SECTORS*SECTOR_SIZE or abs(new[2] - s[2]) > LOADED_SECTORS*SECTOR_SIZE:
                         print('dropping sector',s,len(self.sectors))
                         self.release_sector(self.sectors[s])
                 self.update_sectors_pos = sorted(self.update_sectors_pos)
-            if len(self.update_sectors_pos)>0:
+            # If player edits are queued, defer background loads until they flush.
+            pending_edit = any(r[0] == 'set_block' for r in self.loader_requests)
+            if not pending_edit and len(self.update_sectors_pos)>0:
                 self.active_loader_request = self.update_sectors_pos.pop(0)
                 spos = self.active_loader_request[1]
                 print('queueing sector',spos)
@@ -389,7 +440,12 @@ class ModelProxy(object):
                     self.n_responses = self.n_requests
                     self.active_loader_request = [None, None]
                     print('took', time.time()-self.loader_time)
-                    self._update_sector(spos1, b1, v1)
+                    if self._skip_active_sector:
+                        # Drop long-running background work when edits demand priority.
+                        print('skipping sector result due to pending edits', spos1)
+                        self._skip_active_sector = False
+                    else:
+                        self._update_sector(spos1, b1, v1)
                 if msg == 'sector_blocks2':
                     self.n_responses = self.n_requests
                     self.active_loader_request = [None, None]

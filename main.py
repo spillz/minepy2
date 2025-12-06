@@ -214,7 +214,8 @@ class Window(pyglet.window.Window):
 #        self.model.process_queue()
         sector = util.sectorize(self.position)
         if self.model.loader is not None:
-            self.model.update_sectors(self.sector, sector)
+            look_vec = self.get_sight_vector()
+            self.model.update_sectors(self.sector, sector, self.position, look_vec)
             self.sector = sector
         m = 20
         dt = min(dt, 0.2)
