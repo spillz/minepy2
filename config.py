@@ -3,6 +3,7 @@ import math
 DIST = 128
 
 TICKS_PER_SEC = 60
+TARGET_FPS = 60
 
 # Size of sectors used to ease block loading.
 SECTOR_SIZE = 32 #width and depth

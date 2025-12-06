@@ -120,6 +120,17 @@ class Window(pyglet.window.Window):
             x=10, y=self.height - 10, anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
 
+        # Target frame pacing and local FPS tracking (not dependent on pyglet internals).
+        desired_fps = getattr(config, 'TARGET_FPS', None)
+        self.target_fps = desired_fps or self._detect_refresh_rate() or 60
+        self._frame_times = deque(maxlen=120)
+        self._last_frame_time = time.perf_counter()
+        # Use pyglet's clock-based limiter; avoid double-limiting with manual sleeps.
+        try:
+            pyglet.clock.set_fps_limit(self.target_fps)
+        except Exception:
+            pass
+
         # This call schedules the `update()` method to be called
         # TICKS_PER_SEC. This is the main game event loop.
         pyglet.clock.schedule_interval(self.update, 1.0 / TICKS_PER_SEC)
@@ -471,14 +482,17 @@ class Window(pyglet.window.Window):
         """Return projection and view matrices using pyglet Mat4 (column-major)."""
         width, height = self.get_size()
         aspect = width / float(height)
-        fovy_rad = math.radians(30.0)
         near, far = 0.1, 512.0
         projection = Mat4.perspective_projection(aspect, near, far, 65)
         x, y, z = self.position
         dx, dy, dz = self.get_sight_vector()
         eye = Vec3(x, y, z)
-        target = Vec3(x + dx, y + dy, z + dz)
-        view = Mat4.look_at(eye, target, Vec3(0.0, 1.0, 0.0))
+        forward = Vec3(dx, dy, dz)
+        # Avoid the look_at up vector becoming collinear with the view direction
+        # when the player looks straight up/down, which would produce a bad view matrix.
+        up = Vec3(0.0, 1.0, 0.0) if abs(dy) < 0.99 else Vec3(0.0, 0.0, 1.0)
+        target = eye + forward
+        view = Mat4.look_at(eye, target, up)
         return projection, view
 
     def set_3d(self):
@@ -521,6 +535,11 @@ class Window(pyglet.window.Window):
         """ Called by pyglet to draw the canvas.
 
         """
+        frame_start = time.perf_counter()
+        dt = frame_start - self._last_frame_time
+        self._last_frame_time = frame_start
+        self._frame_times.append(dt)
+
         self.clear()
         self.set_3d()
         self.model.draw(self.position,self.get_frustum_circle())
@@ -538,8 +557,29 @@ class Window(pyglet.window.Window):
         """
         x, y, z = self.position
         rx, ry = self.rotation
-        self.label.text = '(%.2f, %.2f, %.2f) rot(%.1f, %.1f)' % (x, y, z, rx, ry)
+        fps = self._current_fps()
+        self.label.text = 'FPS: %.1f  (%.2f, %.2f, %.2f) rot(%.1f, %.1f)' % (fps, x, y, z, rx, ry)
         self.label.draw()
+
+    def _current_fps(self):
+        """Return a smoothed FPS based on recent draw intervals."""
+        if not self._frame_times:
+            return 0.0
+        total = sum(self._frame_times)
+        return len(self._frame_times) / total if total > 0 else 0.0
+
+    def _detect_refresh_rate(self):
+        """Try to read the current monitor refresh rate for frame capping."""
+        try:
+            screen = self.display.get_default_screen()
+            mode = screen.get_mode()
+            rate = getattr(mode, 'refresh_rate', None)
+            if rate:
+                return rate
+        except Exception:
+            print('Refresh rate not detected')
+            pass
+        return None
 
     def draw_focused_block(self):
         """ Draw edges around the block under the crosshairs for placement feedback. """
@@ -621,7 +661,7 @@ def main():
         else:
             config.SERVER_IP = arg
         print('Using server IP address',config.SERVER_IP,':',config.SERVER_PORT)
-    window = Window(width=300, height=200, caption='Pyglet', resizable=True)
+    window = Window(width=300, height=200, caption='Pyglet', resizable=True, vsync=True)
     # Hide the mouse cursor and prevent the mouse from leaving the window.
     window.set_exclusive_mouse(True)
     setup()
