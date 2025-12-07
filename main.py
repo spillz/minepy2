@@ -559,7 +559,26 @@ class Window(pyglet.window.Window):
         x, y, z = self.position
         rx, ry = self.rotation
         fps = self._current_fps()
-        self.label.text = 'FPS: %.1f  (%.2f, %.2f, %.2f) rot(%.1f, %.1f)' % (fps, x, y, z, rx, ry)
+        # Void probe: count solid blocks along reticle until next air.
+        sight = self.get_sight_vector()
+        void_dist = self.model.measure_void_distance(self.position, sight, max_distance=64)
+        if void_dist is None:
+            void_text = 'N/A'
+        elif void_dist >= 64:
+            void_text = '>=64'
+        else:
+            void_text = str(void_dist)
+        self.label.text = 'FPS: %.1f  (%.2f, %.2f, %.2f) rot(%.1f, %.1f) void %s' % (fps, x, y, z, rx, ry, void_text)
+        # Light backdrop to keep text readable on bright backgrounds.
+        pad_x = 6
+        pad_y = 3
+        bg_width = self.label.content_width + pad_x * 2
+        bg_height = self.label.content_height + pad_y * 2
+        bg_x = self.label.x - pad_x
+        bg_y = self.label.y - bg_height
+        label_bg = shapes.Rectangle(bg_x, bg_y, bg_width, bg_height, color=(255, 255, 255))
+        label_bg.opacity = 120  # semi-transparent
+        label_bg.draw()
         self.label.draw()
 
     def _current_fps(self):

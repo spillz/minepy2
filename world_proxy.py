@@ -527,6 +527,77 @@ class ModelProxy(object):
             x, y, z = x + dx / m, y + dy / m, z + dz / m
         return None, None
 
+    def measure_void_distance(self, position, vector, max_distance=64):
+        """Return the number of solid blocks after the first hit until air along a ray.
+
+        Starts from the current sight line, finds the first solid block, then steps
+        block-by-block along the ray direction until the first air/void cell or until
+        max_distance is exceeded. Returns None when no initial hit is found.
+        """
+        hit, _ = self.hit_test(position, vector, max_distance=max_distance)
+        if not hit:
+            return None
+
+        hx, hy, hz = hit
+        dx, dy, dz = vector
+        length = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if length == 0:
+            return None
+        dirx, diry, dirz = dx / length, dy / length, dz / length
+
+        # Start at center of hit block to avoid immediately re-hitting it.
+        cellx, celly, cellz = hx, hy, hz
+        px, py, pz = hx + 0.5, hy + 0.5, hz + 0.5
+        step_x = 1 if dirx >= 0 else -1
+        step_y = 1 if diry >= 0 else -1
+        step_z = 1 if dirz >= 0 else -1
+
+        invx = 1.0 / dirx if dirx != 0 else float("inf")
+        invy = 1.0 / diry if diry != 0 else float("inf")
+        invz = 1.0 / dirz if dirz != 0 else float("inf")
+
+        t_max_x = ((cellx + (1 if step_x > 0 else 0)) - px) * invx if invx != float("inf") else float("inf")
+        t_max_y = ((celly + (1 if step_y > 0 else 0)) - py) * invy if invy != float("inf") else float("inf")
+        t_max_z = ((cellz + (1 if step_z > 0 else 0)) - pz) * invz if invz != float("inf") else float("inf")
+
+        t_delta_x = abs(invx)
+        t_delta_y = abs(invy)
+        t_delta_z = abs(invz)
+
+        traveled_blocks = 0
+        t = 0.0
+        max_steps = int(math.ceil(max_distance)) + 2
+
+        for _ in range(max_steps):
+            # advance to next voxel boundary
+            if t_max_x < t_max_y:
+                if t_max_x < t_max_z:
+                    cellx += step_x
+                    t = t_max_x
+                    t_max_x += t_delta_x
+                else:
+                    cellz += step_z
+                    t = t_max_z
+                    t_max_z += t_delta_z
+            else:
+                if t_max_y < t_max_z:
+                    celly += step_y
+                    t = t_max_y
+                    t_max_y += t_delta_y
+                else:
+                    cellz += step_z
+                    t = t_max_z
+                    t_max_z += t_delta_z
+
+            if t > max_distance:
+                break
+            block = self[(cellx, celly, cellz)]
+            if block == 0 or block is None:
+                return traveled_blocks
+            traveled_blocks += 1
+
+        return traveled_blocks
+
     def exposed(self, position):
         """ Returns False is given `position` is surrounded on all 6 sides by
         blocks, True otherwise.
