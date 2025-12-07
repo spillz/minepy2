@@ -540,10 +540,14 @@ class Window(pyglet.window.Window):
         dt = frame_start - self._last_frame_time
         self._last_frame_time = frame_start
         self._frame_times.append(dt)
-
+        # Allow a small slice of the frame for mesh uploads; keep rendering priority.
+        frame_budget = 1.0 / self.target_fps if self.target_fps else 1.0 / 60.0
+        # upload_budget = 0.3 * frame_budget
+        upload_budget = max(0.5/self.target_fps, 0.5 * frame_budget)
         self.clear()
         self.set_3d()
-        self.model.draw(self.position,self.get_frustum_circle())
+        # Defer mesh uploads until after rendering so we know exactly how much time remains.
+        self.model.draw(self.position, self.get_frustum_circle(), frame_start, upload_budget, defer_uploads=True)
         self.set_2d()
         self.draw_label()
         self.draw_reticle()
@@ -551,6 +555,11 @@ class Window(pyglet.window.Window):
         self.draw_focused_block()
         if self._is_underwater():
             self.draw_underwater_overlay()
+        # Use leftover budget to upload meshes at the end of the frame.
+        elapsed = time.perf_counter() - frame_start
+        remaining_upload_budget = max(0.0, upload_budget - elapsed)
+        if remaining_upload_budget > 0:
+            self.model.process_pending_uploads(frame_start, remaining_upload_budget)
 
     def draw_label(self):
         """ Draw the label in the top left of the screen.

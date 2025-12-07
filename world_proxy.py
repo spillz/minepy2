@@ -3,6 +3,7 @@ import math
 import itertools
 import time
 import numpy
+from collections import deque
 import multiprocessing.connection
 import multiprocessing.sharedctypes
 import multiprocessing
@@ -51,8 +52,8 @@ class SectorProxy(object):
         self.vt_data = None
         self.invalidate_vt = False
 
-    def draw(self, draw_invalid = True):
-        if draw_invalid and self.invalidate_vt:
+    def draw(self, draw_invalid = True, allow_upload = True):
+        if allow_upload and draw_invalid and self.invalidate_vt:
             self.check_show()
             self.invalidate_vt = False
             draw_invalid = False
@@ -115,6 +116,8 @@ class ModelProxy(object):
         # Bind texture via TextureGroup under the shader group.
         self.group = TextureGroup(texture, parent=shader_group, order=0)
         self.unused_batches = []
+        self.pending_uploads = deque()
+        self.pending_upload_set = set()
 
         # The world is stored in sector chunks.
         self.sectors = {}
@@ -150,6 +153,27 @@ class ModelProxy(object):
                 loader_server_pipe = self.server.loader_pipe
             print ('Starting sector loader')
             self.loader = world_loader.start_loader(loader_server_pipe)
+
+    def _has_budget(self, frame_start, upload_budget):
+        if frame_start is None or upload_budget is None:
+            return True
+        return (time.perf_counter() - frame_start) < upload_budget
+
+    def _queue_upload(self, sector):
+        if sector not in self.pending_upload_set:
+            self.pending_upload_set.add(sector)
+            self.pending_uploads.append(sector)
+
+    def process_pending_uploads(self, frame_start=None, upload_budget=None):
+        """Upload queued sector vertex data while budget remains."""
+        while self.pending_uploads and self._has_budget(frame_start, upload_budget):
+            s = self.pending_uploads.popleft()
+            self.pending_upload_set.discard(s)
+            if s.vt_data is not None:
+                s.check_show(add_to_batch=True)
+            elif s.invalidate_vt:
+                s.check_show(add_to_batch=True)
+                s.invalidate_vt = False
 
     def _compute_exposed(self, blocks):
         air = (BLOCK_SOLID[blocks] == 0)
@@ -333,14 +357,45 @@ class ModelProxy(object):
     def _water_level(self):
         return getattr(mapgen, 'GLOBAL_WATER_LEVEL', getattr(mapgen, 'WATER_LEVEL', 70))
 
-    def draw(self, position, frustum_circle):
-        """Draw only sectors intersecting the current view frustum projection."""
+    def draw(self, position, frustum_circle, frame_start=None, upload_budget=None, defer_uploads=False):
+        """Draw only sectors intersecting the current view frustum projection. Limit or defer GPU uploads to respect frame budget."""
         draw_invalid = True
+
+        def budget_ok():
+            return self._has_budget(frame_start, upload_budget)
+
         for s in self.sectors.values():
             visible = self._sector_overlaps_frustum(s.position, frustum_circle)
             s.shown = visible
-            if visible:
-                draw_invalid = s.draw(draw_invalid)
+            if not visible:
+                continue
+
+            uploaded = False
+            # Try to upload fresh vt_data if allowed; otherwise queue it.
+            if s.vt_data is not None:
+                if not defer_uploads and budget_ok():
+                    s.check_show(add_to_batch=True)
+                    self.pending_upload_set.discard(s)
+                    uploaded = True
+                else:
+                    self._queue_upload(s)
+            # Handle invalidated buffers (edge sync) within the budget or queue.
+            elif draw_invalid and s.invalidate_vt:
+                if not defer_uploads and budget_ok():
+                    s.check_show(add_to_batch=True)
+                    s.invalidate_vt = False
+                    uploaded = True
+                else:
+                    self._queue_upload(s)
+
+            if uploaded:
+                draw_invalid = False
+            # Draw existing batch; skip uploads here to honor the budget.
+            draw_invalid = s.draw(draw_invalid, allow_upload=False)
+
+        # Drain pending uploads while budget remains (only when not deferring).
+        if not defer_uploads:
+            self.process_pending_uploads(frame_start, upload_budget)
 
     def neighbor_sectors(self, pos):
         """
