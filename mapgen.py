@@ -444,36 +444,86 @@ class BiomeGenerator:
             lay_line(xs, zs, ys)
 
     def _carve_caves(self, position, blocks, elevation, cliff_mask):
-        """Carve tunnel-like caves in cliff regions using 3D noise."""
+        """Carve caves whose roofs sit between bedrock+20 and the terrain surface."""
         if not cliff_mask.any():
             return
-        height_pref = self.cave_height_noise(position)            # (X,Z)
-        density2d = 0.5 + 0.5 * self.cave_density_noise(position) # 0..1 (X,Z)
-        height_fine = self.cave_height_fine(position)             # (X,Z)
-        y_grid = numpy.arange(SECTOR_HEIGHT)[:, None, None]        # (H,1,1)
-        elev_grid = elevation[None, :, :]                          # (1,X,Z)
-        cliff3d = cliff_mask[None, :, :]                           # (1,X,Z)
-        depth_mask = y_grid < (elev_grid - 2)
-        surface_outlet = y_grid >= (elev_grid - self.cave_surface_outlet_depth)
 
-        # Cave roof: 0..20 below surface with coarse+fine variation (0 enables surface openings).
-        roof_offset = 20 * (0.5 + 0.5 * height_pref) + 6 * height_fine  # allow slight negative for openings
-        roof = elev_grid - roof_offset[None, :, :]
-        roof = numpy.clip(roof, 2, SECTOR_HEIGHT - 5)
-        above_ground = roof >= elev_grid - 2
+        # Height selection: absolute roof height drawn from noise; discard columns where the target roof would poke above ground.
+        height_pref = self.cave_height_noise(position)             # (X,Z)
+        height_fine = self.cave_height_fine(position)              # (X,Z)
+        height01 = numpy.clip(0.5 + 0.5 * height_pref + 0.25 * height_fine, 0.0, 1.0)
+        min_roof = 20.0
+        max_roof = SECTOR_HEIGHT - 6.0
+        ground_cap = numpy.clip(elevation, min_roof, max_roof)
+        # Map roof height into [min_roof, ground height]; if ground is below min_roof we skip that column.
+        target_roof = min_roof + height01 * (ground_cap - min_roof)
 
-        # Depth (air gap) 4..18 blocks, shallow cases ignored.
-        depth = 4 + 14 * density2d  # 4..18
-        shallow = depth < 3.5
-        floor = roof - depth[None, :, :]
-        floor = numpy.clip(floor, 2, SECTOR_HEIGHT - 2)
+        roof_limit = ground_cap
+        has_space = target_roof <= roof_limit  # skip slices where the noise would rise above ground
+        if not has_space.any():
+            return
+        # roof = numpy.where(has_space, numpy.minimum(target_roof, roof_limit), 0.0)
 
-        vertical_mask = (y_grid <= roof) & (y_grid >= floor)
-        density_gate = density2d > 0.5
-        density3d = density_gate[None, :, :]
+        roof_offset = 18.0 * height01  # ~6..16 blocks below surface
+        roof = numpy.clip(ground_cap - roof_offset, min_roof, max_roof)
 
-        carve = vertical_mask & depth_mask & density3d & cliff3d & (~above_ground) & (~shallow[None, :, :])
-        carve |= (surface_outlet & density3d & cliff3d & (~above_ground))
+
+        density2d = 0.5 + 0.5 * self.cave_density_noise(position)  # 0..1 (X,Z)
+        # Smooth density laterally to encourage wider, connected patches.
+        density2d = (density2d +
+                     numpy.roll(density2d, 1, 0) + numpy.roll(density2d, -1, 0) +
+                     numpy.roll(density2d, 1, 1) + numpy.roll(density2d, -1, 1)) / 5.0
+        depth = 4.0 + 12.0 * density2d                             # 4..16-ish
+        floor = numpy.maximum(min_roof - 1.0, roof - depth)
+
+        y_grid = numpy.arange(SECTOR_HEIGHT, dtype=float)[:, None, None]  # (H,1,1)
+        elev_grid = elevation[None, :, :]                                 # (1,X,Z)
+        cliff3d = cliff_mask[None, :, :]                                  # (1,X,Z)
+        land3d = (elevation > WATER_LEVEL)[None, :, :]                    # avoid flooding seafloor caves
+        area_mask = cliff3d | (density2d[None, :, :] > 0.6)               # allow some non-cliff caves where dense
+
+        vertical_mask = (y_grid >= floor[None, :, :]) & (y_grid <= roof[None, :, :])
+        below_surface = y_grid < (elev_grid - 2.0)
+        density_gate = density2d > 0.35
+        column_gate = has_space[None, :, :] & land3d
+
+        carve = vertical_mask & below_surface & density_gate[None, :, :] & column_gate & area_mask
+
+        # Occasional surface outlets only when the roof is comfortably below the surface.
+        outlet_band = (y_grid >= (elev_grid - self.cave_surface_outlet_depth)) & (y_grid <= (elev_grid - 1.0))
+        deep_roof = (elevation - roof) > 2.5
+        outlet_gate = density2d > 0.7
+        carve |= outlet_band & outlet_gate[None, :, :] & column_gate & cliff3d & deep_roof[None, :, :]
+
+        # Small lateral dilation to connect nearby passages while respecting height masks.
+        for _ in range(2):
+            neighbor = numpy.zeros_like(carve, dtype=bool)
+            neighbor[:, 1:, :] |= carve[:, :-1, :]
+            neighbor[:, :-1, :] |= carve[:, 1:, :]
+            neighbor[:, :, 1:] |= carve[:, :, :-1]
+            neighbor[:, :, :-1] |= carve[:, :, 1:]
+            spread = neighbor & vertical_mask & below_surface & density_gate[None, :, :] & column_gate & area_mask
+            carve |= spread
+
+        print("carve shape", carve.shape)  # expect (H, X, Z)
+        print("carve voxels", int(carve.sum()))
+        print("carve columns", int(carve.any(axis=0).sum()))  # number of XZ columns that got any cave voxels
+        print("cliff columns", int(cliff_mask.sum()))
+        print("land columns", int((elevation > WATER_LEVEL).sum()))
+        print("has_space columns", int(has_space.sum()))
+        print("density>gate columns", int((density2d > 0.52).sum()))
+        carved_cols = carve.any(axis=0)
+        roof_c = roof[carved_cols]
+        floor_c = floor[carved_cols]
+        if carved_cols.any():
+            print(
+                "CARVED roof min/max/mean",
+                float(roof_c.min()), float(roof_c.max()), float(roof_c.mean()),
+                "floor min/max/mean",
+                float(floor_c.min()), float(floor_c.max()), float(floor_c.mean()),
+            )
+        total_voxels = carve.size
+        print("carve fraction", carve.sum() / total_voxels)
         blocks[carve] = 0
 
     def _place_ores(self, position, blocks, elevation, cliff_mask):
