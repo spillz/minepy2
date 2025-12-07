@@ -28,7 +28,7 @@ from blocks import TEXTURE_PATH
 from config import DIST, TICKS_PER_SEC, FLYING_SPEED, GRAVITY, JUMP_SPEED, \
         MAX_JUMP_HEIGHT, PLAYER_HEIGHT, TERMINAL_VELOCITY, TICKS_PER_SEC, \
         WALKING_SPEED
-from blocks import BLOCK_ID, BLOCK_TEXTURES, BLOCK_VERTICES, BLOCK_COLORS, BLOCK_SOLID
+from blocks import BLOCK_ID, BLOCK_TEXTURES, BLOCK_VERTICES, BLOCK_COLORS, BLOCK_SOLID, BLOCK_PICKER_FACE
 WATER = BLOCK_ID['Water']
 
 
@@ -447,7 +447,9 @@ class Window(pyglet.window.Window):
         if self.inventory_item is not None:
             self.inventory_item.delete()
         # Draw a textured preview of the selected block using the atlas.
-        t = BLOCK_TEXTURES[BLOCK_ID[self.block]][0]  # first face tex coords
+        block_id = BLOCK_ID[self.block]
+        picker_face = int(BLOCK_PICKER_FACE[block_id])
+        t = BLOCK_TEXTURES[block_id][picker_face]  # configured face tex coords
         tex = self.texture_atlas.get_texture()
         x0, y0, x1, y1 = t[0]*tex.width, t[1]*tex.height, t[4]*tex.width, t[5]*tex.height
         region = tex.get_region(x=int(x0), y=int(y0), width=int(x1 - x0), height=int(y1 - y0))

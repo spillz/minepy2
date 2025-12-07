@@ -17,6 +17,8 @@ class Block(object):
     colors = white
     texture_fn = tex_coords
     vertices = cb_v
+    # Which face to show in the HUD picker; defaults to top (0).
+    picker_face = 0
 
 class Decoration(object):
     vertices = de_v
@@ -72,6 +74,7 @@ class Pumpkin(Block):
 class JackOLantern(Block):
     name = 'Jack O\'Lantern'
     coords = ((6, 9), (6, 8), (8, 8), (6,8))
+    picker_face = 2  # show the carved face instead of the top
 
 class Rose(Decoration, Block):
     name = 'Rose'
@@ -165,6 +168,8 @@ BLOCK_COLORS = numpy.array([white] + [x.colors for x in BLOCKS])
 BLOCK_TEXTURES = numpy.array([tex_coords((0,0),(0,0),(0,0))] + [tex_coords(*x.coords) for x in BLOCKS],dtype = numpy.float32)/4
 BLOCK_VERTICES = numpy.array([cb_v]+[x.vertices for x in BLOCKS])
 BLOCK_SOLID = numpy.array([False]+[x.solid for x in BLOCKS], dtype = numpy.uint8)
+# Preferred HUD picker face per block id (0 is air).
+BLOCK_PICKER_FACE = numpy.array([0] + [getattr(x, 'picker_face', 0) for x in BLOCKS], dtype=numpy.uint8)
 
 # Block light emitters (0-1 brightness). Defined here so IDs stay in sync.
 BLOCK_LIGHT_LEVELS = {
