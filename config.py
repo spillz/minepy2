@@ -37,10 +37,8 @@ LOADER_PORT = 20230
 DEBUG_SINGLE_BLOCK = False
 
 # Lighting settings
-LIGHT_DECAY = 0.75  # per-step attenuation for flood-fill lighting
-AMBIENT_LIGHT = 0.2  # minimum light level (0-1 range)
-# Optional block light emitters: map block id -> light level (0-1)
-BLOCK_LIGHT_LEVELS = {}
+LIGHT_DECAY = 0.1  # per-step attenuation for flood-fill lighting
+AMBIENT_LIGHT = 0.1  # minimum light level (0-1 range)
 
 # Terrain generation
 USE_EXPERIMENTAL_BIOME_GEN = True

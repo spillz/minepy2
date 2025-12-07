@@ -165,3 +165,8 @@ BLOCK_COLORS = numpy.array([white] + [x.colors for x in BLOCKS])
 BLOCK_TEXTURES = numpy.array([tex_coords((0,0),(0,0),(0,0))] + [tex_coords(*x.coords) for x in BLOCKS],dtype = numpy.float32)/4
 BLOCK_VERTICES = numpy.array([cb_v]+[x.vertices for x in BLOCKS])
 BLOCK_SOLID = numpy.array([False]+[x.solid for x in BLOCKS], dtype = numpy.uint8)
+
+# Block light emitters (0-1 brightness). Defined here so IDs stay in sync.
+BLOCK_LIGHT_LEVELS = {
+    BLOCK_ID["Jack O'Lantern"]: 1.0,
+}

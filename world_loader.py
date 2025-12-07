@@ -20,7 +20,7 @@ import sys
 import config
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS, SERVER_IP, SERVER_PORT, LOADER_IP, LOADER_PORT
 from util import normalize, sectorize, FACES, cube_v, cube_v2
-from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH
+from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
 import mapgen
 
 import logging
@@ -104,7 +104,7 @@ class WorldLoader(object):
                     sector_block_delta = self.db.get_sector_data(self.pos)
                 self._initialize(self.pos, sector_block_delta)
                 self._calc_vertex_data(self.pos)
-                cpipe.send_bytes(pickle.dumps(['sector_blocks',[self.pos, self.blocks, self.vt_data]],-1))
+                cpipe.send_bytes(pickle.dumps(['sector_blocks',[self.pos, self.blocks, self.vt_data, self.light]],-1))
             if msg == 'set_block':
                 notify_server, pos, block_id, sector_data = data
                 sector_result = []
@@ -112,7 +112,7 @@ class WorldLoader(object):
                     self.blocks = blocks
                     self.set_block(pos, spos, block_id)
                     self._calc_vertex_data(spos)
-                    sector_result.append((spos, self.blocks, self.vt_data))
+                    sector_result.append((spos, self.blocks, self.vt_data, self.light))
                 cpipe.send_bytes(pickle.dumps(['sector_blocks2',sector_result],-1))
                 if spipe is not None:
                     if notify_server:
@@ -161,28 +161,51 @@ class WorldLoader(object):
                     else:
                         break
         # Block light emitters
-        if config.BLOCK_LIGHT_LEVELS:
-            for bid, lvl in config.BLOCK_LIGHT_LEVELS.items():
+        if BLOCK_LIGHT_LEVELS:
+            for bid, lvl in BLOCK_LIGHT_LEVELS.items():
                 emitters = numpy.argwhere(self.blocks == bid)
                 for ex, ey, ez in emitters:
                     light[ex, ey, ez] = max(light[ex, ey, ez], float(lvl))
 
         # Relax until convergence or max iterations
+        diag_decay = decay * math.sqrt(2.0)
+        corner_decay = decay * math.sqrt(3.0)
         for _ in range(64):
             neighbor_max = numpy.zeros_like(light)
-            # +x
-            neighbor_max[:-1,:,:] = numpy.maximum(neighbor_max[:-1,:,:], light[1:,:,:])
-            # -x
-            neighbor_max[1:,:,:] = numpy.maximum(neighbor_max[1:,:,:], light[:-1,:,:])
-            # +y
-            neighbor_max[:,:-1,:] = numpy.maximum(neighbor_max[:,:-1,:], light[:,1:,:])
-            # -y
-            neighbor_max[:,1:,:] = numpy.maximum(neighbor_max[:,1:,:], light[:,:-1,:])
-            # +z
-            neighbor_max[:,:,:-1] = numpy.maximum(neighbor_max[:,:,:-1], light[:,:,1:])
-            # -z
-            neighbor_max[:,:,1:] = numpy.maximum(neighbor_max[:,:,1:], light[:,:,:-1])
-            new_light = numpy.where(air, numpy.maximum(light, neighbor_max - decay), 0.0)
+            # Axis neighbors
+            neighbor_max[:-1,:,:] = numpy.maximum(neighbor_max[:-1,:,:], light[1:,:,:] - decay)   # +x
+            neighbor_max[1:,:,:]  = numpy.maximum(neighbor_max[1:,:,:],  light[:-1,:,:] - decay)  # -x
+            neighbor_max[:,:-1,:] = numpy.maximum(neighbor_max[:,:-1,:], light[:,1:,:] - decay)   # +y
+            neighbor_max[:,1:,:]  = numpy.maximum(neighbor_max[:,1:,:],  light[:,:-1,:] - decay)  # -y
+            neighbor_max[:,:,:-1] = numpy.maximum(neighbor_max[:,:,:-1], light[:,:,1:] - decay)   # +z
+            neighbor_max[:,:,1:]  = numpy.maximum(neighbor_max[:,:,1:],  light[:,:,:-1] - decay)  # -z
+            # Edge diagonals (sqrt(2) cost)
+            neighbor_max[:-1,:-1,:] = numpy.maximum(neighbor_max[:-1,:-1,:], light[1:,1:,:] - diag_decay)
+            neighbor_max[:-1,1:,:]  = numpy.maximum(neighbor_max[:-1,1:,:],  light[1:,:-1,:] - diag_decay)
+            neighbor_max[1:,:-1,:]  = numpy.maximum(neighbor_max[1:,:-1,:],  light[:-1,1:,:] - diag_decay)
+            neighbor_max[1:,1:,:]   = numpy.maximum(neighbor_max[1:,1:,:],   light[:-1,:-1,:] - diag_decay)
+
+            neighbor_max[:-1,:,:-1] = numpy.maximum(neighbor_max[:-1,:,:-1], light[1:,:,1:] - diag_decay)
+            neighbor_max[:-1,:,1:]  = numpy.maximum(neighbor_max[:-1,:,1:],  light[1:,:,:-1] - diag_decay)
+            neighbor_max[1:,:,:-1]  = numpy.maximum(neighbor_max[1:,:,:-1],  light[:-1,:,1:] - diag_decay)
+            neighbor_max[1:,:,1:]   = numpy.maximum(neighbor_max[1:,:,1:],   light[:-1,:,:-1] - diag_decay)
+
+            neighbor_max[:,:-1,:-1] = numpy.maximum(neighbor_max[:,:-1,:-1], light[:,1:,1:] - diag_decay)
+            neighbor_max[:,1:,:-1]  = numpy.maximum(neighbor_max[:,1:,:-1],  light[:,:-1,1:] - diag_decay)
+            neighbor_max[:,:-1,1:]  = numpy.maximum(neighbor_max[:,:-1,1:],  light[:,1:,:-1] - diag_decay)
+            neighbor_max[:,1:,1:]   = numpy.maximum(neighbor_max[:,1:,1:],   light[:,:-1,:-1] - diag_decay)
+            # Corner diagonals (sqrt(3) cost)
+            neighbor_max[:-1,:-1,:-1] = numpy.maximum(neighbor_max[:-1,:-1,:-1], light[1:,1:,1:] - corner_decay)
+            neighbor_max[:-1,:-1,1:]  = numpy.maximum(neighbor_max[:-1,:-1,1:],  light[1:,1:,:-1] - corner_decay)
+            neighbor_max[:-1,1:,:-1]  = numpy.maximum(neighbor_max[:-1,1:,:-1],  light[1:,:-1,1:] - corner_decay)
+            neighbor_max[:-1,1:,1:]   = numpy.maximum(neighbor_max[:-1,1:,1:],   light[1:,:-1,:-1] - corner_decay)
+
+            neighbor_max[1:,:-1,:-1] = numpy.maximum(neighbor_max[1:,:-1,:-1], light[:-1,1:,1:] - corner_decay)
+            neighbor_max[1:,:-1,1:]  = numpy.maximum(neighbor_max[1:,:-1,1:],  light[:-1,1:,:-1] - corner_decay)
+            neighbor_max[1:,1:,:-1]  = numpy.maximum(neighbor_max[1:,1:,:-1],  light[:-1,:-1,1:] - corner_decay)
+            neighbor_max[1:,1:,1:]   = numpy.maximum(neighbor_max[1:,1:,1:],   light[:-1,:-1,:-1] - corner_decay)
+
+            new_light = numpy.where(air, numpy.maximum(light, neighbor_max), 0.0)
             if numpy.array_equal(new_light, light):
                 break
             light = new_light

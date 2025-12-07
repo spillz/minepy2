@@ -27,7 +27,7 @@ import server_connection
 import config
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS
 from util import normalize, sectorize, FACES, cube_v, cube_v2
-from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH
+from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
 import mapgen
 import numpy
 
@@ -46,6 +46,7 @@ class SectorProxy(object):
         # A Batch is a collection of vertex lists for batched rendering.
         self.batch = batch
         self.blocks = numpy.zeros((SECTOR_SIZE+2,SECTOR_HEIGHT,SECTOR_SIZE+2),dtype='u2')
+        self.light = None  # full (padded) light grid from loader
         self.shown = shown
         # Mapping from position to a pyglet `VertextList` for all shown blocks.
         self.vt = None
@@ -187,17 +188,102 @@ class ModelProxy(object):
         exposed_faces[:,:,1:,5] = air[:,:,:-1]   # back
         exposed_faces = exposed_faces & solid[..., None]
 
+        # Recompute baked lighting locally (skylight + optional block emitters)
+        light = numpy.zeros(blocks.shape, dtype=numpy.float32)
+        decay = getattr(config, 'LIGHT_DECAY', 0.75)
+        top_y = blocks.shape[1] - 1
+        # Skylight pass: no decay straight down until blocked.
+        for x in range(blocks.shape[0]):
+            for z in range(blocks.shape[2]):
+                for y in range(top_y, -1, -1):
+                    if air[x, y, z]:
+                        light[x, y, z] = 1.0
+                    else:
+                        break
+        # Block light emitters
+        block_emitters = BLOCK_LIGHT_LEVELS or {}
+        for bid, lvl in block_emitters.items():
+            emitters = numpy.argwhere(blocks == bid)
+            for ex, ey, ez in emitters:
+                light[ex, ey, ez] = max(light[ex, ey, ez], float(lvl))
+
+        diag_decay = decay * math.sqrt(2.0)
+        corner_decay = decay * math.sqrt(3.0)
+        for _ in range(64):
+            neighbor_max = numpy.zeros_like(light)
+            # Axis neighbors
+            neighbor_max[:-1,:,:] = numpy.maximum(neighbor_max[:-1,:,:], light[1:,:,:] - decay)   # +x
+            neighbor_max[1:,:,:]  = numpy.maximum(neighbor_max[1:,:,:],  light[:-1,:,:] - decay)  # -x
+            neighbor_max[:,:-1,:] = numpy.maximum(neighbor_max[:,:-1,:], light[:,1:,:] - decay)   # +y
+            neighbor_max[:,1:,:]  = numpy.maximum(neighbor_max[:,1:,:],  light[:,:-1,:] - decay)  # -y
+            neighbor_max[:,:,:-1] = numpy.maximum(neighbor_max[:,:,:-1], light[:,:,1:] - decay)   # +z
+            neighbor_max[:,:,1:]  = numpy.maximum(neighbor_max[:,:,1:],  light[:,:,:-1] - decay)  # -z
+            # Edge diagonals (sqrt(2) cost)
+            neighbor_max[:-1,:-1,:] = numpy.maximum(neighbor_max[:-1,:-1,:], light[1:,1:,:] - diag_decay)
+            neighbor_max[:-1,1:,:]  = numpy.maximum(neighbor_max[:-1,1:,:],  light[1:,:-1,:] - diag_decay)
+            neighbor_max[1:,:-1,:]  = numpy.maximum(neighbor_max[1:,:-1,:],  light[:-1,1:,:] - diag_decay)
+            neighbor_max[1:,1:,:]   = numpy.maximum(neighbor_max[1:,1:,:],   light[:-1,:-1,:] - diag_decay)
+
+            neighbor_max[:-1,:,:-1] = numpy.maximum(neighbor_max[:-1,:,:-1], light[1:,:,1:] - diag_decay)
+            neighbor_max[:-1,:,1:]  = numpy.maximum(neighbor_max[:-1,:,1:],  light[1:,:,:-1] - diag_decay)
+            neighbor_max[1:,:,:-1]  = numpy.maximum(neighbor_max[1:,:,:-1],  light[:-1,:,1:] - diag_decay)
+            neighbor_max[1:,:,1:]   = numpy.maximum(neighbor_max[1:,:,1:],   light[:-1,:,:-1] - diag_decay)
+
+            neighbor_max[:,:-1,:-1] = numpy.maximum(neighbor_max[:,:-1,:-1], light[:,1:,1:] - diag_decay)
+            neighbor_max[:,1:,:-1]  = numpy.maximum(neighbor_max[:,1:,:-1],  light[:,:-1,1:] - diag_decay)
+            neighbor_max[:,:-1,1:]  = numpy.maximum(neighbor_max[:,:-1,1:],  light[:,1:,:-1] - diag_decay)
+            neighbor_max[:,1:,1:]   = numpy.maximum(neighbor_max[:,1:,1:],   light[:,:-1,:-1] - diag_decay)
+            # Corner diagonals (sqrt(3) cost)
+            neighbor_max[:-1,:-1,:-1] = numpy.maximum(neighbor_max[:-1,:-1,:-1], light[1:,1:,1:] - corner_decay)
+            neighbor_max[:-1,:-1,1:]  = numpy.maximum(neighbor_max[:-1,:-1,1:],  light[1:,1:,:-1] - corner_decay)
+            neighbor_max[:-1,1:,:-1]  = numpy.maximum(neighbor_max[:-1,1:,:-1],  light[1:,:-1,1:] - corner_decay)
+            neighbor_max[:-1,1:,1:]   = numpy.maximum(neighbor_max[:-1,1:,1:],   light[1:,:-1,:-1] - corner_decay)
+
+            neighbor_max[1:,:-1,:-1] = numpy.maximum(neighbor_max[1:,:-1,:-1], light[:-1,1:,1:] - corner_decay)
+            neighbor_max[1:,:-1,1:]  = numpy.maximum(neighbor_max[1:,:-1,1:],  light[:-1,1:,:-1] - corner_decay)
+            neighbor_max[1:,1:,:-1]  = numpy.maximum(neighbor_max[1:,1:,:-1],  light[:-1,:-1,1:] - corner_decay)
+            neighbor_max[1:,1:,1:]   = numpy.maximum(neighbor_max[1:,1:,1:],   light[:-1,:-1,:-1] - corner_decay)
+
+            new_light = numpy.where(air, numpy.maximum(light, neighbor_max), 0.0)
+            if numpy.array_equal(new_light, light):
+                break
+            light = new_light
+
         exposed_light = numpy.zeros(blocks.shape+(6,),dtype=numpy.float32)
-        exposed_light[:,:-1,:,0] = 1.0
-        exposed_light[:,1:,:,1] = 1.0
-        exposed_light[1:,:,:,2] = 1.0
-        exposed_light[:-1,:,:,3] = 1.0
-        exposed_light[:,:,:-1,4] = 1.0
-        exposed_light[:,:,1:,5] = 1.0
+        exposed_light[:,:-1,:,0] = light[:,1:,:] # up
+        exposed_light[:,1:,:,1] = light[:,:-1,:] # down
+        exposed_light[1:,:,:,2] = light[:-1,:,:] # left
+        exposed_light[:-1,:,:,3] = light[1:,:,:] # right
+        exposed_light[:,:,:-1,4] = light[:,:,1:] # front
+        exposed_light[:,:,1:,5] = light[:,:,:-1] # back
         return exposed_faces, exposed_light
 
     def _recompute_vt(self, sector):
-        exposed_faces, exposed_light = self._compute_exposed(sector.blocks)
+        # Prefer loader-provided light field to avoid recomputing flood-fill on the client.
+        if sector.light is not None:
+            blocks = sector.blocks
+            light_full = sector.light
+            air = (BLOCK_SOLID[blocks] == 0)
+            solid = (blocks > 0) & (blocks != WATER)
+            exposed_faces = numpy.zeros(blocks.shape + (6,), dtype=bool)
+            exposed_faces[:,:-1,:,0] = air[:,1:,:]   # up
+            exposed_faces[:,1:,:,1] = air[:,:-1,:]   # down
+            exposed_faces[1:,:,:,2] = air[:-1,:,:]   # left
+            exposed_faces[:-1,:,:,3] = air[1:,:,:]   # right
+            exposed_faces[:,:,:-1,4] = air[:,:,1:]   # front
+            exposed_faces[:,:,1:,5] = air[:,:,:-1]   # back
+            exposed_faces = exposed_faces & solid[..., None]
+
+            exposed_light = numpy.zeros(blocks.shape+(6,),dtype=numpy.float32)
+            exposed_light[:,:-1,:,0] = light_full[:,1:,:] # up
+            exposed_light[:,1:,:,1] = light_full[:,:-1,:] # down
+            exposed_light[1:,:,:,2] = light_full[:-1,:,:] # left
+            exposed_light[:-1,:,:,3] = light_full[1:,:,:] # right
+            exposed_light[:,:,:-1,4] = light_full[:,:,1:] # front
+            exposed_light[:,:,1:,5] = light_full[:,:,:-1] # back
+        else:
+            exposed_faces, exposed_light = self._compute_exposed(sector.blocks)
+
         exposed_faces = exposed_faces[1:-1,:,1:-1]
         exposed_light = exposed_light[1:-1,:,1:-1]
 
@@ -219,7 +305,10 @@ class ModelProxy(object):
             verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos[:,None,None,:]).astype(numpy.float32)
             tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
-            colors = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
+            colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
+            ambient = getattr(config, 'AMBIENT_LIGHT', 0.0)
+            light = light_flat[:, :, None, None]  # (N,6,1,1)
+            colors = numpy.clip(colors_base * (ambient + (1.0 - ambient) * light), 0, 255)
             v = verts[face_mask].reshape(-1,3).ravel()
             t = tex[face_mask].reshape(-1,2).ravel()
             n = normals[face_mask].reshape(-1,3).ravel()
@@ -262,16 +351,28 @@ class ModelProxy(object):
                 # neighbor to the east
                 n.blocks[0,:,:] = sector.blocks[SECTOR_SIZE,:,:]
                 sector.blocks[SECTOR_SIZE+1,:,:] = n.blocks[1,:,:]
+                if n.light is not None and sector.light is not None:
+                    n.light[0,:,:] = sector.light[SECTOR_SIZE,:,:]
+                    sector.light[SECTOR_SIZE+1,:,:] = n.light[1,:,:]
             elif dx == -1:
                 n.blocks[SECTOR_SIZE+1,:,:] = sector.blocks[1,:,:]
                 sector.blocks[0,:,:] = n.blocks[SECTOR_SIZE,:,:]
+                if n.light is not None and sector.light is not None:
+                    n.light[SECTOR_SIZE+1,:,:] = sector.light[1,:,:]
+                    sector.light[0,:,:] = n.light[SECTOR_SIZE,:,:]
             if dz == 1:
                 # neighbor to the south (positive z)
                 n.blocks[:,:,0] = sector.blocks[:,:,SECTOR_SIZE]
                 sector.blocks[:,:,SECTOR_SIZE+1] = n.blocks[:,:,1]
+                if n.light is not None and sector.light is not None:
+                    n.light[:,:,0] = sector.light[:,:,SECTOR_SIZE]
+                    sector.light[:,:,SECTOR_SIZE+1] = n.light[:,:,1]
             elif dz == -1:
                 n.blocks[:,:,SECTOR_SIZE+1] = sector.blocks[:,:,1]
                 sector.blocks[:,:,0] = n.blocks[:,:,SECTOR_SIZE]
+                if n.light is not None and sector.light is not None:
+                    n.light[:,:,SECTOR_SIZE+1] = sector.light[:,:,1]
+                    sector.light[:,:,0] = n.light[:,:,SECTOR_SIZE]
             n.vt_data = None
             n.invalidate()
         sector.vt_data = None
@@ -491,7 +592,7 @@ class ModelProxy(object):
                 msg, data = self.loader.recv()
                 print('client received',msg)
                 if msg == 'sector_blocks':
-                    spos1, b1, v1 = data
+                    spos1, b1, v1, light1 = data
                     self.n_responses = self.n_requests
                     self.active_loader_request = [None, None]
                     print('took', time.time()-self.loader_time)
@@ -500,13 +601,13 @@ class ModelProxy(object):
                         print('skipping sector result due to pending edits', spos1)
                         self._skip_active_sector = False
                     else:
-                        self._update_sector(spos1, b1, v1)
+                        self._update_sector(spos1, b1, v1, light1)
                 if msg == 'sector_blocks2':
                     self.n_responses = self.n_requests
                     self.active_loader_request = [None, None]
                     print('took', time.time()-self.loader_time)
-                    for spos, b, v in data:
-                        self._update_sector(spos, b, v)
+                    for spos, b, v, light in data:
+                        self._update_sector(spos, b, v, light)
             except EOFError:
                 print('loader returned EOF')
 
@@ -537,18 +638,20 @@ class ModelProxy(object):
             print("[DEBUG] block vertex sample:", v[:18], "tex:", t[:8])
         return count, v, t, n, c
 
-    def _update_sector(self, spos, b, v):
+    def _update_sector(self, spos, b, v, light):
         if b is not None:
             if spos in self.sectors:
                 print('updating existing sector data',spos)
                 s = self.sectors[spos]
                 s.blocks[:,:,:] = b
+                s.light = light
                 s.vt_data = v
                 self._sync_edges_and_rebuild(s)
             else:
                 print('setting new sector data',spos)
                 s = SectorProxy(spos, self.get_batch(), self.group, self)
                 s.blocks[:,:,:] = b
+                s.light = light
                 s.vt_data = v
                 self.sectors[sectorize(spos)] = s
                 self._sync_edges_and_rebuild(s)
