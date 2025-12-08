@@ -412,21 +412,10 @@ class ModelProxy(object):
             face_norm = normals[face_mask_w].reshape(-1,4,3)
             face_col = colors[face_mask_w].reshape(-1,4,3)
 
-            rev_order = [0,3,2,1]
-            back_verts = face_verts[:, rev_order, :]
-            back_tex = face_tex[:, rev_order, :]
-            back_norm = -face_norm[:, rev_order, :]
-            back_col = face_col[:, rev_order, :]
-
-            all_verts = numpy.concatenate([face_verts, back_verts], axis=0).reshape(-1,3)
-            all_tex = numpy.concatenate([face_tex, back_tex], axis=0).reshape(-1,2)
-            all_norm = numpy.concatenate([face_norm, back_norm], axis=0).reshape(-1,3)
-            all_col = numpy.concatenate([face_col, back_col], axis=0).reshape(-1,3)
-
-            wv = all_verts.ravel()
-            wtcoords = all_tex.ravel()
-            wn = all_norm.ravel()
-            wc = all_col.ravel()
+            wv = face_verts.reshape(-1,3).ravel()
+            wtcoords = face_tex.reshape(-1,2).ravel()
+            wn = face_norm.reshape(-1,3).ravel()
+            wc = face_col.reshape(-1,3).ravel()
             water_count = len(wv) // 3
             water_data = (water_count, wv, wtcoords, wn, wc)
         else:
@@ -738,21 +727,10 @@ class ModelProxy(object):
             face_norm = normals[face_mask_w].reshape(-1,4,3)
             face_col = colors[face_mask_w].reshape(-1,4,3)
 
-            rev_order = [0,3,2,1]
-            back_verts = face_verts[:, rev_order, :]
-            back_tex = face_tex[:, rev_order, :]
-            back_norm = -face_norm[:, rev_order, :]
-            back_col = face_col[:, rev_order, :]
-
-            all_verts = numpy.concatenate([face_verts, back_verts], axis=0).reshape(-1,3)
-            all_tex = numpy.concatenate([face_tex, back_tex], axis=0).reshape(-1,2)
-            all_norm = numpy.concatenate([face_norm, back_norm], axis=0).reshape(-1,3)
-            all_col = numpy.concatenate([face_col, back_col], axis=0).reshape(-1,3)
-
-            wv = all_verts.ravel()
-            wtcoords = all_tex.ravel()
-            wn = all_norm.ravel()
-            wc = all_col.ravel()
+            wv = face_verts.reshape(-1,3).ravel()
+            wtcoords = face_tex.reshape(-1,2).ravel()
+            wn = face_norm.reshape(-1,3).ravel()
+            wc = face_col.reshape(-1,3).ravel()
             water_count = len(wv)//3
             water_data = (water_count, wv, wtcoords, wn, wc)
         else:
@@ -1006,11 +984,16 @@ class ModelProxy(object):
         self.program['u_water_pass'] = True
         gl.glEnable(gl.GL_BLEND)
         gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+        cull_enabled = gl.glIsEnabled(gl.GL_CULL_FACE)
+        if cull_enabled:
+            gl.glDisable(gl.GL_CULL_FACE)
         gl.glDepthMask(gl.GL_FALSE)  # depth test stays on; just stop writing so opaque depth survives
         for s in self.sectors.values():
             if s.shown:
                 s.draw_water()
         gl.glDepthMask(gl.GL_TRUE)
+        if cull_enabled:
+            gl.glEnable(gl.GL_CULL_FACE)
         self.program['u_water_pass'] = False
 
     def neighbor_sectors(self, pos):

@@ -368,21 +368,10 @@ class WorldLoader(object):
             face_norm = normals[face_mask_w].reshape(-1,4,3)
             face_col = colors[face_mask_w].reshape(-1,4,3)
 
-            rev_order = [0,3,2,1]
-            back_verts = face_verts[:, rev_order, :]
-            back_tex = face_tex[:, rev_order, :]
-            back_norm = -face_norm[:, rev_order, :]
-            back_col = face_col[:, rev_order, :]
-
-            all_verts = numpy.concatenate([face_verts, back_verts], axis=0).reshape(-1,3)
-            all_tex = numpy.concatenate([face_tex, back_tex], axis=0).reshape(-1,2)
-            all_norm = numpy.concatenate([face_norm, back_norm], axis=0).reshape(-1,3)
-            all_col = numpy.concatenate([face_col, back_col], axis=0).reshape(-1,3)
-
-            wv = all_verts.ravel()
-            wtcoords = all_tex.ravel()
-            wn = all_norm.ravel()
-            wc = all_col.ravel()
+            wv = face_verts.reshape(-1,3).ravel()
+            wtcoords = face_tex.reshape(-1,2).ravel()
+            wn = face_norm.reshape(-1,3).ravel()
+            wc = face_col.reshape(-1,3).ravel()
             water_count = len(wv)//3
             water_data = (water_count, wv, wtcoords, wn, wc)
 
