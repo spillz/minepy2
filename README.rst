@@ -1,86 +1,37 @@
-minepy
+Minepy
 =======
 
-.. image:: screenshots/minepy.png
+Minepy is a fork of a fork of fogleman's simple Minecraft-inspired voxel world demo (https://github.com/fogleman/minecraft) written in Python. 12 years ago, I started working on the original fork with the help of my 6 and 7 year old sons and abruptly stopped for various reasons. On an AI-inspired impulse, I have decided to revisit it in late 2025. In that time, Python 2 was long ago replaced by Python 3, Pyglet 1 (fixed function graphic pipeline) by Pylet 2 (Shaders!), and the world has moved on from Minecraft clones! 
+
+.. image:: screenshots/scene1.png
    :align: center
    :scale: 50 %
 
+Why revisit?
+============
 
-A fork of fogleman's simple Minecraft-inspired demo (https://github.com/fogleman/minecraft) written in Python being developed for and with the 6 and 7 year olds.
+The best part of Minecraft is the ability to build unique blocky worlds. In my view this is even more fun if you can do it in a high-level programming language like Python. Check out mapgen.py. This is just the start.
 
-Known Issues
-------------
-
-1. When moving around you will see framerate drops because terrain generation slows down the drawing speed 
-   due to python's Global Interpreter Lock (I am working on multiprocessing version that will make the 
-   framerate more consistent on reasonably modern hardware)
-2. Lighting is very simple, no shadows or dark areas of the terrain yet. (The "light" branch has a very rudimentary
-   and incomplete attempt at implementing terrain shadows.)
-3. Changed sectors are saved to a RocksDB database (via rocksdb-py) for persistence and Windows compatibility.
-
-Technical
------------
-
-Uses pyglet to render the graphics and numpy for its powerful and fast array processing. 
-Has much better performance than fogleman's original version and world size is unlimited.
-
-Currently uses minecraft style textures and you can easily add new block types. Take a look at blocks.py
-
-Experimental biome map generator
---------------------------------
-
-An alternative terrain generator adds blended biomes (plains-forward, forest, desert, highlands, canyon lines), varied elevation including plateaus and cliffs, sparser walkable forests, and occasional cabins using the existing block set. To try it, set ``USE_EXPERIMENTAL_BIOME_GEN = True`` in ``config.py``; the legacy generator remains the default.
-
-Performance toggle
-------------------
-
-Set ``BIOME_FAST_MODE = True`` in ``config.py`` (default when the experimental generator is enabled) to skip heavy caves/ores and limit structures/trees for faster loading. Turn it off if you prefer the full feature set and can tolerate slower generation.
-
+.. image:: screenshots/scene2.png
+   :align: center
+   :scale: 50 %
 
 How to Run (Python 3)
 =====================
 
-    pip install pyglet
-    pip install numpy
-    pip install rocksdb-py
-    git clone https://github.com/spillz/minepy.git
-    cd minepy
+This should work on windows with any recent version of Python 3. For mac/linux you might need a different rocksdb package. Assuming you have Python and Git already installed:
+
+    pip install pyglet numpy rocksdb-py
+    git clone https://github.com/spillz/minepy2.git
+    cd minepy2
     python main.py
 
-Mac
-----
-
-On Mac OS X, you may have an issue with running Pyglet in 64-bit mode. Try running Python in 32-bit mode first:
-
-    arch -i386 python main.py
-
-If that doesn't work, set Python to run in 32-bit mode by default:
-
-    defaults write com.apple.versioner.python Prefer-32-Bit -bool yes
-
-This assumes you are using the OS X default Python.  Works on Lion 10.7 with the default Python 2.7, and may work on other versions too.  Please raise an issue if not.
-
-Or try Pyglet 1.2 alpha, which supports 64-bit mode:
-
-    pip install https://pyglet.googlecode.com/files/pyglet-1.2alpha1.tar.gz
-
-If you don't have pip or git
---------------------------------
-
-For pip:
-
-- Mac or Linux: install with `sudo easy_install pip` (Mac or Linux) - or (Linux) find a package called something like 'python-pip' in your package manager.
-- Windows: [install Distribute then Pip](http://stackoverflow.com/a/12476379/992887) using the linked .MSI installers.
-
-For git:
-
-- Mac: install [Homebrew](http://mxcl.github.com/homebrew/) first, then `brew install git`.
-- Windows or Linux: see [Installing Git](http://git-scm.com/book/en/Getting-Started-Installing-Git) from the _Pro Git_ book.
-
-See the [wiki](https://github.com/fogleman/Minecraft/wiki) for this project to install Python, and other tips.
+There are constants in config.py that you can edit to tune the game and experiment with things.
 
 How to Play
-================
+===========
+
+This is not a survival game (yet). There is no day/night cycle (yet), no mobs (yet), no player avatars (yet). Just explore and build.
 
 Moving
 
@@ -94,40 +45,41 @@ Moving
 
 Building
 
-Use the number keys to select the type of block to create:
-    - 1: dirt with grass
-    - 2: grass
-    - 3: sand
-    - etc
+- Use the number keys or mouse wheel to select the type of block to create:
 - Mouse left-click: remove block
 - Mouse right-click: create block
+- Note that Jack O'Lanterns will provide a source of light in dark places
 
 Quitting
 
 - ESC: release mouse, then close window
 
+.. image:: screenshots/scene3.png
+   :align: center
+   :scale: 50 %
+
+Anything else?
+==============
+
+There is a server that runs in the background. This can also run standalone (see server.py) and that will allow you to host a multiplayer game on a LAN. I'll document that properly one of these days.
+
+I'm also working on a JavaScript version. Why? Mostly because it runs in the browser. Also because JavaScript runs a lot faster than Python so it will be an interesting comparison.
+
+This is how the game looked 12 years ago.
+
+.. image:: screenshots/minepy.png
+   :align: center
+   :scale: 50 %
+
 Licenses
 ========
 
-Source Code 
+Source Code: MIT License
 
-Copyright (C) 2014 by Damien Moore and licensed GPLv3
-(Approximately 90 percent of the source code)
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+Copyright (C) 2025 by Damien Moore
 
 Original Sources Copyright (C) 2013 Michael Fogleman
+
 (Primarily some of the code in the main.py and util.py modules)
 
     Permission is hereby granted, free of charge, to any person obtaining
