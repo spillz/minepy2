@@ -26,7 +26,7 @@ import world_loader
 import server_connection
 import config
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS
-from util import normalize, sectorize, FACES, cube_v, cube_v2
+from util import normalize, sectorize, FACES, cube_v, cube_v2, compute_vertex_ao
 from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
 import mapgen
 import numpy
@@ -76,6 +76,7 @@ class SectorProxy(object):
             if self.vt != None:
                 print('deleting vt',self.position)
                 self.vt.delete()
+                self.vt = None
             (count, v, t, n, c) = self.vt_data
             # Convert quads to triangles for core profile and build a shader-driven vertex list
             quad_verts = numpy.array(v, dtype='f4').reshape(-1, 4, 3)
@@ -259,6 +260,7 @@ class ModelProxy(object):
         return exposed_faces, exposed_light
 
     def _recompute_vt(self, sector):
+        ao_strength = getattr(config, 'AO_STRENGTH', 0.0)
         # Prefer loader-provided light field to avoid recomputing flood-fill on the client.
         if sector.light is not None:
             blocks = sector.blocks
@@ -291,6 +293,14 @@ class ModelProxy(object):
         face_mask = exposed_faces.reshape(sx*sy*sz, 6)
         light_flat = exposed_light.reshape(sx*sy*sz, 6)
         block_mask = face_mask.any(axis=1)
+        ao = None
+        if getattr(config, 'AO_ENABLED', True) and block_mask.any():
+            ao = compute_vertex_ao(
+                BLOCK_SOLID[sector.blocks].astype(bool),
+                (sx, sy, sz),
+                ao_strength,
+                block_mask=block_mask,
+            )
         v = numpy.array([], dtype=numpy.float32)
         t = numpy.array([], dtype=numpy.float32)
         n = numpy.array([], dtype=numpy.float32)
@@ -308,7 +318,12 @@ class ModelProxy(object):
             colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
             ambient = getattr(config, 'AMBIENT_LIGHT', 0.0)
             light = light_flat[:, :, None, None]  # (N,6,1,1)
-            colors = numpy.clip(colors_base * (ambient + (1.0 - ambient) * light), 0, 255)
+            colors_lit = colors_base * (ambient + (1.0 - ambient) * light)
+            if ao is not None:
+                ao_flat = numpy.where(face_mask[..., None], ao, 1.0)
+                colors_lit = colors_lit * ao_flat[..., None]
+
+            colors = numpy.clip(colors_lit, 0, 255)
             v = verts[face_mask].reshape(-1,3).ravel()
             t = tex[face_mask].reshape(-1,2).ravel()
             n = normals[face_mask].reshape(-1,3).ravel()
@@ -389,8 +404,16 @@ class ModelProxy(object):
             return pyglet.graphics.Batch()
 
     def release_sector(self, sector):
+        # Drop any pending uploads for this sector before freeing GPU buffers.
+        self.pending_upload_set.discard(sector)
+        try:
+            self.pending_uploads.remove(sector)
+        except ValueError:
+            pass
         if sector.vt is not None:
             sector.vt.delete()
+            sector.vt = None
+        sector.vt_data = None
         self.unused_batches.append(sector.batch)
         del self.sectors[sector.position]
 
@@ -776,4 +799,3 @@ class ModelProxy(object):
         if self.server is not None:
             print('closing server connection')
             self.server.send(['quit',0])
-

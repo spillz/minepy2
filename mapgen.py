@@ -505,25 +505,25 @@ class BiomeGenerator:
             spread = neighbor & vertical_mask & below_surface & density_gate[None, :, :] & column_gate & area_mask
             carve |= spread
 
-        print("carve shape", carve.shape)  # expect (H, X, Z)
-        print("carve voxels", int(carve.sum()))
-        print("carve columns", int(carve.any(axis=0).sum()))  # number of XZ columns that got any cave voxels
-        print("cliff columns", int(cliff_mask.sum()))
-        print("land columns", int((elevation > WATER_LEVEL).sum()))
-        print("has_space columns", int(has_space.sum()))
-        print("density>gate columns", int((density2d > 0.52).sum()))
-        carved_cols = carve.any(axis=0)
-        roof_c = roof[carved_cols]
-        floor_c = floor[carved_cols]
-        if carved_cols.any():
-            print(
-                "CARVED roof min/max/mean",
-                float(roof_c.min()), float(roof_c.max()), float(roof_c.mean()),
-                "floor min/max/mean",
-                float(floor_c.min()), float(floor_c.max()), float(floor_c.mean()),
-            )
-        total_voxels = carve.size
-        print("carve fraction", carve.sum() / total_voxels)
+        # print("carve shape", carve.shape)  # expect (H, X, Z)
+        # print("carve voxels", int(carve.sum()))
+        # print("carve columns", int(carve.any(axis=0).sum()))  # number of XZ columns that got any cave voxels
+        # print("cliff columns", int(cliff_mask.sum()))
+        # print("land columns", int((elevation > WATER_LEVEL).sum()))
+        # print("has_space columns", int(has_space.sum()))
+        # print("density>gate columns", int((density2d > 0.52).sum()))
+        # carved_cols = carve.any(axis=0)
+        # roof_c = roof[carved_cols]
+        # floor_c = floor[carved_cols]
+        # if carved_cols.any():
+        #     print(
+        #         "CARVED roof min/max/mean",
+        #         float(roof_c.min()), float(roof_c.max()), float(roof_c.mean()),
+        #         "floor min/max/mean",
+        #         float(floor_c.min()), float(floor_c.max()), float(floor_c.mean()),
+        #     )
+        # total_voxels = carve.size
+        # print("carve fraction", carve.sum() / total_voxels)
         blocks[carve] = 0
 
     def _place_ores(self, position, blocks, elevation, cliff_mask):

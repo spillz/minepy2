@@ -19,7 +19,7 @@ import sys
 # local imports
 import config
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS, SERVER_IP, SERVER_PORT, LOADER_IP, LOADER_PORT
-from util import normalize, sectorize, FACES, cube_v, cube_v2
+from util import normalize, sectorize, FACES, cube_v, cube_v2, compute_vertex_ao
 from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
 import mapgen
 
@@ -249,7 +249,20 @@ class WorldLoader(object):
             light = light_flat[:, :, None, None]  # (N,6,1,1)
             colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
             ambient = config.AMBIENT_LIGHT
-            colors = numpy.clip(colors_base*(ambient + (1.0-ambient)*light), 0, 255)
+            colors_lit = colors_base*(ambient + (1.0-ambient)*light)
+
+            ao = None
+            if getattr(config, 'AO_ENABLED', True):
+                ao = compute_vertex_ao(
+                    BLOCK_SOLID[self.blocks].astype(bool),
+                    (sx, sy, sz),
+                    getattr(config, 'AO_STRENGTH', 0.0),
+                    block_mask=block_mask,
+                )
+                if ao is not None:
+                    ao_flat = numpy.where(face_mask[..., None], ao, 1.0)
+                    colors_lit = colors_lit * ao_flat[..., None]
+            colors = numpy.clip(colors_lit, 0, 255)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
 
             v = verts[face_mask].reshape(-1,3).ravel()
@@ -257,6 +270,13 @@ class WorldLoader(object):
             n = normals[face_mask].reshape(-1,3).ravel()
             c = colors[face_mask].reshape(-1,3).ravel()
             count = len(v)//3
+            if getattr(config, 'AO_DEBUG', False) and not getattr(self, '_ao_debug_once_vt', False):
+                self._ao_debug_once_vt = True
+                try:
+                    print("[AO] vt colors min/max sample:", float(c.min()), float(c.max()), "sample first 12:", c[:12])
+                    print("[AO] vt verts sample first 9:", v[:9])
+                except Exception as e:
+                    print("[AO] vt debug error", e)
 
         # Water surface quads (top only) so shorelines don't leave holes.
         water_top = numpy.zeros_like(self.blocks, dtype=bool)

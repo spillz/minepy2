@@ -39,6 +39,15 @@ DEBUG_SINGLE_BLOCK = False
 # Lighting settings
 LIGHT_DECAY = 0.1  # per-step attenuation for flood-fill lighting
 AMBIENT_LIGHT = 0.1  # minimum light level (0-1 range)
+# Ambient occlusion settings (darken inner edges/corners of exposed faces).
+AO_ENABLED = True
+AO_STRENGTH = 0.6
+AO_MIN = 0.35
+AO_GAMMA = 1.0
+AO_FORCE_DEBUG_PATTERN = False
+AO_DEBUG = False
+AO_DEBUG_SHADER = False
+AO_DEBUG_SHADER_FORCE = False
 
 # Terrain generation
 USE_EXPERIMENTAL_BIOME_GEN = True
