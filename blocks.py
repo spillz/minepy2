@@ -1,4 +1,5 @@
 import numpy
+from config import WATER_COLOR
 from util import tex_coords, FACES, cb_v, de_v, cb_v_half, cb_v_cake
 
 TEXTURE_PATH = 'texture_fv.png'
@@ -7,7 +8,7 @@ gr = [50,150,70]
 white = numpy.tile(numpy.array([255,255,255]),6*4).reshape(6,3*4)
 green = numpy.tile(numpy.array(gr),6*4).reshape(6,3*4)
 grass_top = numpy.array([77,244,44]*4+[255,255,255]*5*4).reshape(6,3*4)
-water_blue = numpy.tile(numpy.array([140,190,255]),6*4).reshape(6,3*4)
+water_blue = numpy.tile(numpy.array(WATER_COLOR),6*4).reshape(6,3*4)
 
 
 class Block(object):
@@ -84,8 +85,8 @@ class JackOLantern(Block):
 class Rose(Decoration, Block):
     name = 'Rose'
     coords = ((12,15), (12,15), (12,15))
-#    vertices = de_v
-#    solid = False
+    solid = False
+    occludes = False
 
 class GobbleDeBlock(Block):
     name = 'Gobbledeblock'
@@ -132,7 +133,8 @@ class Cake(Block):
 
 class Water(Block):
     name = 'Water'
-    coords = ((3, 11), (3, 11), (3, 11))
+    coords = ((1, 1), (1, 1), (1, 1))
+    # coords = ((3, 11), (3, 11), (3, 11))
     colors = water_blue
     solid = False
     occludes = False

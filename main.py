@@ -102,6 +102,8 @@ class Window(pyglet.window.Window):
         self.block_program['u_texture'] = 0
         self.block_program['u_light_dir'] = (0.35, 1.0, 0.65)
         self.block_program['u_fog_color'] = (0.5, 0.69, 1.0)
+        self.block_program['u_water_pass'] = False
+        self.block_program['u_water_alpha'] = getattr(config, 'WATER_ALPHA', 0.8)
         if config.DEBUG_SINGLE_BLOCK:
             self.block_program['u_fog_start'] = 1e6
             self.block_program['u_fog_end'] = 2e6
@@ -638,8 +640,7 @@ class Window(pyglet.window.Window):
     def draw_underwater_overlay(self):
         """Render a full-viewport tint when submerged to avoid per-block transparency."""
         width, height = self.get_size()
-        overlay = shapes.Rectangle(0, 0, width, height, color=(40, 110, 170))
-        overlay.opacity = 90
+        overlay = shapes.Rectangle(0, 0, width, height, color=config.UNDERWATER_COLOR)
         overlay.draw()
 
 

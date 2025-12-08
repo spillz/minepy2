@@ -328,35 +328,66 @@ class WorldLoader(object):
                 except Exception as e:
                     print("[AO] vt debug error", e)
 
-        # Water surface quads (top only) so shorelines don't leave holes.
-        water_top = numpy.zeros_like(self.blocks, dtype=bool)
-        water_top[:, :-1, :] = (self.blocks[:, :-1, :] == WATER) & (self.blocks[:, 1:, :] != WATER)
-        water_top[:, -1, :] = (self.blocks[:, -1, :] == WATER)
-        wt_int = water_top[1:-1, :, 1:-1]
-        wt_flat = wt_int.reshape(sx*sy*sz)
-        if wt_flat.any():
-            pos_w = SECTOR_GRID[wt_flat] + position
-            wcount = len(pos_w)
-            b = numpy.full(wcount, WATER, dtype=numpy.int32)
-            verts = (0.5*BLOCK_VERTICES[b].reshape(wcount,6,4,3) + pos_w[:,None,None,:]).astype(numpy.float32)
-            tex = BLOCK_TEXTURES[b][:,:6].reshape(wcount,6,4,2).astype(numpy.float32)
-            normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (wcount,6,4,3)).astype(numpy.float32)
-            colors = BLOCK_COLORS[b][:,:6].reshape(wcount,6,4,3).astype(numpy.float32)
-            face_mask = numpy.zeros((wcount,6), dtype=bool)
-            face_mask[:,0] = True  # top face
+        # Water geometry: exposed faces of water blocks (only to air), duplicated for visibility above/below.
+        water_blocks = (self.blocks == WATER)
+        water_exposed = numpy.zeros(self.blocks.shape + (6,), dtype=bool)
+        neighbor = self.blocks[:,1:,:]
+        air = (neighbor != WATER) & (BLOCK_SOLID[neighbor] == 0)
+        water_exposed[:,:-1,:,0] = water_blocks[:,:-1,:] & air
+        neighbor = self.blocks[:,:-1,:]
+        air = (neighbor != WATER) & (BLOCK_SOLID[neighbor] == 0)
+        water_exposed[:,1:,:,1] = water_blocks[:,1:,:] & air
+        neighbor = self.blocks[:-1,:,:]
+        air = (neighbor != WATER) & (BLOCK_SOLID[neighbor] == 0)
+        water_exposed[1:,:,:,2] = water_blocks[1:,:,:] & air
+        neighbor = self.blocks[1:,:,:]
+        air = (neighbor != WATER) & (BLOCK_SOLID[neighbor] == 0)
+        water_exposed[:-1,:,:,3] = water_blocks[:-1,:,:] & air
+        neighbor = self.blocks[:,:,1:]
+        air = (neighbor != WATER) & (BLOCK_SOLID[neighbor] == 0)
+        water_exposed[:,:,:-1,4] = water_blocks[:,:,:-1] & air
+        neighbor = self.blocks[:,:,:-1]
+        air = (neighbor != WATER) & (BLOCK_SOLID[neighbor] == 0)
+        water_exposed[:,:,1:,5] = water_blocks[:,:,1:] & air
 
-            wv = verts[face_mask].reshape(-1,3).ravel()
-            wtcoords = tex[face_mask].reshape(-1,2).ravel()
-            wn = normals[face_mask].reshape(-1,3).ravel()
-            wc = colors[face_mask].reshape(-1,3).ravel()
+        water_exposed = water_exposed[1:-1,:,1:-1]
+        w_face_mask = water_exposed.reshape(sx*sy*sz, 6)
+        water_mask = w_face_mask.any(axis=1)
+        water_data = None
+        if water_mask.any():
+            pos_w = SECTOR_GRID[water_mask] + position
+            face_mask_w = w_face_mask[water_mask]
+            b = numpy.full(len(pos_w), WATER, dtype=numpy.int32)
+            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos_w[:,None,None,:]).astype(numpy.float32)
+            tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+            normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
+            colors = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
 
-            v = numpy.concatenate([v, wv])
-            t = numpy.concatenate([t, wtcoords])
-            n = numpy.concatenate([n, wn])
-            c = numpy.concatenate([c, wc])
-            count += len(wv)//3
+            face_verts = verts[face_mask_w].reshape(-1,4,3)
+            face_tex = tex[face_mask_w].reshape(-1,4,2)
+            face_norm = normals[face_mask_w].reshape(-1,4,3)
+            face_col = colors[face_mask_w].reshape(-1,4,3)
 
-        self.vt_data = (count, v, t, n, c)
+            rev_order = [0,3,2,1]
+            back_verts = face_verts[:, rev_order, :]
+            back_tex = face_tex[:, rev_order, :]
+            back_norm = -face_norm[:, rev_order, :]
+            back_col = face_col[:, rev_order, :]
+
+            all_verts = numpy.concatenate([face_verts, back_verts], axis=0).reshape(-1,3)
+            all_tex = numpy.concatenate([face_tex, back_tex], axis=0).reshape(-1,2)
+            all_norm = numpy.concatenate([face_norm, back_norm], axis=0).reshape(-1,3)
+            all_col = numpy.concatenate([face_col, back_col], axis=0).reshape(-1,3)
+
+            wv = all_verts.ravel()
+            wtcoords = all_tex.ravel()
+            wn = all_norm.ravel()
+            wc = all_col.ravel()
+            water_count = len(wv)//3
+            water_data = (water_count, wv, wtcoords, wn, wc)
+
+        solid_data = (count, v, t, n, c)
+        self.vt_data = {'solid': solid_data, 'water': water_data}
 
     def get_block(self, position, sector_position):
         pos = position - numpy.array(sector_position)

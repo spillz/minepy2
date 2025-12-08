@@ -18,6 +18,10 @@ KEEP_RADIUS = LOAD_RADIUS*2
 WALKING_SPEED = 5
 FLYING_SPEED = 15
 
+WATER_COLOR = [40,90,128]
+WATER_ALPHA  = 0.95
+UNDERWATER_COLOR =  [70,128,168, 228]#
+
 GRAVITY = 20.0
 MAX_JUMP_HEIGHT = 1.0 # About the height of a block.
 # To derive the formula for calculating jump speed, first solve

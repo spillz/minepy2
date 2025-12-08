@@ -39,6 +39,8 @@ uniform vec3 u_light_dir;
 uniform vec3 u_fog_color;
 uniform float u_fog_start;
 uniform float u_fog_end;
+uniform bool u_water_pass;
+uniform float u_water_alpha;
 
 in vec2 v_tex_coords;
 in vec3 v_normal;
@@ -51,10 +53,7 @@ void main() {
     vec3 n = normalize(v_normal);
     float light = max(dot(n, normalize(u_light_dir)), 0.0);
     vec4 tex_color = texture(u_texture, v_tex_coords);
-    // Detect atlas tile (16x16 layout) so we can treat water specially.
-    ivec2 tile = ivec2(floor(v_tex_coords * 16.0 + 1e-4));
-    bool is_water = (tile.x == 3 && tile.y == 4); // WATER tile coords in blocks.py
-    float alpha = tex_color.a * (is_water ? 0.45 : 1.0);
+    float alpha = tex_color.a * (u_water_pass ? u_water_alpha : 1.0);
     if (alpha < 0.05) {
         discard;
     }
