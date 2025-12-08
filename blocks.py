@@ -17,6 +17,9 @@ class Block(object):
     colors = white
     texture_fn = tex_coords
     vertices = cb_v
+    # Occlusion flags: solid/opaque blocks should occlude neighbors; transparent cutouts may selectively occlude same-type.
+    occludes = True
+    occludes_same = False
     # Which face to show in the HUD picker; defaults to top (0).
     picker_face = 0
 
@@ -34,6 +37,8 @@ class Leaves(Block):
     coords = ((4, 7), )
     colors = green
     solid = False
+    occludes = False
+    occludes_same = True
 
 class Sand(Block):
     name = 'Sand'
@@ -123,12 +128,14 @@ class Cake(Block):
     coords = ((9,8), (12,8), (10,8))
     vertices = cb_v_cake
     solid = False
+    occludes = False
 
 class Water(Block):
     name = 'Water'
     coords = ((3, 11), (3, 11), (3, 11))
     colors = water_blue
     solid = False
+    occludes = False
 
 # Explicit ordering keeps block IDs stable and ensures the initial inventory
 # starts with grass instead of whichever subclass happens to register first.
@@ -168,6 +175,8 @@ BLOCK_COLORS = numpy.array([white] + [x.colors for x in BLOCKS])
 BLOCK_TEXTURES = numpy.array([tex_coords((0,0),(0,0),(0,0))] + [tex_coords(*x.coords) for x in BLOCKS],dtype = numpy.float32)/4
 BLOCK_VERTICES = numpy.array([cb_v]+[x.vertices for x in BLOCKS])
 BLOCK_SOLID = numpy.array([False]+[x.solid for x in BLOCKS], dtype = numpy.uint8)
+BLOCK_OCCLUDES = numpy.array([False]+[getattr(x,'occludes', True) for x in BLOCKS], dtype = numpy.uint8)
+BLOCK_OCCLUDES_SAME = numpy.array([False]+[getattr(x,'occludes_same', False) for x in BLOCKS], dtype = numpy.uint8)
 # Preferred HUD picker face per block id (0 is air).
 BLOCK_PICKER_FACE = numpy.array([0] + [getattr(x, 'picker_face', 0) for x in BLOCKS], dtype=numpy.uint8)
 

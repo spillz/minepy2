@@ -20,7 +20,7 @@ import sys
 import config
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS, SERVER_IP, SERVER_PORT, LOADER_IP, LOADER_PORT
 from util import normalize, sectorize, FACES, cube_v, cube_v2, compute_vertex_ao
-from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
+from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, BLOCK_OCCLUDES, BLOCK_OCCLUDES_SAME, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
 import mapgen
 
 import logging
@@ -135,18 +135,51 @@ class WorldLoader(object):
 
 
     def _calc_exposed_faces(self):
-        air = (BLOCK_SOLID[self.blocks] == 0)
-        solid = (self.blocks > 0) & (self.blocks != WATER)
-
         # Face exposure booleans: up, down, left, right, front, back
         exposed_faces = numpy.zeros(self.blocks.shape + (6,), dtype=bool)
-        exposed_faces[:,:-1,:,0] = air[:,1:,:]   # up
-        exposed_faces[:,1:,:,1] = air[:,:-1,:]   # down
-        exposed_faces[1:,:,:,2] = air[:-1,:,:]   # left
-        exposed_faces[:-1,:,:,3] = air[1:,:,:]   # right
-        exposed_faces[:,:,:-1,4] = air[:,:,1:]   # front
-        exposed_faces[:,:,1:,5] = air[:,:,:-1]   # back
+
+        # Helper: neighbor occludes if it is solid or if it is the same type as a same-occluding block (e.g., leaves).
+        def neighbor_occ_mask(cur_block, neighbor_block):
+            solid_occ = BLOCK_SOLID[neighbor_block] != 0
+            same_occ = (BLOCK_OCCLUDES_SAME[neighbor_block] != 0) & (neighbor_block == cur_block)
+            return solid_occ | same_occ
+
+        # up: neighbor at y+1
+        cur = self.blocks[:,:-1,:]
+        neighbor = self.blocks[:,1:,:]
+        neighbor_occ = neighbor_occ_mask(cur, neighbor)
+        exposed_faces[:,:-1,:,0] = ~neighbor_occ
+        # down: neighbor at y-1
+        cur = self.blocks[:,1:,:]
+        neighbor = self.blocks[:,:-1,:]
+        neighbor_occ = neighbor_occ_mask(cur, neighbor)
+        exposed_faces[:,1:,:,1] = ~neighbor_occ
+        # left (-x)
+        cur = self.blocks[1:,:,:]
+        neighbor = self.blocks[:-1,:,:]
+        neighbor_occ = neighbor_occ_mask(cur, neighbor)
+        exposed_faces[1:,:,:,2] = ~neighbor_occ
+        # right (+x)
+        cur = self.blocks[:-1,:,:]
+        neighbor = self.blocks[1:,:,:]
+        neighbor_occ = neighbor_occ_mask(cur, neighbor)
+        exposed_faces[:-1,:,:,3] = ~neighbor_occ
+        # forward (+z)
+        cur = self.blocks[:,:,:-1]
+        neighbor = self.blocks[:,:,1:]
+        neighbor_occ = neighbor_occ_mask(cur, neighbor)
+        exposed_faces[:,:,:-1,4] = ~neighbor_occ
+        # back (-z)
+        cur = self.blocks[:,:,1:]
+        neighbor = self.blocks[:,:,:-1]
+        neighbor_occ = neighbor_occ_mask(cur, neighbor)
+        exposed_faces[:,:,1:,5] = ~neighbor_occ
+
+        solid = (self.blocks > 0) & (self.blocks != WATER)
         self.exposed_faces = exposed_faces & solid[..., None]
+
+        # Air mask reused for lighting
+        air = (BLOCK_SOLID[self.blocks] == 0)
 
         # Flood-fill lighting (skylight + optional block emitters), vectorized relaxation
         light = numpy.zeros(self.blocks.shape, dtype=numpy.float32)

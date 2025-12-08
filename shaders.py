@@ -6,6 +6,7 @@ VERTEX_SOURCE = """
 
 uniform mat4 u_projection;
 uniform mat4 u_view;
+uniform vec3 u_camera_pos;
 
 in vec3 position;
 in vec2 tex_coords;
@@ -18,7 +19,9 @@ out vec3 v_color;
 out vec3 v_view_position;
 
 void main() {
-    vec4 view_position = u_view * vec4(position, 1.0);
+    // Work in camera-relative space to reduce floating point error at large coords.
+    vec3 rel = position - u_camera_pos;
+    vec4 view_position = u_view * vec4(rel, 1.0);
     gl_Position = u_projection * view_position;
     v_tex_coords = tex_coords;
     v_normal = mat3(u_view) * normal;

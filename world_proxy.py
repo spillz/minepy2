@@ -27,7 +27,7 @@ import server_connection
 import config
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS
 from util import normalize, sectorize, FACES, cube_v, cube_v2, compute_vertex_ao
-from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
+from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, BLOCK_OCCLUDES, BLOCK_OCCLUDES_SAME, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
 import mapgen
 import numpy
 
@@ -178,15 +178,35 @@ class ModelProxy(object):
                 s.invalidate_vt = False
 
     def _compute_exposed(self, blocks):
+        # Occlusion mask: general occluders + same-type occluders (e.g., leaves occlude leaves).
         air = (BLOCK_SOLID[blocks] == 0)
         solid = (blocks > 0) & (blocks != WATER)
         exposed_faces = numpy.zeros(blocks.shape + (6,), dtype=bool)
-        exposed_faces[:,:-1,:,0] = air[:,1:,:]   # up
-        exposed_faces[:,1:,:,1] = air[:,:-1,:]   # down
-        exposed_faces[1:,:,:,2] = air[:-1,:,:]   # left
-        exposed_faces[:-1,:,:,3] = air[1:,:,:]   # right
-        exposed_faces[:,:,:-1,4] = air[:,:,1:]   # front
-        exposed_faces[:,:,1:,5] = air[:,:,:-1]   # back
+        # up (+y)
+        neighbor = blocks[:,1:,:]
+        neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[:,:-1,:]))
+        exposed_faces[:,:-1,:,0] = ~neighbor_occ
+        # down (-y)
+        neighbor = blocks[:,:-1,:]
+        neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[:,1:,:]))
+        exposed_faces[:,1:,:,1] = ~neighbor_occ
+        # left (-x)
+        neighbor = blocks[:-1,:,:]
+        neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[1:,:,:]))
+        exposed_faces[1:,:,:,2] = ~neighbor_occ
+        # right (+x)
+        neighbor = blocks[1:,:,:]
+        neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[:-1,:,:]))
+        exposed_faces[:-1,:,:,3] = ~neighbor_occ
+        # forward (+z)
+        neighbor = blocks[:,:,1:]
+        neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[:,:,:-1]))
+        exposed_faces[:,:,:-1,4] = ~neighbor_occ
+        # back (-z)
+        neighbor = blocks[:,:,:-1]
+        neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[:,:,1:]))
+        exposed_faces[:,:,1:,5] = ~neighbor_occ
+
         exposed_faces = exposed_faces & solid[..., None]
 
         # Recompute baked lighting locally (skylight + optional block emitters)
@@ -265,15 +285,24 @@ class ModelProxy(object):
         if sector.light is not None:
             blocks = sector.blocks
             light_full = sector.light
-            air = (BLOCK_SOLID[blocks] == 0)
             solid = (blocks > 0) & (blocks != WATER)
             exposed_faces = numpy.zeros(blocks.shape + (6,), dtype=bool)
-            exposed_faces[:,:-1,:,0] = air[:,1:,:]   # up
-            exposed_faces[:,1:,:,1] = air[:,:-1,:]   # down
-            exposed_faces[1:,:,:,2] = air[:-1,:,:]   # left
-            exposed_faces[:-1,:,:,3] = air[1:,:,:]   # right
-            exposed_faces[:,:,:-1,4] = air[:,:,1:]   # front
-            exposed_faces[:,:,1:,5] = air[:,:,:-1]   # back
+            def neighbor_occ_mask(cur_block, neighbor_block):
+                solid_occ = BLOCK_SOLID[neighbor_block] != 0
+                same_occ = (BLOCK_OCCLUDES_SAME[neighbor_block] != 0) & (neighbor_block == cur_block)
+                return solid_occ | same_occ
+            neighbor = blocks[:,1:,:]
+            exposed_faces[:,:-1,:,0] = ~neighbor_occ_mask(blocks[:,:-1,:], neighbor)
+            neighbor = blocks[:,:-1,:]
+            exposed_faces[:,1:,:,1] = ~neighbor_occ_mask(blocks[:,1:,:], neighbor)
+            neighbor = blocks[:-1,:,:]
+            exposed_faces[1:,:,:,2] = ~neighbor_occ_mask(blocks[1:,:,:], neighbor)
+            neighbor = blocks[1:,:,:]
+            exposed_faces[:-1,:,:,3] = ~neighbor_occ_mask(blocks[:-1,:,:], neighbor)
+            neighbor = blocks[:,:,1:]
+            exposed_faces[:,:,:-1,4] = ~neighbor_occ_mask(blocks[:,:,:-1], neighbor)
+            neighbor = blocks[:,:,:-1]
+            exposed_faces[:,:,1:,5] = ~neighbor_occ_mask(blocks[:,:,1:], neighbor)
             exposed_faces = exposed_faces & solid[..., None]
 
             exposed_light = numpy.zeros(blocks.shape+(6,),dtype=numpy.float32)
@@ -393,9 +422,16 @@ class ModelProxy(object):
         sector.vt_data = None
         sector.invalidate()
 
-    def set_matrices(self, projection, view):
-        self.program['u_projection'] = numpy.array(projection, dtype='f4')
-        self.program['u_view'] = numpy.array(view, dtype='f4')
+    def set_matrices(self, projection, view, camera_pos):
+        proj = numpy.array(projection, dtype='f4').reshape((4, 4))
+        view_mat = numpy.array(view, dtype='f4').reshape((4, 4))
+        # Strip translation; camera position is sent separately to keep math stable far from origin.
+        view_mat[:3, 3] = 0.0
+        view_mat[3, :] = numpy.array([0.0, 0.0, 0.0, 1.0], dtype='f4')
+        # Shader expects flat 4x4 matrices.
+        self.program['u_projection'] = proj.ravel().astype('f4')
+        self.program['u_view'] = view_mat.ravel().astype('f4')
+        self.program['u_camera_pos'] = numpy.array(camera_pos, dtype='f4')
 
     def get_batch(self):
         if len(self.unused_batches)>0:

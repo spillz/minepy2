@@ -482,7 +482,7 @@ class Window(pyglet.window.Window):
         gl.glViewport(0, 0, width, height)
 
     def get_view_projection(self):
-        """Return projection and view matrices using pyglet Mat4 (column-major)."""
+        """Return projection/view plus camera position (used for camera-relative transforms)."""
         width, height = self.get_size()
         aspect = width / float(height)
         near, far = 0.1, 512.0
@@ -496,7 +496,7 @@ class Window(pyglet.window.Window):
         up = Vec3(0.0, 1.0, 0.0) if abs(dy) < 0.99 else Vec3(0.0, 0.0, 1.0)
         target = eye + forward
         view = Mat4.look_at(eye, target, up)
-        return projection, view
+        return projection, view, (x, y, z)
 
     def set_3d(self):
         """ Configure OpenGL to draw in 3d.
@@ -507,9 +507,9 @@ class Window(pyglet.window.Window):
         gl.glEnable(gl.GL_DEPTH_TEST)
 
         gl.glViewport(0, 0, width, height)
-        projection, view = self.get_view_projection()
+        projection, view, camera_pos = self.get_view_projection()
         # pyglet Mat4 supports direct upload; ensure contiguous float32 arrays
-        self.model.set_matrices(projection, view)
+        self.model.set_matrices(projection, view, camera_pos)
         if config.DEBUG_SINGLE_BLOCK and not self._printed_mats:
             dx, dy, dz = self.get_sight_vector()
             print("[DEBUG] projection matrix:\n", numpy.array(projection))
