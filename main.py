@@ -499,9 +499,15 @@ class Window(pyglet.window.Window):
         dx, dy, dz = self.get_sight_vector()
         eye = Vec3(x, y, z)
         forward = Vec3(dx, dy, dz)
-        # Avoid the look_at up vector becoming collinear with the view direction
-        # when the player looks straight up/down, which would produce a bad view matrix.
-        up = Vec3(0.0, 1.0, 0.0) if abs(dy) < 0.99 else Vec3(0.0, 0.0, 1.0)
+        yaw_rad = math.radians(self.rotation[0])
+        # Keep roll locked: right depends only on yaw, up is right x forward.
+        right = Vec3(math.cos(yaw_rad), 0.0, math.sin(yaw_rad)).normalize()
+        up = right.cross(forward)
+        if up.length() < 1e-4:
+            up = Vec3(0.0, 1.0, 0.0)
+        else:
+            up = up.normalize()
+            right = forward.cross(up).normalize()
         target = eye + forward
         view = Mat4.look_at(eye, target, up)
         return projection, view, (x, y, z)
@@ -529,7 +535,7 @@ class Window(pyglet.window.Window):
 
 
     def get_frustum_circle(self):
-        x,y = self.rotation
+        x, pitch = self.rotation
         dx = math.cos(math.radians(x - 90))
         dz = math.sin(math.radians(x - 90))
 
@@ -537,10 +543,15 @@ class Window(pyglet.window.Window):
         vec = numpy.array([dx,dz])
         ovec = numpy.array([-dz,dx])
         pos = numpy.array([x for x in self.position])[c]
-        center = pos + vec*DIST/2
+        # Pull the frustum center back when pitched to cover nearby terrain without disabling culling.
+        forward_scale = max(0.25, math.cos(math.radians(pitch)))
+        center = pos + vec * (DIST/2) * forward_scale
         far_corner = pos + vec*DIST + ovec*DIST*numpy.tan(65.0/180.0 * numpy.pi)/2
         rad = ((center-far_corner)**2).sum()**0.5/2
-        return center,rad
+        # Inflate more as pitch increases (looking up/down) to reduce popping while staying bounded.
+        tilt = min(1.0, abs(pitch) / 90.0)
+        rad *= 1.05 + 0.45 * tilt
+        return center, rad
 
     def on_draw(self):
         """ Called by pyglet to draw the canvas.
@@ -587,7 +598,7 @@ class Window(pyglet.window.Window):
             void_text = '>=64'
         else:
             void_text = str(void_dist)
-        self.label.text = 'FPS: %.1f  (%.2f, %.2f, %.2f) rot(%.1f, %.1f) void %s' % (fps, x, y, z, rx, ry, void_text)
+        self.label.text = 'FPS(%.1f), pos(%.2f, %.2f, %.2f) rot(%.1f, %.1f) void %s' % (fps, x, y, z, rx, ry, void_text)
         # Light backdrop to keep text readable on bright backgrounds.
         pad_x = 6
         pad_y = 3
