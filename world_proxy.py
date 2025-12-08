@@ -40,7 +40,7 @@ import server_connection
 import config
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS
 from util import normalize, sectorize, FACES, cube_v, cube_v2, compute_vertex_ao
-from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, BLOCK_OCCLUDES, BLOCK_OCCLUDES_SAME, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
+from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, BLOCK_OCCLUDES, BLOCK_OCCLUDES_SAME, BLOCK_GLOW, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
 import mapgen
 import numpy
 
@@ -115,7 +115,7 @@ class SectorProxy(object):
                 quad_verts = numpy.array(v, dtype='f4').reshape(-1, 4, 3)
                 quad_tex = numpy.array(t, dtype='f4').reshape(-1, 4, 2)
                 quad_norm = numpy.array(n, dtype='f4').reshape(-1, 4, 3)
-                quad_col = numpy.array(c, dtype='f4').reshape(-1, 4, 3)
+                quad_col = numpy.array(c, dtype='f4').reshape(-1, 4, int(len(c) / len(quad_verts) / 4) if len(quad_verts) else 4)
                 order = [0, 1, 2, 0, 2, 3]
                 tri_verts = quad_verts[:, order, :].reshape(-1, 3)
                 tri_tex = quad_tex[:, order, :].reshape(-1, 2)
@@ -367,12 +367,19 @@ class ModelProxy(object):
             if ao is not None:
                 ao_flat = numpy.where(face_mask[..., None], ao, 1.0)
                 colors_lit = colors_lit * ao_flat[..., None]
-
-            colors = numpy.clip(colors_lit, 0, 255)
+            # Glow acts as a minimum brightness floor after AO.
+            if BLOCK_GLOW is not None:
+                glow = BLOCK_GLOW[b][:, None, None, None]
+                if numpy.any(glow > 0):
+                    colors_lit = numpy.maximum(colors_lit, colors_base * glow)
+            emissive = BLOCK_GLOW[b][:, None, None, None] * 255.0
+            emissive = numpy.broadcast_to(emissive, colors_lit.shape[:-1] + (1,))
+            colors_rgba = numpy.concatenate([colors_lit, emissive], axis=3)
+            colors = numpy.clip(colors_rgba, 0, 255)
             v = verts[face_mask].reshape(-1,3).ravel()
             t = tex[face_mask].reshape(-1,2).ravel()
             n = normals[face_mask].reshape(-1,3).ravel()
-            c = colors[face_mask].reshape(-1,3).ravel()
+            c = colors[face_mask].reshape(-1,4).ravel()
             count = len(v)//3
         water_blocks = (blocks == WATER)
         water_exposed = numpy.zeros(blocks.shape + (6,), dtype=bool)
@@ -411,11 +418,13 @@ class ModelProxy(object):
             face_tex = tex[face_mask_w].reshape(-1,4,2)
             face_norm = normals[face_mask_w].reshape(-1,4,3)
             face_col = colors[face_mask_w].reshape(-1,4,3)
+            emissive_w = numpy.zeros(face_col.shape[:-1] + (1,), dtype=face_col.dtype)
+            face_col = numpy.concatenate([face_col, emissive_w], axis=2)
 
             wv = face_verts.reshape(-1,3).ravel()
             wtcoords = face_tex.reshape(-1,2).ravel()
             wn = face_norm.reshape(-1,3).ravel()
-            wc = face_col.reshape(-1,3).ravel()
+            wc = face_col.reshape(-1,4).ravel()
             water_count = len(wv) // 3
             water_data = (water_count, wv, wtcoords, wn, wc)
         else:
@@ -687,12 +696,18 @@ class ModelProxy(object):
             if ao is not None:
                 ao_flat = numpy.where(face_mask[..., None], ao, 1.0)
                 colors_lit = colors_lit * ao_flat[..., None]
-
-            colors = numpy.clip(colors_lit, 0, 255)
+            if BLOCK_GLOW is not None:
+                glow = BLOCK_GLOW[b][:, None, None, None]
+                if numpy.any(glow > 0):
+                    colors_lit = numpy.maximum(colors_lit, colors_base * glow)
+            emissive = BLOCK_GLOW[b][:, None, None, None] * 255.0
+            emissive = numpy.broadcast_to(emissive, colors_lit.shape[:-1] + (1,))
+            colors_rgba = numpy.concatenate([colors_lit, emissive], axis=3)
+            colors = numpy.clip(colors_rgba, 0, 255)
             v = verts[face_mask].reshape(-1,3).ravel()
             t = tex[face_mask].reshape(-1,2).ravel()
             n = normals[face_mask].reshape(-1,3).ravel()
-            c = colors[face_mask].reshape(-1,3).ravel()
+            c = colors[face_mask].reshape(-1,4).ravel()
             count = len(v)//3
         # Water geometry: exposed faces of water blocks, duplicated for visibility above/below.
         water_blocks = (sector.blocks == WATER)
@@ -726,11 +741,13 @@ class ModelProxy(object):
             face_tex = tex[face_mask_w].reshape(-1,4,2)
             face_norm = normals[face_mask_w].reshape(-1,4,3)
             face_col = colors[face_mask_w].reshape(-1,4,3)
+            emissive_w = numpy.zeros(face_col.shape[:-1] + (1,), dtype=face_col.dtype)
+            face_col = numpy.concatenate([face_col, emissive_w], axis=2)
 
             wv = face_verts.reshape(-1,3).ravel()
             wtcoords = face_tex.reshape(-1,2).ravel()
             wn = face_norm.reshape(-1,3).ravel()
-            wc = face_col.reshape(-1,3).ravel()
+            wc = face_col.reshape(-1,4).ravel()
             water_count = len(wv)//3
             water_data = (water_count, wv, wtcoords, wn, wc)
         else:
@@ -1200,12 +1217,14 @@ class ModelProxy(object):
         verts = (0.5*BLOCK_VERTICES[block_id][:6].reshape(6,4,3) + pos[None,None,:]).astype(numpy.float32)
         tex = BLOCK_TEXTURES[block_id][:6].reshape(6,4,2).astype(numpy.float32)
         normals = numpy.broadcast_to(BLOCK_NORMALS[:,None,:], (6,4,3)).astype(numpy.float32)
-        colors = BLOCK_COLORS[block_id][:6].reshape(6,4,3).astype(numpy.float32)
+        colors_rgb = BLOCK_COLORS[block_id][:6].reshape(6,4,3).astype(numpy.float32)
+        emissive = numpy.full((6,4,1), BLOCK_GLOW[block_id]*255.0, dtype=numpy.float32)
+        colors = numpy.concatenate([colors_rgb, emissive], axis=2)
         face_mask = numpy.ones((6,4), dtype=bool)
         v = verts[face_mask].reshape(-1,3).ravel().astype('f4')
         t = tex[face_mask].reshape(-1,2).ravel().astype('f4')
         n = normals[face_mask].reshape(-1,3).ravel().astype('f4')
-        c = colors[face_mask].reshape(-1,3).ravel().astype('f4')
+        c = colors[face_mask].reshape(-1,4).ravel().astype('f4')
         count = len(v)//3
         if config.DEBUG_SINGLE_BLOCK:
             print("[DEBUG] block vertex sample:", v[:18], "tex:", t[:8])
@@ -1224,12 +1243,13 @@ class ModelProxy(object):
         quad_verts = numpy.array(v, dtype='f4').reshape(-1, 4, 3)
         quad_tex = numpy.array(t, dtype='f4').reshape(-1, 4, 2)
         quad_norm = numpy.array(n, dtype='f4').reshape(-1, 4, 3)
-        quad_col = numpy.array(c, dtype='f4').reshape(-1, 4, 3)
+        channels = int(len(c) // len(quad_verts) // 4) if len(quad_verts) else 3
+        quad_col = numpy.array(c, dtype='f4').reshape(-1, 4, channels)
         order = [0, 1, 2, 0, 2, 3]
         tri_verts = quad_verts[:, order, :].reshape(-1, 3)
         tri_tex = quad_tex[:, order, :].reshape(-1, 2)
         tri_norm = quad_norm[:, order, :].reshape(-1, 3)
-        tri_col = quad_col[:, order, :].reshape(-1, 3)
+        tri_col = quad_col[:, order, :].reshape(-1, channels)
         return tri_verts, tri_tex, tri_norm, tri_col
 
     def _update_sector(self, spos, b, v, light):
@@ -1354,6 +1374,35 @@ class ModelProxy(object):
             traveled_blocks += 1
 
         return traveled_blocks
+
+    def nearest_mushroom_in_sector(self, sector_pos, player_pos=None):
+        """Return nearest mushroom world coords inside a loaded sector, or None."""
+        mush_id = BLOCK_ID.get('Mushroom')
+        if mush_id is None:
+            return None
+        sector = self.sectors.get(sector_pos)
+        if sector is None or sector.blocks is None:
+            return None
+        coords = numpy.argwhere(sector.blocks == mush_id)
+        if coords.size == 0:
+            return None
+        if player_pos is None:
+            player_pos = (sector_pos[0], 0, sector_pos[2])
+        px, py, pz = player_pos
+        best = None
+        best_d2 = None
+        for cx, cy, cz in coords:
+            wx = sector_pos[0] + int(cx) - 1
+            wy = int(cy)
+            wz = sector_pos[2] + int(cz) - 1
+            dx = wx - px
+            dy = wy - py
+            dz = wz - pz
+            d2 = dx*dx + dy*dy + dz*dz
+            if best is None or d2 < best_d2:
+                best = (wx, wy, wz)
+                best_d2 = d2
+        return best
 
     def exposed(self, position):
         """ Returns False is given `position` is surrounded on all 6 sides by

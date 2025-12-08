@@ -23,6 +23,8 @@ class Block(object):
     occludes_same = False
     # Which face to show in the HUD picker; defaults to top (0).
     picker_face = 0
+    # Minimum on-face glow (0-1) applied after world lighting; useful for emissive look without bright emission.
+    glow = 0.0
 
 class Decoration(object):
     vertices = de_v
@@ -84,9 +86,16 @@ class JackOLantern(Block):
 
 class Rose(Decoration, Block):
     name = 'Rose'
-    coords = ((12,15), (12,15), (12,15))
+    coords = ((12,15), (12,15), (12,15), (12,15))
     solid = False
     occludes = False
+
+class Mushroom(Decoration, Block):
+    name = 'Mushroom'
+    coords = ((4, 1), (4, 1), (4, 1), (4, 1))
+    solid = False
+    occludes = False
+    glow = 0.75
 
 class GobbleDeBlock(Block):
     name = 'Gobbledeblock'
@@ -166,6 +175,7 @@ BLOCKS = [
     TNT,
     Cake,
     Water,
+    Mushroom,
 ]
 i = 1
 BLOCK_ID = {}
@@ -181,8 +191,11 @@ BLOCK_OCCLUDES = numpy.array([False]+[getattr(x,'occludes', True) for x in BLOCK
 BLOCK_OCCLUDES_SAME = numpy.array([False]+[getattr(x,'occludes_same', False) for x in BLOCKS], dtype = numpy.uint8)
 # Preferred HUD picker face per block id (0 is air).
 BLOCK_PICKER_FACE = numpy.array([0] + [getattr(x, 'picker_face', 0) for x in BLOCKS], dtype=numpy.uint8)
+# Per-block face glow (0-1) applied after lighting; lets emissive blocks look bright even with low emission.
+BLOCK_GLOW = numpy.array([0.0] + [getattr(x, 'glow', 0.0) for x in BLOCKS], dtype=numpy.float32)
 
 # Block light emitters (0-1 brightness). Defined here so IDs stay in sync.
 BLOCK_LIGHT_LEVELS = {
     BLOCK_ID["Jack O'Lantern"]: 1.0,
+    BLOCK_ID["Mushroom"]: 0.25,
 }

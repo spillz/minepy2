@@ -1,5 +1,6 @@
 #std/external libs
 import time
+import math
 import numpy
 
 #local libs
@@ -28,9 +29,26 @@ TNT = BLOCK_ID['TNT']
 CAKE = BLOCK_ID['Cake']
 ROSE = BLOCK_ID['Rose']
 WATER = BLOCK_ID['Water']
+MUSHROOM = BLOCK_ID['Mushroom']
 
 WATER_LEVEL = 70
 GLOBAL_WATER_LEVEL = WATER_LEVEL
+# Debug tracker for nearest placed mushroom.
+_debug_mushroom_hint = {'best': None, 'best_dist2': None}
+
+
+def _record_mushroom_hint(world_pos, sector_pos, local_pos):
+    """Track and print the closest mushroom position found so far."""
+    global _debug_mushroom_hint
+    x, _, z = world_pos
+    dist2 = x * x + z * z
+    best = _debug_mushroom_hint.get('best')
+    best_d2 = _debug_mushroom_hint.get('best_dist2')
+    if best is None or dist2 < best_d2:
+        _debug_mushroom_hint['best'] = world_pos
+        _debug_mushroom_hint['best_dist2'] = dist2
+        horiz = math.sqrt(dist2)
+        print(f"[DEBUG] Mushroom placed world {world_pos} (sector {sector_pos}, local {local_pos}) horiz~{horiz:.1f}")
 
 
 class SectorNoise2D(object):
@@ -555,6 +573,74 @@ class BiomeGenerator:
             mask = vertical_mask & depth_mask & stone_mask & cliff3d & density3d & (~above_ground) & (~shallow[None, :, :])
             blocks[mask] = setting['id']
 
+    def _place_cave_mushrooms(self, position, blocks, ground_h, water_mask, decor_noise, decor_detail):
+        """Sprinkle glowing mushrooms on dark cave floors at low density."""
+        if self.fast:
+            return
+        sx = SECTOR_SIZE + 2
+        sz = SECTOR_SIZE + 2
+        # Ensure deterministic, non-negative seed for RNG
+        px = int(position[0])
+        pz = int(position[2] if len(position) > 2 else (position[1] if len(position) > 1 else 0))
+        mix = numpy.uint64(0x9E3779B97F4A7C15)
+        mix ^= numpy.uint64(numpy.int64(self.seed))
+        mix ^= numpy.uint64(numpy.int64(px * 928371))
+        mix ^= numpy.uint64(numpy.int64(pz * 97241))
+        rng_seed = int(mix)
+        rng = numpy.random.default_rng(rng_seed)
+        stone_like = {STONE, COBBLE, COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE, REDSTONE_ORE, EMERALD_ORE}
+        for x in range(1, sx - 1):
+            for z in range(1, sz - 1):
+                if water_mask[x, z]:
+                    continue
+                max_floor = min(ground_h[x, z] - 2, SECTOR_HEIGHT - 2)
+                if max_floor <= 2:
+                    continue
+                column = blocks[:, x, z]
+                skylight = True
+                sky_reaches = numpy.zeros(SECTOR_HEIGHT, dtype=bool)
+                for y in range(SECTOR_HEIGHT - 1, -1, -1):
+                    if column[y] != 0:
+                        skylight = False
+                    else:
+                        sky_reaches[y] = skylight
+                # scan upward from the floor for a single candidate per column
+                for y in range(2, max_floor):
+                    if column[y] != 0:
+                        continue
+                    if sky_reaches[y]:
+                        continue  # skip skylit pockets
+                    floor_id = column[y - 1]
+                    if floor_id not in stone_like:
+                        continue
+                    # need a ceiling nearby to feel cave-like darkness
+                    ceiling_band = column[y + 1:min(SECTOR_HEIGHT, y + 20)]
+                    if not (ceiling_band != 0).any():
+                        continue
+                    # Require headroom and at least one exposed horizontal face so it isn't buried in a wall.
+                    if y + 1 >= SECTOR_HEIGHT or column[y + 1] != 0:
+                        continue
+                    neighbors = [
+                        blocks[y, x + 1, z],
+                        blocks[y, x - 1, z],
+                        blocks[y, x, z + 1],
+                        blocks[y, x, z - 1],
+                    ]
+                    if all(n != 0 for n in neighbors):
+                        continue
+                    base_chance = 0.002
+                    density_boost = max(0.0, decor_detail[x, z]) * 0.01
+                    stripe_gate = 0.6 + 0.4 * (decor_noise[x, z] > 0.15)
+                    chance = (base_chance + density_boost) * stripe_gate
+                    if rng.random() < chance:
+                        if (blocks[y, x-1:x+2, z-1:z+2] == MUSHROOM).any():
+                            continue
+                        column[y] = MUSHROOM
+                        world_pos = (int(position[0] + x - 1), int(y), int(position[2] + z - 1))
+                        local_pos = (int(x), int(y), int(z))
+                        _record_mushroom_hint(world_pos, position, local_pos)
+                        break
+
     def generate(self, position):
         elevation, canyon_noise = self._height_field(position)
         moisture = self.moisture(position)
@@ -710,6 +796,7 @@ class BiomeGenerator:
         if not self.fast:
             self._place_ores(position, blocks, elevation, cliff_mask)
             self._carve_caves(position, blocks, elevation, cliff_mask)
+            self._place_cave_mushrooms(position, blocks, ground_h, water_mask, decor_noise, decor_detail)
 
         # Place planned buildings and connect them with paths.
         centers = []

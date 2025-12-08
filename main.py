@@ -598,7 +598,14 @@ class Window(pyglet.window.Window):
             void_text = '>=64'
         else:
             void_text = str(void_dist)
-        self.label.text = 'FPS(%.1f), pos(%.2f, %.2f, %.2f) rot(%.1f, %.1f) void %s' % (fps, x, y, z, rx, ry, void_text)
+        sector = util.sectorize((x, y, z))
+        mush_pos = self.model.nearest_mushroom_in_sector(sector, self.position)
+        if mush_pos is None:
+            mush_text = 'NA'
+        else:
+            mx, my, mz = mush_pos
+            mush_text = f'{mx},{my},{mz}'
+        self.label.text = 'FPS(%.1f), pos(%.2f, %.2f, %.2f) rot(%.1f, %.1f) void %s mush %s' % (fps, x, y, z, rx, ry, void_text, mush_text)
         # Light backdrop to keep text readable on bright backgrounds.
         pad_x = 6
         pad_y = 3

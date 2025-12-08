@@ -20,7 +20,7 @@ import sys
 import config
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS, SERVER_IP, SERVER_PORT, LOADER_IP, LOADER_PORT
 from util import normalize, sectorize, FACES, cube_v, cube_v2, compute_vertex_ao
-from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, BLOCK_OCCLUDES, BLOCK_OCCLUDES_SAME, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
+from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, BLOCK_OCCLUDES, BLOCK_OCCLUDES_SAME, BLOCK_GLOW, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
 import mapgen
 
 import logging
@@ -149,6 +149,17 @@ class WorldLoader(object):
         if sector_block_delta is not None:
             for p in sector_block_delta:
                 self.blocks[p] = sector_block_delta[p]
+        # Debug: print first mushroom world position for this sector if any.
+        try:
+            from blocks import BLOCK_ID
+            MUSH = BLOCK_ID.get('Mushroom')
+            if MUSH:
+                coords = numpy.argwhere(self.blocks == MUSH)
+                for cx, cy, cz in coords[:1]:
+                    world_pos = (int(position[0] + cx - 1), int(cy), int(position[2] + cz - 1))
+                    print(f"[DEBUG] Loader mushroom at world {world_pos} from sector {position} (local {int(cx)}, {int(cy)}, {int(cz)})")
+        except Exception:
+            pass
 
 
     def _calc_exposed_faces(self):
@@ -293,6 +304,13 @@ class WorldLoader(object):
             light_flat = light_flat[block_mask]
 
             b = self.blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
+            if BLOCK_LIGHT_LEVELS:
+                emitter_levels = numpy.array([BLOCK_LIGHT_LEVELS.get(int(bid), 0.0) for bid in b], dtype=numpy.float32)
+                light_flat = numpy.maximum(light_flat, emitter_levels[:, None])
+            if BLOCK_GLOW is not None:
+                glow = BLOCK_GLOW[b]
+                if numpy.any(glow > 0):
+                    light_flat = numpy.maximum(light_flat, glow[:, None])
 
             verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos[:,None,None,:]).astype(numpy.float32)
             tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
@@ -312,13 +330,21 @@ class WorldLoader(object):
                 if ao is not None:
                     ao_flat = numpy.where(face_mask[..., None], ao, 1.0)
                     colors_lit = colors_lit * ao_flat[..., None]
-            colors = numpy.clip(colors_lit, 0, 255)
+            # Apply glow after AO so glow acts as a minimum brightness floor.
+            if BLOCK_GLOW is not None:
+                glow = BLOCK_GLOW[b][:, None, None, None]  # (N,1,1,1)
+                if numpy.any(glow > 0):
+                    colors_lit = numpy.maximum(colors_lit, colors_base * glow)
+            emissive = BLOCK_GLOW[b][:, None, None, None] * 255.0
+            emissive = numpy.broadcast_to(emissive, colors_lit.shape[:-1] + (1,))
+            colors_rgba = numpy.concatenate([colors_lit, emissive], axis=3)
+            colors = numpy.clip(colors_rgba, 0, 255)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
 
             v = verts[face_mask].reshape(-1,3).ravel()
             t = tex[face_mask].reshape(-1,2).ravel()
             n = normals[face_mask].reshape(-1,3).ravel()
-            c = colors[face_mask].reshape(-1,3).ravel()
+            c = colors[face_mask].reshape(-1,4).ravel()
             count = len(v)//3
             if getattr(config, 'AO_DEBUG', False) and not getattr(self, '_ao_debug_once_vt', False):
                 self._ao_debug_once_vt = True
@@ -367,11 +393,13 @@ class WorldLoader(object):
             face_tex = tex[face_mask_w].reshape(-1,4,2)
             face_norm = normals[face_mask_w].reshape(-1,4,3)
             face_col = colors[face_mask_w].reshape(-1,4,3)
+            emissive_w = numpy.zeros(face_col.shape[:-1] + (1,), dtype=face_col.dtype)
+            face_col = numpy.concatenate([face_col, emissive_w], axis=2)
 
             wv = face_verts.reshape(-1,3).ravel()
             wtcoords = face_tex.reshape(-1,2).ravel()
             wn = face_norm.reshape(-1,3).ravel()
-            wc = face_col.reshape(-1,3).ravel()
+            wc = face_col.reshape(-1,4).ravel()
             water_count = len(wv)//3
             water_data = (water_count, wv, wtcoords, wn, wc)
 

@@ -11,11 +11,11 @@ uniform vec3 u_camera_pos;
 in vec3 position;
 in vec2 tex_coords;
 in vec3 normal;
-in vec3 color;
+in vec4 color;
 
 out vec2 v_tex_coords;
 out vec3 v_normal;
-out vec3 v_color;
+out vec4 v_color;
 out vec3 v_view_position;
 
 void main() {
@@ -44,7 +44,7 @@ uniform float u_water_alpha;
 
 in vec2 v_tex_coords;
 in vec3 v_normal;
-in vec3 v_color;
+in vec4 v_color;
 in vec3 v_view_position;
 
 out vec4 out_color;
@@ -57,11 +57,13 @@ void main() {
     if (alpha < 0.05) {
         discard;
     }
-    vec3 base_color = tex_color.rgb * v_color;
+    vec3 base_color = tex_color.rgb * v_color.rgb;
     vec3 lit_color = base_color * (0.3 + 0.7 * light);
+    vec3 emissive = tex_color.rgb * v_color.a;
+    vec3 final_color = lit_color + emissive;
     float distance = length(v_view_position);
     float fog_factor = clamp((u_fog_end - distance) / (u_fog_end - u_fog_start), 0.0, 1.0);
-    vec3 fogged_color = mix(u_fog_color, lit_color, fog_factor);
+    vec3 fogged_color = mix(u_fog_color, final_color, fog_factor);
     out_color = vec4(fogged_color, alpha);
 }
 """
