@@ -439,8 +439,8 @@ class Window(pyglet.window.Window):
         cx, cy = self.width / 2, self.height / 2
         n = 10
         self.reticle = [
-            shapes.Line(cx - n, cy, cx + n, cy, thickness=2, color=(0, 0, 0)),
-            shapes.Line(cx, cy - n, cx, cy + n, thickness=2, color=(0, 0, 0)),
+            shapes.Line(cx - n, cy, cx + n, cy, thickness=2, color=(255, 255, 255)),
+            shapes.Line(cx, cy - n, cx, cy + n, thickness=2, color=(255, 255, 255)),
         ]
         #inventory item
         self.update_inventory_item_batch()
@@ -460,6 +460,12 @@ class Window(pyglet.window.Window):
         scale_x = size / sprite.width
         scale_y = size / sprite.height
         sprite.scale = min(scale_x, scale_y)
+        # Tint the HUD icon with the block's vertex color (use the displayed face).
+        face_colors = BLOCK_COLORS[block_id].reshape(6, 4, 3)
+        picker_colors = face_colors[picker_face]
+        avg_color = numpy.rint(picker_colors.mean(axis=0)).astype(int)
+        avg_color = tuple(int(max(0, min(255, c))) for c in avg_color)
+        sprite.color = avg_color
         self.inventory_item = sprite
         #outline
 #        v = size/2+(size/2+0.1)*BLOCK_VERTICES[BLOCK_ID[self.block]] + numpy.tile(numpy.array([16,16+size/2,0]),4)
@@ -553,12 +559,12 @@ class Window(pyglet.window.Window):
         # Defer mesh uploads until after rendering so we know exactly how much time remains.
         self.model.draw(self.position, self.get_frustum_circle(), frame_start, upload_budget, defer_uploads=True)
         self.set_2d()
+        if self._is_underwater():
+            self.draw_underwater_overlay()
         self.draw_label()
         self.draw_reticle()
         self.draw_inventory_item()
         self.draw_focused_block()
-        if self._is_underwater():
-            self.draw_underwater_overlay()
         # Use leftover budget to upload meshes at the end of the frame.
         elapsed = time.perf_counter() - frame_start
         remaining_upload_budget = max(0.0, upload_budget - elapsed)
@@ -622,8 +628,18 @@ class Window(pyglet.window.Window):
         """ Draw the crosshairs in the center of the screen.
 
         """
+        blend_enabled = bool(gl.glIsEnabled(gl.GL_BLEND))
+        logic_enabled = bool(gl.glIsEnabled(gl.GL_COLOR_LOGIC_OP))
+        if blend_enabled:
+            gl.glDisable(gl.GL_BLEND)
+        gl.glEnable(gl.GL_COLOR_LOGIC_OP)
+        gl.glLogicOp(gl.GL_XOR)
         for line in self.reticle:
             line.draw()
+        if not logic_enabled:
+            gl.glDisable(gl.GL_COLOR_LOGIC_OP)
+        if blend_enabled:
+            gl.glEnable(gl.GL_BLEND)
 
     def draw_inventory_item(self):
         if self.inventory_item:
