@@ -245,10 +245,11 @@ class SimplexNoise:
 
         #skew the Z data and store in z0
         s = Z.sum(-1) * Fn # Factor for skewing
-        # Wrap lattice coordinates to permutation size to avoid overflow on large inputs
-        i = numpy.mod(fastfloor(Z+s[:,numpy.newaxis]), 256) #nearest value wrapped to 0..255
-        t = (i.sum(-1) * Gn) # Factor for unskewing
-        Z0 = i - t[:,numpy.newaxis]
+        # Keep unwrapped lattice coordinates for skew/unskew math; wrap only for permutation indexing.
+        i_unwrapped = fastfloor(Z + s[:, numpy.newaxis])  # nearest lattice coordinates (can be negative/large)
+        i = numpy.mod(i_unwrapped, 256)                    # wrapped to 0..255 for perm lookups
+        t = (i_unwrapped.sum(-1) * Gn)                     # Factor for unskewing
+        Z0 = i_unwrapped - t[:, numpy.newaxis]
         z0 = Z - Z0
 
         # Use magnitude ordering to determine the simplices that the point z0 is located in
