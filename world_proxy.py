@@ -4,6 +4,7 @@ import itertools
 import time
 import numpy
 from collections import deque
+import queue
 import multiprocessing.connection
 import multiprocessing.sharedctypes
 import multiprocessing
@@ -12,6 +13,7 @@ try:
 except ImportError:
     import pickle
 import gc
+import concurrent.futures
 
 #gc.set_debug(gc.DEBUG_LEAK)
 
@@ -52,6 +54,13 @@ class SectorProxy(object):
         self.vt = None
         self.vt_data = None
         self.invalidate_vt = False
+        self.needs_seam_refresh = False
+        self.mesh_job_pending = False
+        self.mesh_job_dirty = False
+        self.mesh_gen = 0
+        self.patch_vt = []
+        self.edit_token = 0
+        self.edit_inflight = False
 
     def draw(self, draw_invalid = True, allow_upload = True):
         if allow_upload and draw_invalid and self.invalidate_vt:
@@ -78,6 +87,7 @@ class SectorProxy(object):
                 self.vt.delete()
                 self.vt = None
             (count, v, t, n, c) = self.vt_data
+            t_upload_start = time.perf_counter()
             # Convert quads to triangles for core profile and build a shader-driven vertex list
             quad_verts = numpy.array(v, dtype='f4').reshape(-1, 4, 3)
             quad_tex = numpy.array(t, dtype='f4').reshape(-1, 4, 2)
@@ -99,12 +109,19 @@ class SectorProxy(object):
                 normal=('f', tri_norm.ravel().astype('f4')),
                 color=('f', tri_col.ravel().astype('f4')),
             )
+            elapsed = (time.perf_counter() - t_upload_start) * 1000.0
+            print(f'[perf] upload sector {self.position} tris={tri_count} took {elapsed:.1f}ms')
+            # Clear any temporary patch geometry once full mesh is uploaded.
+            for pv in self.patch_vt:
+                pv.delete()
+            self.patch_vt.clear()
             self.vt_data = None
+            self.invalidate_vt = False
         elif add_to_batch and self.vt_data is None and self.invalidate_vt:
             # Lazy rebuild when vt data was cleared for seam sync.
-            self.model._recompute_vt(self)
             self.invalidate_vt = False
-            return self.check_show(add_to_batch)
+            self.model._submit_mesh_job(self)
+            return False
 
 
 class ModelProxy(object):
@@ -120,6 +137,14 @@ class ModelProxy(object):
         self.unused_batches = []
         self.pending_uploads = deque()
         self.pending_upload_set = set()
+        self.load_radius = getattr(config, 'LOAD_RADIUS', LOADED_SECTORS + 1)  # prefetch a wider ring
+        self.keep_radius = getattr(config, 'KEEP_RADIUS', self.load_radius + 1)  # hysteresis before unloading
+        self.pending_seam_rebuild = set()
+        self.sector_edit_tokens = {}
+        self.mesh_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=getattr(config, 'MESH_WORKERS', 2)
+        )
+        self.mesh_results = queue.SimpleQueue()
 
         # The world is stored in sector chunks.
         self.sectors = {}
@@ -161,21 +186,260 @@ class ModelProxy(object):
             return True
         return (time.perf_counter() - frame_start) < upload_budget
 
-    def _queue_upload(self, sector):
-        if sector not in self.pending_upload_set:
-            self.pending_upload_set.add(sector)
+    def _triangles_in_vt(self, vt_data):
+        """Return triangle count for a vt_data tuple (quads -> tris)."""
+        if not vt_data:
+            return 0
+        # count is stored as vertices/3 (quads*4 verts). convert to tris.
+        quad_count = vt_data[0] / 4.0
+        return int(quad_count * 2)
+
+    @staticmethod
+    def _build_mesh_job(blocks, light_full, position, ao_strength, ao_enabled, ambient):
+        """Build vt_data for a sector snapshot; runs off the main thread."""
+        # Compute exposed faces and lighting (if provided).
+        # Reuse _compute_exposed logic inline to avoid touching shared state.
+        air = (BLOCK_SOLID[blocks] == 0)
+        solid = (blocks > 0) & (blocks != WATER)
+        exposed_faces = numpy.zeros(blocks.shape + (6,), dtype=bool)
+        neighbor = blocks[:,1:,:]
+        neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[:,:-1,:]))
+        exposed_faces[:,:-1,:,0] = ~neighbor_occ
+        neighbor = blocks[:,:-1,:]
+        neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[:,1:,:]))
+        exposed_faces[:,1:,:,1] = ~neighbor_occ
+        neighbor = blocks[:-1,:,:]
+        neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[1:,:,:]))
+        exposed_faces[1:,:,:,2] = ~neighbor_occ
+        neighbor = blocks[1:,:,:]
+        neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[:-1,:,:]))
+        exposed_faces[:-1,:,:,3] = ~neighbor_occ
+        neighbor = blocks[:,:,1:]
+        neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[:,:,:-1]))
+        exposed_faces[:,:,:-1,4] = ~neighbor_occ
+        neighbor = blocks[:,:,:-1]
+        neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[:,:,1:]))
+        exposed_faces[:,:,1:,5] = ~neighbor_occ
+        exposed_faces = exposed_faces & solid[..., None]
+
+        if light_full is None:
+            light = numpy.zeros(blocks.shape, dtype=numpy.float32)
+            decay = getattr(config, 'LIGHT_DECAY', 0.75)
+            top_y = blocks.shape[1] - 1
+            for x in range(blocks.shape[0]):
+                for z in range(blocks.shape[2]):
+                    for y in range(top_y, -1, -1):
+                        if air[x, y, z]:
+                            light[x, y, z] = 1.0
+                        else:
+                            break
+            block_emitters = BLOCK_LIGHT_LEVELS or {}
+            for bid, lvl in block_emitters.items():
+                emitters = numpy.argwhere(blocks == bid)
+                for ex, ey, ez in emitters:
+                    light[ex, ey, ez] = max(light[ex, ey, ez], float(lvl))
+            diag_decay = decay * math.sqrt(2.0)
+            corner_decay = decay * math.sqrt(3.0)
+            for _ in range(64):
+                neighbor_max = numpy.zeros_like(light)
+                neighbor_max[:-1,:,:] = numpy.maximum(neighbor_max[:-1,:,:], light[1:,:,:] - decay)
+                neighbor_max[1:,:,:]  = numpy.maximum(neighbor_max[1:,:,:],  light[:-1,:,:] - decay)
+                neighbor_max[:,:-1,:] = numpy.maximum(neighbor_max[:,:-1,:], light[:,1:,:] - decay)
+                neighbor_max[:,1:,:]  = numpy.maximum(neighbor_max[:,1:,:],  light[:,:-1,:] - decay)
+                neighbor_max[:,:,:-1] = numpy.maximum(neighbor_max[:,:,:-1], light[:,:,1:] - decay)
+                neighbor_max[:,:,1:]  = numpy.maximum(neighbor_max[:,:,1:],  light[:,:,:-1] - decay)
+                neighbor_max[:-1,:-1,:] = numpy.maximum(neighbor_max[:-1,:-1,:], light[1:,1:,:] - diag_decay)
+                neighbor_max[:-1,1:,:]  = numpy.maximum(neighbor_max[:-1,1:,:],  light[1:,:-1,:] - diag_decay)
+                neighbor_max[1:,:-1,:]  = numpy.maximum(neighbor_max[1:,:-1,:],  light[:-1,1:,:] - diag_decay)
+                neighbor_max[1:,1:,:]   = numpy.maximum(neighbor_max[1:,1:,:],   light[:-1,:-1,:] - diag_decay)
+                neighbor_max[:-1,:,:-1] = numpy.maximum(neighbor_max[:-1,:,:-1], light[1:,:,1:] - diag_decay)
+                neighbor_max[:-1,:,1:]  = numpy.maximum(neighbor_max[:-1,:,1:],  light[1:,:,:-1] - diag_decay)
+                neighbor_max[1:,:,:-1]  = numpy.maximum(neighbor_max[1:,:,:-1],  light[:-1,:,1:] - diag_decay)
+                neighbor_max[1:,:,1:]   = numpy.maximum(neighbor_max[1:,:,1:],   light[:-1,:,:-1] - diag_decay)
+                neighbor_max[:,:-1,:-1] = numpy.maximum(neighbor_max[:,:-1,:-1], light[:,1:,1:] - diag_decay)
+                neighbor_max[:,1:,:-1]  = numpy.maximum(neighbor_max[:,1:,:-1],  light[:,:-1,1:] - diag_decay)
+                neighbor_max[:,:-1,1:]  = numpy.maximum(neighbor_max[:,:-1,1:],  light[:,1:,:-1] - diag_decay)
+                neighbor_max[:,1:,1:]   = numpy.maximum(neighbor_max[:,1:,1:],   light[:,:-1,:-1] - diag_decay)
+                neighbor_max[:-1,:-1,:-1] = numpy.maximum(neighbor_max[:-1,:-1,:-1], light[1:,1:,1:] - corner_decay)
+                neighbor_max[:-1,:-1,1:]  = numpy.maximum(neighbor_max[:-1,:-1,1:],  light[1:,1:,:-1] - corner_decay)
+                neighbor_max[:-1,1:,:-1]  = numpy.maximum(neighbor_max[:-1,1:,:-1],  light[1:,:-1,1:] - corner_decay)
+                neighbor_max[:-1,1:,1:]   = numpy.maximum(neighbor_max[:-1,1:,1:],   light[1:,:-1,:-1] - corner_decay)
+                neighbor_max[1:,:-1,:-1] = numpy.maximum(neighbor_max[1:,:-1,:-1], light[:-1,1:,1:] - corner_decay)
+                neighbor_max[1:,:-1,1:]  = numpy.maximum(neighbor_max[1:,:-1,1:],  light[:-1,1:,:-1] - corner_decay)
+                neighbor_max[1:,1:,:-1]  = numpy.maximum(neighbor_max[1:,1:,:-1],  light[:-1,:-1,1:] - corner_decay)
+                neighbor_max[1:,1:,1:]   = numpy.maximum(neighbor_max[1:,1:,1:],   light[:-1,:-1,:-1] - corner_decay)
+                new_light = numpy.where(air, numpy.maximum(light, neighbor_max), 0.0)
+                if numpy.array_equal(new_light, light):
+                    break
+                light = new_light
+            light_full = light
+
+        exposed_light = numpy.zeros(blocks.shape+(6,),dtype=numpy.float32)
+        exposed_light[:,:-1,:,0] = light_full[:,1:,:] # up
+        exposed_light[:,1:,:,1] = light_full[:,:-1,:] # down
+        exposed_light[1:,:,:,2] = light_full[:-1,:,:] # left
+        exposed_light[:-1,:,:,3] = light_full[1:,:,:] # right
+        exposed_light[:,:,:-1,4] = light_full[:,:,1:] # front
+        exposed_light[:,:,1:,5] = light_full[:,:,:-1] # back
+
+        exposed_faces = exposed_faces[1:-1,:,1:-1]
+        exposed_light = exposed_light[1:-1,:,1:-1]
+
+        sx, sy, sz, _ = exposed_faces.shape
+        face_mask = exposed_faces.reshape(sx*sy*sz, 6)
+        light_flat = exposed_light.reshape(sx*sy*sz, 6)
+        block_mask = face_mask.any(axis=1)
+        ao = None
+        if ao_enabled and block_mask.any():
+            ao = compute_vertex_ao(
+                BLOCK_SOLID[blocks].astype(bool),
+                (sx, sy, sz),
+                ao_strength,
+                block_mask=block_mask,
+            )
+        v = numpy.array([], dtype=numpy.float32)
+        t = numpy.array([], dtype=numpy.float32)
+        n = numpy.array([], dtype=numpy.float32)
+        c = numpy.array([], dtype=numpy.float32)
+        count = 0
+        sector_grid = numpy.indices((SECTOR_SIZE, SECTOR_HEIGHT, SECTOR_SIZE)).transpose(1,2,3,0).reshape((SECTOR_SIZE*SECTOR_HEIGHT*SECTOR_SIZE,3))
+        if block_mask.any():
+            pos = sector_grid[block_mask] + numpy.array(position)
+            face_mask = face_mask[block_mask]
+            light_flat = light_flat[block_mask]
+            b = blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
+            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos[:,None,None,:]).astype(numpy.float32)
+            tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+            normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
+            colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
+            light = light_flat[:, :, None, None]  # (N,6,1,1)
+            colors_lit = colors_base * (ambient + (1.0 - ambient) * light)
+            if ao is not None:
+                ao_flat = numpy.where(face_mask[..., None], ao, 1.0)
+                colors_lit = colors_lit * ao_flat[..., None]
+
+            colors = numpy.clip(colors_lit, 0, 255)
+            v = verts[face_mask].reshape(-1,3).ravel()
+            t = tex[face_mask].reshape(-1,2).ravel()
+            n = normals[face_mask].reshape(-1,3).ravel()
+            c = colors[face_mask].reshape(-1,3).ravel()
+            count = len(v)//3
+        water_top = numpy.zeros_like(blocks, dtype=bool)
+        water_top[:, :-1, :] = (blocks[:, :-1, :] == WATER) & (blocks[:, 1:, :] != WATER)
+        water_top[:, -1, :] = (blocks[:, -1, :] == WATER)
+        wt_int = water_top[1:-1, :, 1:-1]
+        wt_flat = wt_int.reshape(sx*sy*sz)
+        if wt_flat.any():
+            pos_w = sector_grid[wt_flat] + numpy.array(position)
+            wcount = len(pos_w)
+            b = numpy.full(wcount, WATER, dtype=numpy.int32)
+            verts = (0.5*BLOCK_VERTICES[b].reshape(wcount,6,4,3) + pos_w[:,None,None,:]).astype(numpy.float32)
+            tex = BLOCK_TEXTURES[b][:,:6].reshape(wcount,6,4,2).astype(numpy.float32)
+            normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (wcount,6,4,3)).astype(numpy.float32)
+            colors = BLOCK_COLORS[b][:,:6].reshape(wcount,6,4,3).astype(numpy.float32)
+            face_mask = numpy.zeros((wcount,6), dtype=bool)
+            face_mask[:,0] = True
+
+            wv = verts[face_mask].reshape(-1,3).ravel()
+            wtcoords = tex[face_mask].reshape(-1,2).ravel()
+            wn = normals[face_mask].reshape(-1,3).ravel()
+            wc = colors[face_mask].reshape(-1,3).ravel()
+            v = numpy.concatenate([v, wv])
+            t = numpy.concatenate([t, wtcoords])
+            n = numpy.concatenate([n, wn])
+            c = numpy.concatenate([c, wc])
+            count += len(wv)//3
+        return count, v, t, n, c
+
+    def _queue_upload(self, sector, priority=False):
+        """Queue a sector for upload/rebuild; avoid reshuffling if already queued."""
+        if sector in self.pending_upload_set:
+            return
+        self.pending_upload_set.add(sector)
+        if priority:
+            self.pending_uploads.appendleft(sector)
+        else:
             self.pending_uploads.append(sector)
 
-    def process_pending_uploads(self, frame_start=None, upload_budget=None):
+    def _submit_mesh_job(self, sector):
+        """Kick off an async mesh build for this sector."""
+        if sector.mesh_job_pending or (sector.vt_data is not None and not sector.invalidate_vt):
+            sector.mesh_job_dirty = True
+            return
+        sector.mesh_job_pending = True
+        sector.mesh_job_dirty = False
+        sector.mesh_gen += 1
+        blocks = sector.blocks.copy()
+        light_copy = sector.light.copy() if sector.light is not None else None
+        ao_strength = getattr(config, 'AO_STRENGTH', 0.0)
+        ao_enabled = getattr(config, 'AO_ENABLED', True)
+        ambient = getattr(config, 'AMBIENT_LIGHT', 0.0)
+        gen = sector.mesh_gen
+        pos = sector.position
+
+        def _done(fut):
+            self.mesh_results.put(fut)
+        future = self.mesh_executor.submit(
+            self._build_mesh_job,
+            blocks,
+            light_copy,
+            pos,
+            ao_strength,
+            ao_enabled,
+            ambient,
+        )
+        future.gen = gen
+        future.pos = pos
+        future.add_done_callback(_done)
+
+    def _drain_mesh_results(self):
+        """Consume finished mesh jobs and enqueue uploads if still valid."""
+        while not self.mesh_results.empty():
+            fut = self.mesh_results.get_nowait()
+            try:
+                vt_data = fut.result()
+            except Exception as e:
+                print('[mesh] job failed', e)
+                continue
+            pos = getattr(fut, 'pos', None)
+            gen = getattr(fut, 'gen', None)
+            if pos is None:
+                continue
+            sector = self.sectors.get(pos)
+            if sector is None:
+                continue
+            sector.mesh_job_pending = False
+            if sector.mesh_job_dirty:
+                sector.mesh_job_dirty = False
+                self._submit_mesh_job(sector)
+                continue
+            if gen is not None and sector.mesh_gen != gen:
+                # stale result
+                continue
+            sector.vt_data = vt_data
+            sector.invalidate()
+            if sector.shown:
+                self._queue_upload(sector)
+
+    def process_pending_uploads(self, frame_start=None, upload_budget=None, uploaded_tris=0, tri_budget=None):
         """Upload queued sector vertex data while budget remains."""
         while self.pending_uploads and self._has_budget(frame_start, upload_budget):
             s = self.pending_uploads.popleft()
             self.pending_upload_set.discard(s)
             if s.vt_data is not None:
+                tri_count = self._triangles_in_vt(s.vt_data)
+                over_time = not self._has_budget(frame_start, upload_budget)
+                over_tris = tri_budget is not None and (uploaded_tris + tri_count) > tri_budget
+                if over_time or over_tris:
+                    # Not enough budget left; try next frame.
+                    self._queue_upload(s)
+                    break
                 s.check_show(add_to_batch=True)
+                uploaded_tris += tri_count
             elif s.invalidate_vt:
                 s.check_show(add_to_batch=True)
                 s.invalidate_vt = False
+        return uploaded_tris
 
     def _compute_exposed(self, blocks):
         # Occlusion mask: general occluders + same-type occluders (e.g., leaves occlude leaves).
@@ -388,7 +652,13 @@ class ModelProxy(object):
         sector.invalidate()
 
     def _sync_edges_and_rebuild(self, sector):
-        # Copy boundary columns between this sector and loaded neighbors, then rebuild both.
+        # Copy boundary columns between this sector and loaded neighbors, then queue rebuilds.
+        require_diag = getattr(config, 'SEAM_REQUIRE_DIAGONALS', False)
+        if not self._neighbors_ready(sector, require_diag):
+            # Defer until neighbors are available.
+            self.pending_seam_rebuild.add(sector.position)
+            return
+        self.pending_seam_rebuild.discard(sector.position)
         neighbors = list(self.neighbor_sectors(sector.position))
         for dx, dz, n in neighbors:
             if dx == 1:
@@ -419,8 +689,18 @@ class ModelProxy(object):
                     sector.light[:,:,0] = n.light[:,:,SECTOR_SIZE]
             n.vt_data = None
             n.invalidate()
+            if n.shown:
+                self._submit_mesh_job(n)
+            else:
+                n.needs_seam_refresh = True
         sector.vt_data = None
         sector.invalidate()
+        if sector.shown:
+            # Self rebuild with normal priority to minimize reordering churn.
+            self._submit_mesh_job(sector)
+        else:
+            sector.needs_seam_refresh = True
+        sector.needs_seam_refresh = False
 
     def set_matrices(self, projection, view, camera_pos):
         proj = numpy.array(projection, dtype='f4').reshape((4, 4))
@@ -446,10 +726,14 @@ class ModelProxy(object):
             self.pending_uploads.remove(sector)
         except ValueError:
             pass
+        self.pending_seam_rebuild.discard(sector.position)
         if sector.vt is not None:
             sector.vt.delete()
             sector.vt = None
         sector.vt_data = None
+        sector.mesh_job_pending = False
+        sector.mesh_job_dirty = False
+        sector.patch_vt = []
         self.unused_batches.append(sector.batch)
         del self.sectors[sector.position]
 
@@ -466,6 +750,15 @@ class ModelProxy(object):
         spos = sectorize(position)
         if spos in self.sectors:
             s = self.sectors[spos]
+            # Apply locally for instant feedback
+            rel = numpy.array(position) - numpy.array(s.position) + numpy.array([1,0,1])
+            try:
+                s.blocks[rel[0], rel[1], rel[2]] = block
+            except Exception:
+                pass
+            s.invalidate_vt = True
+            self._submit_mesh_job(s)
+            s.edit_inflight = True
             blocks = s.blocks
             sector_data = [(spos, blocks)]
             for np in [(1,0,0), (-1,0,0), (0,0,1), (0,0,-1)]:
@@ -478,7 +771,28 @@ class ModelProxy(object):
             # If the loader is busy with a sector load, mark it as skippable once it returns.
             if self.active_loader_request[0] == 'sector_blocks':
                 self._skip_active_sector = True
-            self.loader_requests.insert(0,['set_block', [notify_server, position, block, sector_data]])
+            s.edit_token += 1
+            self.sector_edit_tokens[spos] = s.edit_token
+            self.loader_requests.insert(0,['set_block', [notify_server, position, block, sector_data, s.edit_token]])
+            # Immediate visual patch
+            for pv in s.patch_vt:
+                pv.delete()
+            s.patch_vt = []
+            if block != 0:
+                world_pos = numpy.array(position, dtype=float)
+                vt = self._build_block_vt(block, world_pos)
+                tri_verts, tri_tex, tri_norm, tri_col = self._triangulate_vt(vt)
+                patch = self.program.vertex_list(
+                    len(tri_verts),
+                    gl.GL_TRIANGLES,
+                    batch=s.batch,
+                    group=s.group,
+                    position=('f', tri_verts.ravel().astype('f4')),
+                    tex_coords=('f', tri_tex.ravel().astype('f4')),
+                    normal=('f', tri_norm.ravel().astype('f4')),
+                    color=('f', tri_col.ravel().astype('f4')),
+                )
+                s.patch_vt.append(patch)
 
     def remove_block(self, position, notify_server = True):
         pos = normalize(position)
@@ -520,6 +834,8 @@ class ModelProxy(object):
     def draw(self, position, frustum_circle, frame_start=None, upload_budget=None, defer_uploads=False):
         """Draw only sectors intersecting the current view frustum projection. Limit or defer GPU uploads to respect frame budget."""
         draw_invalid = True
+        uploaded_tris = 0
+        tri_budget = getattr(config, 'UPLOAD_TRIANGLE_BUDGET', None)
 
         def budget_ok():
             return self._has_budget(frame_start, upload_budget)
@@ -527,16 +843,23 @@ class ModelProxy(object):
         for s in self.sectors.values():
             visible = self._sector_overlaps_frustum(s.position, frustum_circle)
             s.shown = visible
+            if visible and s.needs_seam_refresh:
+                s.needs_seam_refresh = False
+                self._sync_edges_and_rebuild(s)
             if not visible:
                 continue
 
             uploaded = False
             # Try to upload fresh vt_data if allowed; otherwise queue it.
             if s.vt_data is not None:
-                if not defer_uploads and budget_ok():
+                tri_count = self._triangles_in_vt(s.vt_data)
+                over_tris = tri_budget is not None and (uploaded_tris + tri_count) > tri_budget
+                over_time = not budget_ok()
+                if not defer_uploads and not over_time and not over_tris:
                     s.check_show(add_to_batch=True)
                     self.pending_upload_set.discard(s)
                     uploaded = True
+                    uploaded_tris += tri_count
                 else:
                     self._queue_upload(s)
             # Handle invalidated buffers (edge sync) within the budget or queue.
@@ -553,9 +876,11 @@ class ModelProxy(object):
             # Draw existing batch; skip uploads here to honor the budget.
             draw_invalid = s.draw(draw_invalid, allow_upload=False)
 
+        # Drain async mesh results before uploads.
+        self._drain_mesh_results()
         # Drain pending uploads while budget remains (only when not deferring).
         if not defer_uploads:
-            self.process_pending_uploads(frame_start, upload_budget)
+            uploaded_tris = self.process_pending_uploads(frame_start, upload_budget, uploaded_tris, tri_budget)
 
     def neighbor_sectors(self, pos):
         """
@@ -607,6 +932,54 @@ class ModelProxy(object):
         angle_penalty = 1.0 - facing  # 0 front, 2 back
         return float(dist + angle_penalty * (SECTOR_SIZE ** 2))
 
+    def _neighbors_ready(self, sector, require_diagonals=False):
+        """Return True if the cardinal (and optionally diagonal) neighbors are loaded."""
+        x0, _, z0 = sector.position
+        card = [
+            (x0 + SECTOR_SIZE, 0, z0),
+            (x0 - SECTOR_SIZE, 0, z0),
+            (x0, 0, z0 + SECTOR_SIZE),
+            (x0, 0, z0 - SECTOR_SIZE),
+        ]
+        for p in card:
+            if p not in self.sectors:
+                return False
+        if not require_diagonals:
+            return True
+        diag = [
+            (x0 + SECTOR_SIZE, 0, z0 + SECTOR_SIZE),
+            (x0 + SECTOR_SIZE, 0, z0 - SECTOR_SIZE),
+            (x0 - SECTOR_SIZE, 0, z0 + SECTOR_SIZE),
+            (x0 - SECTOR_SIZE, 0, z0 - SECTOR_SIZE),
+        ]
+        return all(p in self.sectors for p in diag)
+
+    def _process_pending_seams(self, max_count=None):
+        """Try to rebuild any sectors that were waiting for neighbors."""
+        if not self.pending_seam_rebuild:
+            return
+        require_diag = getattr(config, 'SEAM_REQUIRE_DIAGONALS', False)
+        processed = 0
+        # Iterate over a copy to allow removal during rebuild.
+        for pos in list(self.pending_seam_rebuild):
+            if max_count is not None and processed >= max_count:
+                break
+            s = self.sectors.get(pos)
+            if s is None:
+                self.pending_seam_rebuild.discard(pos)
+                continue
+            if not s.shown:
+                s.needs_seam_refresh = True
+                continue
+            if self._neighbors_ready(s, require_diag):
+                self._sync_edges_and_rebuild(s)
+                processed += 1
+        # Clean up fulfilled entries
+        for pos in list(self.pending_seam_rebuild):
+            s = self.sectors.get(pos)
+            if s and not s.needs_seam_refresh and self._neighbors_ready(s, require_diag):
+                self.pending_seam_rebuild.discard(pos)
+
     def update_sectors(self, old, new, player_pos=None, look_vec=None):
         """
         the observer has moved from sector old to new
@@ -616,7 +989,9 @@ class ModelProxy(object):
             if self.update_ref_pos != new:
                 self.update_ref_pos = new
                 self.update_sectors_pos = []
-                G = range(-LOADED_SECTORS,LOADED_SECTORS+1)
+                load_radius = max(self.load_radius, LOADED_SECTORS)
+                keep_radius = max(self.keep_radius, load_radius)
+                G = range(-load_radius, load_radius+1)
                 for dx,dy,dz in itertools.product(G,(0,),G):
                     pos = numpy.array([new[0],new[1],new[2]]) \
                         + numpy.array([dx*SECTOR_SIZE,dy,dz*SECTOR_SIZE])
@@ -625,7 +1000,7 @@ class ModelProxy(object):
                     if pos not in self.sectors and pos != self.active_loader_request[1]:
                         self.update_sectors_pos.append((priority,pos))
                 for s in list(self.sectors):
-                    if abs(new[0] - s[0])>LOADED_SECTORS*SECTOR_SIZE or abs(new[2] - s[2]) > LOADED_SECTORS*SECTOR_SIZE:
+                    if abs(new[0] - s[0])>keep_radius*SECTOR_SIZE or abs(new[2] - s[2]) > keep_radius*SECTOR_SIZE:
                         print('dropping sector',s,len(self.sectors))
                         self.release_sector(self.sectors[s])
                 self.update_sectors_pos = sorted(self.update_sectors_pos)
@@ -648,8 +1023,20 @@ class ModelProxy(object):
 
         if self.loader.poll():
             try:
-                msg, data = self.loader.recv()
-                print('client received',msg)
+                recv_start = time.perf_counter()
+                raw = self.loader.recv()
+                recv_ms = (time.perf_counter() - recv_start) * 1000.0
+                # Allow either (msg, data) tuples or variable-length lists.
+                msg, data = None, None
+                if isinstance(raw, (list, tuple)) and len(raw) > 0:
+                    msg = raw[0]
+                    if len(raw) == 2:
+                        data = raw[1]
+                    else:
+                        data = raw[1:]
+                else:
+                    print('client recv unexpected payload', raw)
+                print(f'client received {msg} in {recv_ms:.1f}ms')
                 if msg == 'sector_blocks':
                     spos1, b1, v1, light1 = data
                     self.n_responses = self.n_requests
@@ -665,8 +1052,21 @@ class ModelProxy(object):
                     self.n_responses = self.n_requests
                     self.active_loader_request = [None, None]
                     print('took', time.time()-self.loader_time)
-                    for spos, b, v, light in data:
+                    # sector_blocks2 payload may be [sector_results, token] or just sector_results
+                    token = None
+                    sector_results = data
+                    if isinstance(data, (list, tuple)) and len(data) == 2 and isinstance(data[1], int):
+                        sector_results, token = data
+                    for item in sector_results:
+                        spos, b, v, light = item
+                        if token is not None:
+                            # Drop stale responses superseded by newer edits.
+                            if self.sector_edit_tokens.get(spos, 0) != token:
+                                continue
                         self._update_sector(spos, b, v, light)
+                # After processing loader message, drain a limited number of pending seam rebuilds to avoid bursts.
+                max_seams = getattr(config, 'MAX_SEAM_REBUILDS_PER_TICK', None)
+                self._process_pending_seams(max_seams)
             except EOFError:
                 print('loader returned EOF')
 
@@ -697,6 +1097,20 @@ class ModelProxy(object):
             print("[DEBUG] block vertex sample:", v[:18], "tex:", t[:8])
         return count, v, t, n, c
 
+    def _triangulate_vt(self, vt_data):
+        """Convert quad vt_data to triangle arrays."""
+        count, v, t, n, c = vt_data
+        quad_verts = numpy.array(v, dtype='f4').reshape(-1, 4, 3)
+        quad_tex = numpy.array(t, dtype='f4').reshape(-1, 4, 2)
+        quad_norm = numpy.array(n, dtype='f4').reshape(-1, 4, 3)
+        quad_col = numpy.array(c, dtype='f4').reshape(-1, 4, 3)
+        order = [0, 1, 2, 0, 2, 3]
+        tri_verts = quad_verts[:, order, :].reshape(-1, 3)
+        tri_tex = quad_tex[:, order, :].reshape(-1, 2)
+        tri_norm = quad_norm[:, order, :].reshape(-1, 3)
+        tri_col = quad_col[:, order, :].reshape(-1, 3)
+        return tri_verts, tri_tex, tri_norm, tri_col
+
     def _update_sector(self, spos, b, v, light):
         if b is not None:
             if spos in self.sectors:
@@ -714,6 +1128,9 @@ class ModelProxy(object):
                 s.vt_data = v
                 self.sectors[sectorize(spos)] = s
                 self._sync_edges_and_rebuild(s)
+        # A new/updated sector may unblock pending seam rebuilds.
+        max_seams = getattr(config, 'MAX_SEAM_REBUILDS_PER_TICK', None)
+        self._process_pending_seams(max_seams)
 
     def hit_test(self, position, vector, max_distance=8):
         """ Line of sight search from current position. If a block is

@@ -5,10 +5,15 @@ DIST = 128
 TICKS_PER_SEC = 60
 TARGET_FPS = 60
 
+# UPLOAD_TRIANGLE_CHUNK = 5000
+# UPLOAD_TRIANGLE_BUDGET = 10000
+
 # Size of sectors used to ease block loading.
 SECTOR_SIZE = 32 #width and depth
 SECTOR_HEIGHT = 256 #height of world
 LOADED_SECTORS = DIST//SECTOR_SIZE + 1 #number of sections in (x,z) directions to load sectors for
+LOAD_RADIUS = LOADED_SECTORS + 1
+KEEP_RADIUS = LOAD_RADIUS*2
 
 WALKING_SPEED = 5
 FLYING_SPEED = 15
@@ -35,6 +40,10 @@ LOADER_PORT = 20230
 
 # Debug: skip world loading and render a single block in front of the player.
 DEBUG_SINGLE_BLOCK = False
+
+# Sector streaming / seam rebuild behavior
+# How many deferred seam rebuilds to process per tick (None for unlimited).
+MAX_SEAM_REBUILDS_PER_TICK = 1
 
 # Lighting settings
 LIGHT_DECAY = 0.1  # per-step attenuation for flood-fill lighting

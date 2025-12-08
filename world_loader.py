@@ -104,16 +104,33 @@ class WorldLoader(object):
                     sector_block_delta = self.db.get_sector_data(self.pos)
                 self._initialize(self.pos, sector_block_delta)
                 self._calc_vertex_data(self.pos)
-                cpipe.send_bytes(pickle.dumps(['sector_blocks',[self.pos, self.blocks, self.vt_data, self.light]],-1))
+                t0 = time.perf_counter()
+                payload = pickle.dumps(['sector_blocks',[self.pos, self.blocks, self.vt_data, self.light]],-1)
+                t_dump = (time.perf_counter() - t0) * 1000.0
+                t1 = time.perf_counter()
+                cpipe.send_bytes(payload)
+                t_send = (time.perf_counter() - t1) * 1000.0
+                loader_log('pickle.dumps+send sector %s: %.1fms dump, %.1fms send, %d bytes', self.pos, t_dump, t_send, len(payload))
             if msg == 'set_block':
-                notify_server, pos, block_id, sector_data = data
+                # data may include an optional client token at the end
+                if len(data) == 4:
+                    notify_server, pos, block_id, sector_data = data
+                    token = None
+                else:
+                    notify_server, pos, block_id, sector_data, token = data
                 sector_result = []
                 for spos, blocks in sector_data:
                     self.blocks = blocks
                     self.set_block(pos, spos, block_id)
                     self._calc_vertex_data(spos)
                     sector_result.append((spos, self.blocks, self.vt_data, self.light))
-                cpipe.send_bytes(pickle.dumps(['sector_blocks2',sector_result],-1))
+                t0 = time.perf_counter()
+                payload = pickle.dumps(['sector_blocks2',sector_result, token],-1)
+                t_dump = (time.perf_counter() - t0) * 1000.0
+                t1 = time.perf_counter()
+                cpipe.send_bytes(payload)
+                t_send = (time.perf_counter() - t1) * 1000.0
+                loader_log('pickle.dumps+send set_block batch: %.1fms dump, %.1fms send, %d bytes', t_dump, t_send, len(payload))
                 if spipe is not None:
                     if notify_server:
                         spipe.send(('set_block', [pos, block_id]))
