@@ -66,3 +66,9 @@ AO_DEBUG_SHADER_FORCE = False
 USE_EXPERIMENTAL_BIOME_GEN = True
 # Performance toggle for biome generator: skip caves/ores and limit structures/trees.
 BIOME_FAST_MODE = False
+# Macro features: large-scale river and road networks.
+ENABLE_RIVER_NETWORKS = False
+ENABLE_ROAD_NETWORKS = False
+RIVER_NETWORK_SPACING = 320
+ROAD_NETWORK_SPACING = 220
+ROAD_MAX_GRADE = 1.25

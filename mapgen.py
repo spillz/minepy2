@@ -176,6 +176,25 @@ class BiomeGenerator:
             scale=1.0, offset=0.0)
         self.decor_detail = SectorNoise2D(seed=seed + 151, step=55.0, step_offset=4300,
             scale=1.0, offset=0.0)
+        # Macro feature controls.
+        self.enable_rivers = getattr(config, 'ENABLE_RIVER_NETWORKS', False)
+        self.enable_roads = getattr(config, 'ENABLE_ROAD_NETWORKS', False)
+        self.river_spacing = float(getattr(config, 'RIVER_NETWORK_SPACING', 320))
+        self.road_spacing = float(getattr(config, 'ROAD_NETWORK_SPACING', 220))
+        self.road_grade_limit = float(getattr(config, 'ROAD_MAX_GRADE', 1.25))
+        # Macro path helpers use standalone simplex noise for global lookups.
+        self.river_height_field = noise.SimplexNoise(seed=seed + 200)
+        self.river_vec_u = noise.SimplexNoise(seed=seed + 201)
+        self.river_vec_v = noise.SimplexNoise(seed=seed + 202)
+        self.river_width_noise = noise.SimplexNoise(seed=seed + 203)
+        self.road_vec_u = noise.SimplexNoise(seed=seed + 204)
+        self.road_vec_v = noise.SimplexNoise(seed=seed + 205)
+        self.road_height_noise = noise.SimplexNoise(seed=seed + 206)
+        self._macro_path_cache = {'river': {}, 'road': {}}
+        self.river_step = 12.0
+        self.road_step = 7.0
+        self.river_max_steps = 1400
+        self.road_max_steps = 1000
         # Underground detail
         if not self.fast:
             # Caves derived from the difference of two 2D noise fields (faster than full 3D).
@@ -271,6 +290,545 @@ class BiomeGenerator:
         templates.append(build(5, 2))
         templates.append(build(6, 2))
         return templates
+
+    # ----- Macro feature helpers -----
+
+    def _sector_origin(self, position):
+        if len(position) >= 3:
+            return int(position[0]), int(position[2])
+        if len(position) == 2:
+            return int(position[0]), int(position[1])
+        return int(position[0]), 0
+
+    def _world_axes(self, position):
+        sx = SECTOR_SIZE + 2
+        sz = SECTOR_SIZE + 2
+        ox, oz = self._sector_origin(position)
+        xs = numpy.arange(sx, dtype=float) + (ox - 1)
+        zs = numpy.arange(sz, dtype=float) + (oz - 1)
+        return xs, zs
+
+    def _macro_random(self, gx, gz, salt):
+        # Splitmix64-style integer hash for deterministic floats in [0,1).
+        h = (int(gx) * 0x632BE59BD9B4E019) ^ (int(gz) * 0x9E3779B97F4A7C15) ^ (salt * 0x94D049BB133111EB) ^ int(self.seed)
+        h &= (1 << 64) - 1
+        h = (h ^ (h >> 30)) * 0xbf58476d1ce4e5b9 & ((1 << 64) - 1)
+        h = (h ^ (h >> 27)) * 0x94d049bb133111eb & ((1 << 64) - 1)
+        h ^= (h >> 31)
+        return (h & ((1 << 53) - 1)) / float(1 << 53)
+
+    def _trim_path_to_bounds(self, path, bounds, margin):
+        xmin, xmax, zmin, zmax = bounds
+        xmin -= margin
+        xmax += margin
+        zmin -= margin
+        zmax += margin
+        keep = [idx for idx, (x, z) in enumerate(path)
+                if xmin <= x <= xmax and zmin <= z <= zmax]
+        if not keep:
+            return None
+        start = max(0, keep[0] - 1)
+        end = min(len(path), keep[-1] + 2)
+        return path[start:end]
+
+    def _ensure_macro_path(self, kind, gx, gz, start):
+        cache = self._macro_path_cache[kind]
+        key = (int(gx), int(gz))
+        if key in cache:
+            return cache[key]
+        path = self._build_macro_path(kind, start)
+        cache[key] = path
+        return path
+
+    def _build_macro_path(self, kind, start):
+        start_vec = numpy.array(start, dtype=float)
+        forward = self._integrate_macro_path(kind, start_vec.copy(), direction=1)
+        backward = self._integrate_macro_path(kind, start_vec.copy(), direction=-1)
+        backward.reverse()
+        return backward[:-1] + forward
+
+    def _integrate_macro_path(self, kind, pos, direction):
+        pts = [tuple(pos)]
+        step = self.river_step if kind == 'river' else self.road_step
+        max_steps = self.river_max_steps if kind == 'river' else self.road_max_steps
+        for _ in range(max_steps):
+            vec = self._river_vector(pos[0], pos[1]) if kind == 'river' else self._road_vector(pos[0], pos[1])
+            norm = math.hypot(vec[0], vec[1])
+            if norm < 1e-5:
+                break
+            pos = pos + (vec / norm) * (step * direction)
+            pts.append((float(pos[0]), float(pos[1])))
+            if abs(pos[0]) > 8_000_000 or abs(pos[1]) > 8_000_000:
+                break
+        return pts
+
+    def _river_vector(self, x, z):
+        scale = 1.0 / 1800.0
+        delta = 35.0
+        center = numpy.array([[x * scale, z * scale]], dtype=float)
+        h0 = self.river_height_field.noise(center)[0]
+        hx = self.river_height_field.noise(numpy.array([[(x + delta) * scale, z * scale]], dtype=float))[0]
+        hz = self.river_height_field.noise(numpy.array([[x * scale, (z + delta) * scale]], dtype=float))[0]
+        grad = numpy.array([h0 - hx, h0 - hz], dtype=float)
+        jitter = numpy.array([
+            self.river_vec_u.noise(numpy.array([[x / 620.0, z / 620.0]], dtype=float))[0],
+            self.river_vec_v.noise(numpy.array([[x / 620.0, z / 620.0]], dtype=float))[0],
+        ])
+        vec = grad * 0.8 + jitter * 0.4
+        norm = math.hypot(vec[0], vec[1])
+        if norm < 1e-4:
+            return numpy.array([0.0, -1.0])
+        return vec / norm
+
+    def _road_vector(self, x, z):
+        freq = 1.0 / 320.0
+        jitter = 1.0 / 1500.0
+        u = self.road_vec_u.noise(numpy.array([[x * freq, z * freq]], dtype=float))[0]
+        v = self.road_vec_v.noise(numpy.array([[x * freq, z * freq]], dtype=float))[0]
+        warp_x = self.river_vec_u.noise(numpy.array([[x * jitter, z * jitter]], dtype=float))[0] * 0.2
+        warp_z = self.river_vec_v.noise(numpy.array([[x * jitter, z * jitter]], dtype=float))[0] * 0.2
+        vec = numpy.array([u + warp_x, v + warp_z], dtype=float)
+        norm = math.hypot(vec[0], vec[1])
+        if norm < 1e-4:
+            return numpy.array([1.0, 0.0])
+        return vec / norm
+
+    def _macro_surface_height(self, wx, wz):
+        coarse = self.river_height_field.noise(numpy.array([[wx / 2600.0, wz / 2600.0]], dtype=float))[0] * 55.0
+        detail = self.road_height_noise.noise(numpy.array([[wx / 650.0, wz / 650.0]], dtype=float))[0] * 12.0
+        return numpy.clip(68.0 + coarse + detail, 6.0, SECTOR_HEIGHT - 6.0)
+
+    def _sample_local_height(self, wx, wz, elevation, position):
+        xs, zs = self._world_axes(position)
+        base_x = xs[0]
+        base_z = zs[0]
+        lx = int(round(wx - base_x))
+        lz = int(round(wz - base_z))
+        sx = elevation.shape[0]
+        sz = elevation.shape[1]
+        if 0 <= lx < sx and 0 <= lz < sz:
+            return float(elevation[lx, lz])
+        return self._macro_surface_height(wx, wz)
+
+    def _segment_local_grid(self, xs, zs, ax, az, bx, bz, width):
+        seg_dx = bx - ax
+        seg_dz = bz - az
+        seg_len2 = seg_dx * seg_dx + seg_dz * seg_dz
+        if seg_len2 < 1e-6:
+            return None
+        sx = len(xs)
+        sz = len(zs)
+        ix0 = max(0, int(math.floor(min(ax, bx) - width - xs[0])))
+        ix1 = min(sx - 1, int(math.ceil(max(ax, bx) + width - xs[0])))
+        iz0 = max(0, int(math.floor(min(az, bz) - width - zs[0])))
+        iz1 = min(sz - 1, int(math.ceil(max(az, bz) + width - zs[0])))
+        if ix1 < ix0 or iz1 < iz0:
+            return None
+        sub_xs = xs[ix0:ix1 + 1]
+        sub_zs = zs[iz0:iz1 + 1]
+        grid_x, grid_z = numpy.meshgrid(sub_xs, sub_zs, indexing='ij')
+        dx = grid_x - ax
+        dz = grid_z - az
+        t = ((dx * seg_dx) + (dz * seg_dz)) / seg_len2
+        t = numpy.clip(t, 0.0, 1.0)
+        closest_x = ax + seg_dx * t
+        closest_z = az + seg_dz * t
+        dist = numpy.sqrt((grid_x - closest_x) ** 2 + (grid_z - closest_z) ** 2)
+        influence = numpy.clip(1.0 - dist / max(width, 1.0), 0.0, 1.0)
+        apply = influence > 0.0
+        if not apply.any():
+            return None
+        return ix0, ix1, iz0, iz1, influence, t, apply
+
+    def _gather_macro_paths(self, kind, position, bounds):
+        spacing = self.river_spacing if kind == 'river' else self.road_spacing
+        threshold = 0.82 if kind == 'river' else 0.58
+        margin = 96 if kind == 'river' else 64
+        xmin, xmax, zmin, zmax = bounds
+        gx_min = int(math.floor((xmin - margin) / spacing)) - 1
+        gx_max = int(math.ceil((xmax + margin) / spacing)) + 1
+        gz_min = int(math.floor((zmin - margin) / spacing)) - 1
+        gz_max = int(math.ceil((zmax + margin) / spacing)) + 1
+        paths = []
+        for gx in range(gx_min, gx_max + 1):
+            for gz in range(gz_min, gz_max + 1):
+                if self._macro_random(gx, gz, salt=13 if kind == 'river' else 29) < threshold:
+                    continue
+                start_x = gx * spacing + spacing * 0.5
+                start_z = gz * spacing + spacing * 0.5
+                path = self._ensure_macro_path(kind, gx, gz, (start_x, start_z))
+                trimmed = self._trim_path_to_bounds(path, bounds, margin)
+                if trimmed:
+                    paths.append(trimmed)
+        return paths
+
+    def _road_cell_seed(self, gx, gz):
+        """
+        Deterministic jittered site position for Voronoi-style roads.
+        gx, gz are integer grid cell coordinates in 'road space'.
+
+        We use ROAD_NETWORK_SPACING as the base cell size, and jitter the
+        site inside each cell using simplex noise so it is globally consistent.
+        """
+        spacing = self.road_spacing  # ROAD_NETWORK_SPACING from config
+        base_x = gx * spacing + 0.5 * spacing
+        base_z = gz * spacing + 0.5 * spacing
+
+        # Use the existing road_vec_u / road_vec_v as deterministic jitter.
+        # Scale the noise by ~40% of spacing so sites don't leave their cell.
+        jitter_scale = 0.4 * spacing
+        # Low-frequency coordinates so jitter is stable across the world.
+        jx = self.road_vec_u.noise(
+            numpy.array([[gx * 0.37, gz * 0.41]], dtype=float)
+        )[0] * jitter_scale
+        jz = self.road_vec_v.noise(
+            numpy.array([[gx * 0.29, gz * 0.53]], dtype=float)
+        )[0] * jitter_scale
+
+        return base_x + jx, base_z + jz
+
+    def _road_voronoi_distances(self, wx, wz):
+        """
+        Compute the distances to the two nearest Voronoi sites in the
+        jittered road grid near world position (wx, wz).
+
+        Returns (d1, d2) with d1 <= d2.
+        """
+        spacing = self.road_spacing
+        # Which cell are we in?
+        cx = int(math.floor(wx / spacing))
+        cz = int(math.floor(wz / spacing))
+
+        best1 = 1e30  # nearest squared distance
+        best2 = 1e30  # second-nearest squared distance
+
+        # Only need a 3x3 neighborhood of cells to find nearest 2 sites.
+        for gx in range(cx - 1, cx + 2):
+            for gz in range(cz - 1, cz + 2):
+                sx, sz = self._road_cell_seed(gx, gz)
+                dx = wx - sx
+                dz = wz - sz
+                d2 = dx * dx + dz * dz
+                if d2 < best1:
+                    best2 = best1
+                    best1 = d2
+                elif d2 < best2:
+                    best2 = d2
+
+        d1 = math.sqrt(best1)
+        d2 = math.sqrt(best2)
+        return d1, d2
+
+
+    def _compute_river_plan(self, position, elevation):
+        """
+        Plan rivers as canyons / underground channels that always keep the
+        water surface at the global WATER_LEVEL.
+
+        We still use the existing macro paths for horizontal layout, but
+        vertical placement is simple:
+          - water_top = WATER_LEVEL
+          - river floor = WATER_LEVEL - depth(x, z)
+
+        We do NOT lower 'elevation' here; carving happens later in
+        _apply_river_columns, so rivers can be underground in uplifted
+        regions and surface canyons elsewhere.
+        """
+        xs, zs = self._world_axes(position)
+        bounds = (xs[0], xs[-1], zs[0], zs[-1])
+        paths = self._gather_macro_paths('river', position, bounds)
+        if not paths:
+            return None
+
+        sx = len(xs)
+        sz = len(zs)
+        mask = numpy.zeros((sx, sz), dtype=bool)
+        depth = numpy.zeros((sx, sz), dtype=float)
+
+        # Accumulate desired depth along macro paths.
+        for path in paths:
+            for (ax, az), (bx, bz) in zip(path[:-1], path[1:]):
+                seg_mid_x = 0.5 * (ax + bx)
+                seg_mid_z = 0.5 * (az + bz)
+                base = 0.5 + 0.5 * self.river_width_noise.noise(
+                    numpy.array([[seg_mid_x / 540.0, seg_mid_z / 540.0]], dtype=float)
+                )[0]
+                width = 5.0 + base * 15.0
+                carve_depth = 5.0 + base * 12.0
+
+                res = self._segment_local_grid(xs, zs, ax, az, bx, bz, width)
+                if not res:
+                    continue
+                ix0, ix1, iz0, iz1, influence, _, apply = res
+
+                sub_depth = depth[ix0:ix1 + 1, iz0:iz1 + 1]
+                sub_mask = mask[ix0:ix1 + 1, iz0:iz1 + 1]
+
+                sub_mask |= apply
+                sub_depth[:] = numpy.maximum(sub_depth, carve_depth * influence)
+
+                depth[ix0:ix1 + 1, iz0:iz1 + 1] = sub_depth
+                mask[ix0:ix1 + 1, iz0:iz1 + 1] = sub_mask
+
+        if not mask.any():
+            return None
+
+        # Fixed water surface at global sea level.
+        water_top = float(WATER_LEVEL)
+        carve_depth = numpy.clip(depth, 0.0, 24.0)
+
+        # River floor is below the water surface by 'carve_depth'.
+        floor = numpy.clip(
+            water_top - numpy.maximum(carve_depth, 2.0),
+            2.0,
+            SECTOR_HEIGHT - 8.0,
+        )
+        surface = numpy.clip(
+            water_top,
+            floor + 1.0,
+            SECTOR_HEIGHT - 5.0,
+        )
+
+        # Note: we deliberately do NOT modify 'elevation' here.
+        # Rivers will be carved directly into the block volume in
+        # _apply_river_columns, producing canyons or underground channels.
+
+        return {
+            'mask': mask,
+            'depth': carve_depth,
+            'floor': floor,
+            'surface': surface,
+        }
+
+    def _sample_path_heights(self, path, elevation, position):
+        """
+        Sample road heights along a macro path using the global macro surface,
+        not the locally modified elevation (which may include cliff boosts).
+        This keeps roads continuous across sectors. We still respect a max grade.
+        """
+        samples = []
+        last_h = None
+        sample_spacing = 6.0  # world units between samples
+
+        for (ax, az), (bx, bz) in zip(path[:-1], path[1:]):
+            seg_len = max(1.0, math.hypot(bx - ax, bz - az))
+            steps = max(1, int(seg_len / sample_spacing))
+            for step in range(steps):
+                t = step / steps
+                px = ax + (bx - ax) * t
+                pz = az + (bz - az) * t
+
+                # Use macro surface height so roads ignore local cliff uplift.
+                target = self._macro_surface_height(px, pz)
+
+                if last_h is None:
+                    clamped = target
+                else:
+                    delta = numpy.clip(
+                        target - last_h,
+                        -self.road_grade_limit,
+                        self.road_grade_limit,
+                    )
+                    clamped = last_h + delta
+
+                samples.append((px, pz, clamped))
+                last_h = clamped
+
+        if not samples:
+            # Degenerate path: single sample at start.
+            px, pz = path[0]
+            h = self._macro_surface_height(px, pz)
+            samples.append((px, pz, h))
+            return samples
+
+        # Also include the final node, gently blended toward its macro height.
+        end_x, end_z = path[-1]
+        end_h = self._macro_surface_height(end_x, end_z)
+        if last_h is not None:
+            delta = numpy.clip(
+                end_h - last_h,
+                -self.road_grade_limit,
+                self.road_grade_limit,
+            )
+            end_h = last_h + delta
+        samples.append((end_x, end_z, end_h))
+
+        return samples
+
+    def _road_cell_seed(self, gx, gz):
+        """
+        Deterministic jittered site position for Voronoi-style roads.
+        gx, gz are integer grid cell coordinates in 'road space'.
+
+        Uses ROAD_NETWORK_SPACING as the base cell size, and jitters the
+        site inside each cell using simplex noise so it is globally consistent.
+        """
+        spacing = self.road_spacing  # from config: ROAD_NETWORK_SPACING
+        base_x = gx * spacing + 0.5 * spacing
+        base_z = gz * spacing + 0.5 * spacing
+
+        # Jitter sites using the existing road_vec_u / road_vec_v noise fields.
+        jitter_scale = 0.4 * spacing  # stay inside the cell
+        jx = self.road_vec_u.noise(
+            numpy.array([[gx * 0.37, gz * 0.41]], dtype=float)
+        )[0] * jitter_scale
+        jz = self.road_vec_v.noise(
+            numpy.array([[gx * 0.29, gz * 0.53]], dtype=float)
+        )[0] * jitter_scale
+
+        return base_x + jx, base_z + jz
+
+    def _road_voronoi_distances(self, wx, wz):
+        """
+        Distances to the two nearest Voronoi sites in the jittered road grid
+        near world position (wx, wz).
+
+        Returns (d1, d2) with d1 <= d2.
+        """
+        spacing = self.road_spacing
+        cx = int(math.floor(wx / spacing))
+        cz = int(math.floor(wz / spacing))
+
+        best1 = 1e30  # nearest squared distance
+        best2 = 1e30  # second-nearest squared distance
+
+        # 3x3 neighborhood of cells is enough to find nearest two sites.
+        for gx in range(cx - 1, cx + 2):
+            for gz in range(cz - 1, cz + 2):
+                sx, sz = self._road_cell_seed(gx, gz)
+                dx = wx - sx
+                dz = wz - sz
+                d2 = dx * dx + dz * dz
+                if d2 < best1:
+                    best2 = best1
+                    best1 = d2
+                elif d2 < best2:
+                    best2 = d2
+
+        d1 = math.sqrt(best1)
+        d2 = math.sqrt(best2)
+        return d1, d2
+
+
+    def _compute_road_plan(self, position, elevation, ground_before):
+        """
+        Plan roads as Voronoi borders of a global jittered site grid.
+
+        Roads are where the two nearest sites are at almost equal distance
+        (|d1 - d2| small). This yields an infinite, continuous network of
+        curves in XZ. Road Y is taken directly from the landscape elevation,
+        with a small lift above water.
+
+        We do NOT modify 'elevation' here; roads are stamped later into blocks.
+        """
+        xs, zs = self._world_axes(position)
+        sx = len(xs)
+        sz = len(zs)
+
+        mask = numpy.zeros((sx, sz), dtype=bool)
+        height_map = elevation.astype(float).copy()
+        original_ground = numpy.zeros((sx, sz), dtype=float)
+
+        spacing = self.road_spacing
+        edge_width = 3.5  # Voronoi border thickness in world units
+
+        for ix, wx in enumerate(xs):
+            for iz, wz in enumerate(zs):
+                d1, d2 = self._road_voronoi_distances(wx, wz)
+                diff = abs(d1 - d2)
+
+                # Voronoi border: d1 ≈ d2 and reasonably close to a site.
+                if diff < edge_width and d1 < spacing * 0.8:
+                    mask[ix, iz] = True
+                    ground_y = float(elevation[ix, iz])
+                    original_ground[ix, iz] = ground_y
+
+                    # Road at landscape height, but never under water.
+                    h = ground_y
+                    if h <= WATER_LEVEL:
+                        h = WATER_LEVEL + 1.0
+                    h = float(numpy.clip(h, 2.0, SECTOR_HEIGHT - 2.0))
+                    height_map[ix, iz] = h
+
+        if not mask.any():
+            return None
+
+        return {
+            'mask': mask,
+            'height': height_map,
+            'original_ground': original_ground,
+        }
+
+    def _apply_river_columns(self, blocks, plan):
+        if not plan:
+            return
+        sx = plan['mask'].shape[0]
+        sz = plan['mask'].shape[1]
+        for x in range(sx):
+            for z in range(sz):
+                if not plan['mask'][x, z]:
+                    continue
+                floor = int(plan['floor'][x, z])
+                surface = int(plan['surface'][x, z])
+                floor = numpy.clip(floor, 2, SECTOR_HEIGHT - 8)
+                surface = numpy.clip(surface, floor + 1, SECTOR_HEIGHT - 5)
+                col = blocks[:, x, z]
+                col[:floor - 1] = STONE
+                col[floor - 1] = STONE
+                bed_block = SAND if plan['depth'][x, z] > 4 else STONE
+                col[floor] = bed_block
+                water_top = max(surface, floor + 1)
+                col[floor + 1:water_top + 1] = WATER
+                col[water_top + 1:min(SECTOR_HEIGHT, water_top + 4)] = 0
+
+    def _apply_roads(self, blocks, plan, position):
+        """
+        Stamp roads into the block volume.
+
+        - XZ positions come from the Voronoi plan.
+        - Y is just the planned landscape height (clamped to world bounds
+          and above WATER_LEVEL when the plan was made).
+        - At each road column:
+            * Place a COBBLE deck at target_y.
+            * Drop a vertical COBBLE pillar downward through air/water
+              until we hit solid ground -> simple bridges / cliff ascents.
+            * Clear a few blocks of air above the deck for walkability.
+        """
+        if not plan:
+            return
+
+        xs, zs = self._world_axes(position)
+        sx = plan['mask'].shape[0]
+        sz = plan['mask'].shape[1]
+
+        for x in range(sx):
+            for z in range(sz):
+                if not plan['mask'][x, z]:
+                    continue
+
+                target_y = int(plan['height'][x, z])
+                target_y = int(numpy.clip(target_y, 2, SECTOR_HEIGHT - 3))
+
+                col = blocks[:, x, z]
+
+                # Cobble deck at the planned height.
+                col[target_y] = COBBLE
+
+                # Drop a cobble pillar downward through air/water until we hit
+                # something solid. This gives simple bridges/columns up cliffs.
+                for py in range(target_y - 1, 0, -1):
+                    b = col[py]
+                    # Treat air/water as non-support; replace with cobble.
+                    if b == 0 or b == WATER:
+                        col[py] = COBBLE
+                    else:
+                        # Hit solid ground: stop here.
+                        break
+
+                # Clear a small headroom above the deck so roads are usable
+                # even when inside hills/cliffs.
+                head_top = min(SECTOR_HEIGHT - 1, target_y + 3)
+                col[target_y + 1:head_top + 1] = 0
 
     def _place_tree(self, blocks, x, z, ground_y, structure_value):
         # Pick template based on noise to get variety.
@@ -680,6 +1238,17 @@ class BiomeGenerator:
         surface_block[highland_mask] = STONE
         soil_depth[highland_mask] = 2
 
+        river_plan = None
+        if self.enable_rivers:
+            river_plan = self._compute_river_plan(position, elevation)
+            if river_plan:
+                biome[river_plan['mask']] = 5
+
+        road_plan = None
+        if self.enable_roads:
+            ground_before_roads = elevation.copy()
+            road_plan = self._compute_road_plan(position, elevation, ground_before_roads)
+
         # Identify cliffy regions (steep gradients).
         gx, gz = numpy.gradient(elevation)
         grad = numpy.hypot(gx, gz)
@@ -754,6 +1323,16 @@ class BiomeGenerator:
             wl = numpy.clip(water_level_i, 1, SECTOR_HEIGHT - 1)
             water_fill = (y_grid > ground_h[None, :, :]) & (y_grid <= wl[None, :, :]) & water_mask[None, :, :]
             blocks[water_fill] = WATER
+
+        if river_plan:
+            # Carve river beds and fill with water along the planned river mask.
+            self._apply_river_columns(blocks, river_plan)
+            # Treat river tiles as water for later decoration / cave logic (even if above sea level).
+            water_mask = water_mask | river_plan['mask']
+
+        if road_plan:
+            # Lay cobblestone roads, embankments and simple bridges/tunnels.
+            self._apply_roads(blocks, road_plan, position)
 
         # Per-column decorations that need decisions.
         for x in range(sx):
