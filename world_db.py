@@ -1,11 +1,9 @@
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
+import pickle
+import struct
 import numpy
-
+import os
 #database interface
-import rocksdbpy as rocksdb
+import lmdb
 
 # local imports
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS
@@ -13,38 +11,93 @@ from util import normalize, sectorize
 from blocks import BLOCK_ID
 
 class SectorDB(object):
-    def __init__(self, filename):
-        options = rocksdb.Option()
-        options.create_if_missing(True)
-        self.db = rocksdb.open(filename, options)
+    def __init__(self, filename, map_size=1 << 30):
+        self.env = lmdb.open(
+            filename,
+            map_size=map_size,
+            subdir=False,
+            lock=True,
+            max_dbs=1,
+        )
+        self._wtxn = None
+        self._wcount = 0
+        self._autocommit_every = 0  # 0 = off
+
+    # --- batching control ---
+    def begin_write_batch(self, autocommit_every=0):
+        """
+        Start a long-lived write transaction.
+        autocommit_every: commit and reopen every N puts (helps avoid huge txns).
+        """
+        if self._wtxn is not None:
+            return
+        self._autocommit_every = int(autocommit_every) if autocommit_every else 0
+        self._wcount = 0
+        self._wtxn = self.env.begin(write=True)
+
+    def commit_write_batch(self):
+        if self._wtxn is None:
+            return
+        self._wtxn.commit()
+        self._wtxn = None
+        self._wcount = 0
+
+    def abort_write_batch(self):
+        if self._wtxn is None:
+            return
+        self._wtxn.abort()
+        self._wtxn = None
+        self._wcount = 0
+
+    # --- existing API ---
+    def put_sector(self, position, data):
+        k = self.sector_position_to_string(position).encode("utf-8")
+        v = pickle.dumps(data, -1)
+
+        # If batching is enabled, reuse the txn; otherwise do per-call txn.
+        if self._wtxn is not None:
+            self._wtxn.put(k, v)
+            self._wcount += 1
+            if self._autocommit_every and (self._wcount % self._autocommit_every == 0):
+                # commit + reopen to keep transactions bounded
+                self._wtxn.commit()
+                self._wtxn = self.env.begin(write=True)
+            return
+
+        with self.env.begin(write=True) as txn:
+            txn.put(k, v)
 
     def _key(self, key):
         if isinstance(key, bytes):
             return key
-        return str(key).encode('utf-8')
+        return str(key).encode("utf-8")
 
     def get(self, key):
-        value = self.db.get(self._key(key))
+        k = self._key(key)
+        with self.env.begin(write=False) as txn:
+            value = txn.get(k)
         if value is None:
             raise KeyError(key)
         return pickle.loads(value)
-        
+
     def put(self, key, value):
-        return self.db.set(self._key(key), pickle.dumps(value, -1))
+        k = self._key(key)
+        v = pickle.dumps(value, -1)
+        with self.env.begin(write=True) as txn:
+            txn.put(k, v)
+        return True
 
     def get_sector(self, position):
-        value = self.db.get(self._key(self.sector_position_to_string(position)))
+        k = self._key(self.sector_position_to_string(position))
+        with self.env.begin(write=False) as txn:
+            value = txn.get(k)
         if value is None:
             return None
         return pickle.loads(value)
 
-    def put_sector(self, position, data):
-        data = pickle.dumps(data, -1)
-        self.db.set(self._key(self.sector_position_to_string(position)), data)
-
     def string_to_sector_position(self, str_position):
         p = str_position.split(':')
-        return (p[0], 0 , p[1])
+        return (p[0], 0, p[1])
 
     def sector_position_to_string(self, sector_position):
         return str(sector_position[0]) + ':' + str(sector_position[2])
@@ -168,12 +221,18 @@ class World(object):
 
     def get_seed(self):
         try:
-            seed = self.db.get('world_seed')
-            return seed
-        except:
-            seed = int(numpy.random.rand()*1000000)
-            self.db.put('world_seed', seed)
+            seed = int(self.db.get("world_seed"))
+        except KeyError:
+            seed = struct.unpack("<I", os.urandom(4))[0]
+            self.db.put("world_seed", seed)
             return seed
 
+        # HARD GUARANTEE: numpy.random.seed requires 0 <= seed <= 2**32 - 1
+        seed &= 0xFFFFFFFF
+
+        # Persist normalization if needed
+        self.db.put("world_seed", seed)
+        return seed
+        
     def set_seed(self, seed):
         return self.db.put('world_seed', seed)
