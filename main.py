@@ -24,6 +24,8 @@ import world_proxy as world
 import util
 import config
 import shaders
+import renderer
+from humanoid_model import HUMANOID_MODEL
 from blocks import TEXTURE_PATH
 from config import DIST, TICKS_PER_SEC, FLYING_SPEED, GRAVITY, JUMP_SPEED, \
         MAX_JUMP_HEIGHT, PLAYER_HEIGHT, TERMINAL_VELOCITY, TICKS_PER_SEC, \
@@ -78,6 +80,10 @@ class Window(pyglet.window.Window):
         # The crosshairs at the center of the screen.
         self.reticle = []
 
+        self.camera_mode = 'first_person'
+        self.third_person_distance = 5
+
+
         self.inventory_item = None
 
         # Debug flags
@@ -114,6 +120,18 @@ class Window(pyglet.window.Window):
         # Instance of the model that handles the world.
         self.model = world.ModelProxy(self.block_program)
 
+        # Entity rendering setup
+        self.player_entity = {
+            'id': 0, 'type': 'player', 
+            'pos': self.position, 'rot': self.rotation, 
+            'animation': 'idle'
+        }
+        self.entity_renderers = {
+            'player': renderer.AnimatedEntityRenderer(self.block_program, HUMANOID_MODEL)
+        }
+        self.entities = {0: self.player_entity}
+
+
         # Texture atlas for UI previews.
         self.texture_atlas = image.load(TEXTURE_PATH)
 
@@ -132,6 +150,9 @@ class Window(pyglet.window.Window):
             pyglet.clock.set_fps_limit(self.target_fps)
         except Exception:
             pass
+
+        self.keys = key.KeyStateHandler()
+        self.push_handlers(self.keys)
 
         # This call schedules the `update()` method to be called
         # TICKS_PER_SEC. This is the main game event loop.
@@ -223,6 +244,11 @@ class Window(pyglet.window.Window):
         dt = min(dt, 0.2)
         for _ in range(m):
             self._update(dt / m)
+        
+        # Update entity animations
+        for entity_renderer in self.entity_renderers.values():
+            entity_renderer.update(dt)
+
 
     def _update(self, dt):
         """ Private implementation of the `update()` method. This is where most
@@ -238,6 +264,8 @@ class Window(pyglet.window.Window):
         speed = FLYING_SPEED if self.flying else WALKING_SPEED
         d = dt * speed # distance covered this tick.
         dx, dy, dz = self.get_motion_vector()
+        dx0 = dx
+        dz0 = dz
         # New position in space, before accounting for gravity.
         dx, dy, dz = dx * d, dy * d, dz * d
         # gravity
@@ -250,66 +278,42 @@ class Window(pyglet.window.Window):
             dy += self.dy * dt
         # collisions
         x, y, z = self.position
-        x, y, z = self.collide((x + dx, y + dy, z + dz), PLAYER_HEIGHT)
-        self.position = (x, y, z)
+        self.position, vertical_collision = self.model.collide((x + dx, y + dy, z + dz), (0.8, PLAYER_HEIGHT, 0.8))
+        if vertical_collision:
+            self.dy = 0
 
-    def collide(self, position, height):
-        """ Checks to see if the player at the given `position` and `height`
-        is colliding with any blocks in the world.
+        # Update player entity state
+        self.player_entity['pos'] = self.position
+        # self.player_entity['rot'] = self.rotation
+        # Character always faces camera yaw
+        yaw, pitch = self.rotation
+        if abs(dx0)>1e-6 or abs(dz0)>1e-6:    
+            self.player_entity['rot'] = (-yaw, pitch)
+        else:
+            self.player_entity['rot'] = (self.player_entity['rot'][0], pitch)
 
-        Parameters
-        ----------
-        position : tuple of len 3
-            The (x, y, z) position to check for collisions at.
-        height : int or float
-            The height of the player.
 
-        Returns
-        -------
-        position : tuple of len 3
-            The new position of the player taking into account collisions.
-
-        """
-        # How much overlap with a dimension of a surrounding block you need to
-        # have to count as a collision. If 0, touching terrain at all counts as
-        # a collision. If .49, you sink into the ground, as if walking through
-        # tall grass. If >= .5, you'll fall through the ground.
-        pad = 0.1
-        p = list(position)
-        np = util.normalize(position)
-        for face in util.FACES:  # check all surrounding blocks
-            for i in range(3):  # check each dimension independently
-                if not face[i]:
-                    continue
-                # How much overlap you have with this dimension.
-                d = (p[i] - np[i]) * face[i]
-                if d < pad:
-                    continue
-                for dy in range(height):  # check each height
-                    op = list(np)
-                    op[1] -= dy
-                    op[i] += face[i]
-                    b = self.model[util.normalize(op)]
-                    if b is None or b==0 or not BLOCK_SOLID[b]:
-                        continue
-                    p[i] -= (d - pad) * face[i]
-                    if face == (0, -1, 0) or face == (0, 1, 0):
-                        # You are colliding with the ground or ceiling, so stop
-                        # falling / rising.
-                        self.dy = 0
-                    break
-        return tuple(p)
+        is_moving = dx or dz
+        target_animation = 'walk' if is_moving else 'idle'
+        self.entity_renderers['player'].set_animation(target_animation)
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
+        ctrl = self.keys[key.LCTRL] or self.keys[key.RCTRL]
+
+        # Ctrl + wheel => zoom (only in third-person)
+        if ctrl and self.camera_mode == 'third_person':
+            self.third_person_distance -= scroll_y
+            self.third_person_distance = max(2, min(self.third_person_distance, 20))
+            return
+
+        # Plain wheel => inventory cycle (in BOTH camera modes)
         ind = self.inventory.index(self.block)
+
         step = int(scroll_y)
         if step == 0:
             step = 1 if scroll_y > 0 else -1
-        ind += step
-        if ind >= len(self.inventory):
-            ind -= len(self.inventory)
-        if ind < 0:
-            ind += len(self.inventory)
+
+        ind = (ind + step) % len(self.inventory)
         self.block = self.inventory[ind]
         self.update_inventory_item_batch()
 
@@ -332,7 +336,9 @@ class Window(pyglet.window.Window):
         """
         if self.exclusive:
             vector = self.get_sight_vector()
-            block, previous = self.model.hit_test(self.position, vector)
+            _, _, eye = self.get_view_projection()  # eye is Vec3
+            hit_origin = (eye.x, eye.y, eye.z)
+            block, previous = self.model.hit_test(hit_origin, vector)
             if (button == mouse.RIGHT) or \
                     ((button == mouse.LEFT) and (modifiers & key.MOD_CTRL)):
                 # ON OSX, control + left click = right click.
@@ -398,6 +404,11 @@ class Window(pyglet.window.Window):
             self.set_exclusive_mouse(False)
         elif symbol == key.TAB:
             self.flying = not self.flying
+        elif symbol == key.F5:
+            if self.camera_mode == 'first_person':
+                self.camera_mode = 'third_person'
+            else:
+                self.camera_mode = 'first_person'
         elif symbol in self.num_keys:
             index = (symbol - self.num_keys[0]) % len(self.inventory)
             self.block = self.inventory[index]
@@ -490,27 +501,28 @@ class Window(pyglet.window.Window):
         gl.glViewport(0, 0, width, height)
 
     def get_view_projection(self):
-        """Return projection/view plus camera position (used for camera-relative transforms)."""
         width, height = self.get_size()
         aspect = width / float(height)
-        near, far = 0.1, 512.0
-        projection = Mat4.perspective_projection(aspect, near, far, 65)
+        projection = Mat4.perspective_projection(aspect, 0.1, 512.0, 65)
+
         x, y, z = self.position
+        head_pivot = HUMANOID_MODEL['parts']['head']['pivot']
+        torso_pivot = HUMANOID_MODEL['parts']['torso']['pivot']
+        player_head_pos = Vec3(x, y + torso_pivot[1] + head_pivot[1], z)  # :contentReference[oaicite:3]{index=3}
+
         dx, dy, dz = self.get_sight_vector()
-        eye = Vec3(x, y, z)
-        forward = Vec3(dx, dy, dz)
-        yaw_rad = math.radians(self.rotation[0])
-        # Keep roll locked: right depends only on yaw, up is right x forward.
-        right = Vec3(math.cos(yaw_rad), 0.0, math.sin(yaw_rad)).normalize()
-        up = right.cross(forward)
-        if up.length() < 1e-4:
-            up = Vec3(0.0, 1.0, 0.0)
-        else:
-            up = up.normalize()
-            right = forward.cross(up).normalize()
-        target = eye + forward
-        view = Mat4.look_at(eye, target, up)
-        return projection, view, (x, y, z)
+        forward = Vec3(dx, dy, dz).normalize()  # :contentReference[oaicite:4]{index=4}
+
+        eye_world = player_head_pos
+        if self.camera_mode == 'third_person':
+            eye_world = player_head_pos - forward * self.third_person_distance  # :contentReference[oaicite:5]{index=5}
+
+        up = Vec3(0.0, 1.0, 0.0)
+
+        # IMPORTANT: view is defined in camera-relative space (camera at origin)
+        view = Mat4.look_at(Vec3(0.0, 0.0, 0.0), forward, up)
+
+        return projection, view, eye_world
 
     def set_3d(self):
         """ Configure OpenGL to draw in 3d.
@@ -521,9 +533,9 @@ class Window(pyglet.window.Window):
         gl.glEnable(gl.GL_DEPTH_TEST)
 
         gl.glViewport(0, 0, width, height)
-        projection, view, camera_pos = self.get_view_projection()
+        projection, view, eye_pos = self.get_view_projection()
         # pyglet Mat4 supports direct upload; ensure contiguous float32 arrays
-        self.model.set_matrices(projection, view, camera_pos)
+        self.model.set_matrices(projection, view, eye_pos)
         if config.DEBUG_SINGLE_BLOCK and not self._printed_mats:
             dx, dy, dz = self.get_sight_vector()
             print("[DEBUG] projection matrix:\n", numpy.array(projection))
@@ -567,8 +579,25 @@ class Window(pyglet.window.Window):
         upload_budget = max(0.5/self.target_fps, 0.5 * frame_budget)
         self.clear()
         self.set_3d()
-        # Defer mesh uploads until after rendering so we know exactly how much time remains.
+        
+        # Draw world
         self.model.draw(self.position, self.get_frustum_circle(), frame_start, upload_budget, defer_uploads=True)
+        
+        # Draw entities
+        self.block_program.bind()
+        self.block_program['u_use_texture'] = False
+        # self.block_program['u_use_vertex_color'] = False
+        for entity_id, entity_state in self.entities.items():
+            if entity_state['type'] == 'player' and self.camera_mode == 'first_person':
+                continue
+            r = self.entity_renderers.get(entity_state['type'])
+            if r:
+                r.draw(entity_state)
+        self.block_program['u_use_texture'] = True
+        # self.block_program['u_use_vertex_color'] = True
+        self.block_program.unbind()
+
+        # 2D overlay
         self.set_2d()
         if self._is_underwater():
             self.draw_underwater_overlay()
@@ -576,11 +605,15 @@ class Window(pyglet.window.Window):
         self.draw_reticle()
         self.draw_inventory_item()
         self.draw_focused_block()
+        
         # Use leftover budget to upload meshes at the end of the frame.
         elapsed = time.perf_counter() - frame_start
-        remaining_upload_budget = max(0.0, upload_budget - elapsed)
-        if remaining_upload_budget > 0:
-            self.model.process_pending_uploads(frame_start, remaining_upload_budget)
+        if elapsed < frame_budget:  # optional safety guard
+            upload_start = time.perf_counter()
+            # Decide how much *extra* time you’re willing to spend on uploads now.
+            extra_budget = min(upload_budget, frame_budget - (time.perf_counter() - frame_start))
+            if extra_budget > 0:
+                self.model.process_pending_uploads(upload_start, extra_budget)
 
     def draw_label(self):
         """ Draw the label in the top left of the screen.

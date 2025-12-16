@@ -21,6 +21,7 @@ import concurrent.futures
 import pyglet
 image = pyglet.image
 from pyglet.graphics import TextureGroup
+from pyglet.math import Mat4
 import pyglet.gl as gl
 
 
@@ -808,15 +809,23 @@ class ModelProxy(object):
         sector.needs_seam_refresh = False
 
     def set_matrices(self, projection, view, camera_pos):
-        proj = numpy.array(projection, dtype='f4').reshape((4, 4))
-        view_mat = numpy.array(view, dtype='f4').reshape((4, 4))
-        # Strip translation; camera position is sent separately to keep math stable far from origin.
-        view_mat[:3, 3] = 0.0
-        view_mat[3, :] = numpy.array([0.0, 0.0, 0.0, 1.0], dtype='f4')
-        # Shader expects flat 4x4 matrices.
-        self.program['u_projection'] = proj.ravel().astype('f4')
-        self.program['u_view'] = view_mat.ravel().astype('f4')
-        self.program['u_camera_pos'] = numpy.array(camera_pos, dtype='f4')
+        # Convert pyglet Mat4 to column-major numpy arrays
+        proj = numpy.array(list(projection), dtype='f4').reshape((4, 4), order='F')
+        view_mat = numpy.array(list(view), dtype='f4').reshape((4, 4), order='F')
+
+        # The view matrix from look_at already has the translation.
+        # The shader also applies translation via u_camera_pos.
+        # To avoid double-correction, we remove the translation from the view matrix
+        # and rely on the shader's relative positioning.
+        view_mat[3, :3] = 0.0
+        
+        # Shader expects flat (1D) arrays
+        self.program['u_projection'] = proj.ravel(order='F')
+        self.program['u_view'] = view_mat.ravel(order='F')
+        self.program['u_camera_pos'] = tuple(camera_pos) # Pass eye position
+        
+        # Set model matrix to identity for world rendering
+        self.program['u_model'] = Mat4()
 
     def get_batches(self):
         if len(self.unused_batches)>0:
@@ -1415,6 +1424,52 @@ class ModelProxy(object):
             if not BLOCK_SOLID[b]:
                 return True
         return False
+
+    def collide(self, position, bounding_box):
+        """
+        Checks to see if an entity at the given `position` with the given
+        `bounding_box` is colliding with any blocks in the world.
+
+        Parameters
+        ----------
+        position : tuple of len 3
+            The (x, y, z) position to check for collisions at.
+        bounding_box : tuple of len 3
+            The (width, height, depth) of the entity.
+
+        Returns
+        -------
+        position : tuple of len 3
+            The new position of the entity taking into account collisions.
+        vertical_collision : bool
+            True if the entity collided with the ground or ceiling.
+        """
+        # TODO: Add bounding box support to collision
+        height = int(bounding_box[1])
+        pad = 0.1
+        p = list(position)
+        np = normalize(position)
+        vertical_collision = False
+        for face in FACES:  # check all surrounding blocks
+            for i in range(3):  # check each dimension independently
+                if not face[i]:
+                    continue
+                # How much overlap you have with this dimension.
+                d = (p[i] - np[i]) * face[i]
+                if d < pad:
+                    continue
+                for dy in range(height):  # check each height
+                    op = list(np)
+                    op[1] -= dy
+                    op[i] += face[i]
+                    b = self[normalize(op)]
+                    if b is None or b == 0 or not BLOCK_SOLID[b]:
+                        continue
+                    p[i] -= (d - pad) * face[i]
+                    if face[1] != 0: # y-axis collision
+                        vertical_collision = True
+                    break
+        return tuple(p), vertical_collision
 
     def quit(self,kill_server=True):
         if self.n_requests > self.n_responses:
