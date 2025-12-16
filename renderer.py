@@ -3,6 +3,7 @@ import numpy as np
 import pyglet
 import pyglet.gl as gl
 from pyglet.math import Mat4, Vec3
+from entities.snake import SnakeEntity
 
 _cube_mesh_cache = {}
 
@@ -214,3 +215,124 @@ class AnimatedEntityRenderer:
         for child_name, child_data in self.model['parts'].items():
             if child_data.get('parent') == part_name:
                 self._draw_part(child_name, child_parent_matrix)
+
+
+class SnakeRenderer:
+    def __init__(self, program, model_definition, segment_configs=None, tail_length=12):
+        self.program = program
+        self.head_renderer = AnimatedEntityRenderer(program, model_definition)
+        self.tail_length = tail_length
+        configs = segment_configs or [
+            ((0.40, 0.28, 0.36), (0, 0, 0)),
+            ((0.34, 0.24, 0.33), (220, 40, 40)),
+            ((0.28, 0.20, 0.30), (180, 40, 30)),
+        ]
+        self.segment_capacity = SnakeEntity.SEGMENT_COUNT
+        self._variant_buffers = []
+        self._active_meshes = []
+        for size, color in configs:
+            buffer = self._prepare_variant_buffer(size, color)
+            self._variant_buffers.append(buffer)
+            mesh = self.program.vertex_list(
+                buffer["vertex_count"],
+                gl.GL_TRIANGLES,
+                position=('f', buffer["base_positions"].ravel()),
+                tex_coords=('f', buffer["tex"].ravel()),
+                normal=('f', buffer["normals"].ravel()),
+                color=('f', buffer["colors"].ravel()),
+            )
+            self._active_meshes.append(mesh)
+
+    def _build_mesh(self, size, color):
+        verts, normals, indices = get_cube_vertices(size)
+        tri_verts = verts.reshape(-1, 3)[indices]
+        tri_norms = normals.reshape(-1, 3)[indices]
+        tri_tex = np.zeros((tri_verts.shape[0], 2), dtype='f4')
+        base_rgba = np.array([color[0], color[1], color[2], 1.0], dtype='f4')
+        tri_col = np.broadcast_to(base_rgba, (tri_verts.shape[0], 4))
+        return tri_verts, tri_norms, tri_tex, tri_col
+
+    def _prepare_variant_buffer(self, size, color):
+        tri_verts, tri_norms, tri_tex, tri_col = self._build_mesh(size, color)
+        tri_count = tri_verts.shape[0]
+        repeats = self.segment_capacity
+        vertex_count = tri_count * repeats
+        base_positions = np.tile(tri_verts, (repeats, 1)).astype('f4')
+        normals = np.tile(tri_norms, (repeats, 1)).astype('f4')
+        tex = np.tile(tri_tex, (repeats, 1)).astype('f4')
+        colors = np.tile(tri_col, (repeats, 1)).astype('f4')
+        return {
+            "tri_count": tri_count,
+            "vertex_count": vertex_count,
+            "base_positions": base_positions,
+            "normals": normals,
+            "tex": tex,
+            "colors": colors,
+        }
+
+    def _update_variant_mesh(self, idx, translations):
+        mesh = self._active_meshes[idx]
+        buffer = self._variant_buffers[idx]
+        tri_count = buffer["tri_count"]
+        vertex_count = buffer["vertex_count"]
+        target_trans = np.full((self.segment_capacity, 3), 1e6, dtype='f4')
+        if translations is not None and len(translations):
+            usable = min(len(translations), self.segment_capacity)
+            target_trans[:usable] = translations[:usable]
+            if usable < self.segment_capacity:
+                if usable > 0:
+                    target_trans[usable:] = target_trans[usable - 1]
+                else:
+                    target_trans[usable:] = np.array([1e6, 1e6, 1e6], dtype='f4')
+        positions = buffer["base_positions"].copy()
+        offsets = np.repeat(target_trans, tri_count, axis=0)
+        positions += offsets[:vertex_count]
+        mesh.position[:] = positions.ravel()
+
+    def draw(self, entity_state):
+        positions = entity_state.get("segment_positions") or []
+        if not positions:
+            head = entity_state.get("pos")
+            if head is None:
+                return
+            positions = [head]
+        head_pos = positions[0]
+        head_state = {
+            "pos": tuple(head_pos) if isinstance(head_pos, (tuple, list, np.ndarray)) else entity_state.get("pos"),
+            "rot": entity_state.get("rot", (0.0, 0.0)),
+        }
+        self.head_renderer.draw(head_state)
+
+        body_positions = np.array(positions[1:], dtype='f4')
+        variant_count = len(self._variant_buffers)
+        if variant_count == 0:
+            return
+        partitions = []
+        if body_positions.size > 0:
+            total = len(body_positions)
+            tail_start = max(0, total - self.tail_length)
+            if variant_count == 1:
+                partitions = [body_positions]
+            else:
+                variant_indices = np.full(total, variant_count - 1, dtype=int)
+                if tail_start > 0:
+                    pattern_len = variant_count - 1
+                    variant_indices[:tail_start] = np.arange(tail_start) % pattern_len
+                partitions = [
+                    body_positions[variant_indices == idx]
+                    for idx in range(variant_count)
+                ]
+        else:
+            partitions = [[] for _ in range(variant_count)]
+
+        self.program["u_model"] = Mat4()
+        for idx, translations in enumerate(partitions):
+            if idx >= len(self._active_meshes):
+                continue
+            self._update_variant_mesh(idx, translations if isinstance(translations, np.ndarray) else np.array(translations, dtype='f4'))
+            mesh = self._active_meshes[idx]
+            if mesh:
+                mesh.draw(gl.GL_TRIANGLES)
+
+    def update(self, dt):
+        pass

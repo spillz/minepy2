@@ -16,7 +16,7 @@ GLfloat4 = gl.GLfloat*4
 
 # standard lib imports
 from collections import deque
-import numpy
+import numpy as np
 import itertools
 
 # local module imports
@@ -25,7 +25,9 @@ import util
 import config
 import shaders
 import renderer
-from entities.player import HUMANOID_MODEL
+import world_entity_store
+from entities.player import HUMANOID_MODEL, Player
+from entities.snake import SNAKE_MODEL, SnakeEntity
 from blocks import TEXTURE_PATH
 from config import DIST, TICKS_PER_SEC, FLYING_SPEED, GRAVITY, JUMP_SPEED, \
         MAX_JUMP_HEIGHT, PLAYER_HEIGHT, TERMINAL_VELOCITY, TICKS_PER_SEC, \
@@ -73,7 +75,6 @@ class Window(pyglet.window.Window):
         # The vertical plane rotation ranges from -90 (looking straight down) to
         # 90 (looking straight up). The horizontal rotation range is unbounded.
         self.rotation = (0, 0)
-
         # Which sector the player is currently in.
         self.sector = None
 
@@ -88,9 +89,6 @@ class Window(pyglet.window.Window):
 
         # Debug flags
         self._printed_mats = False
-
-        # Velocity in the y (upward) direction.
-        self.dy = 0
 
         # A list of blocks the player can place. Hit num keys to cycle.
         self.inventory = list(BLOCK_ID)
@@ -121,15 +119,33 @@ class Window(pyglet.window.Window):
         self.model = world.ModelProxy(self.block_program)
 
         # Entity rendering setup
-        self.player_entity = {
-            'id': 0, 'type': 'player', 
-            'pos': self.position, 'rot': self.rotation, 
-            'animation': 'idle'
-        }
+        saved_player_state = world_entity_store.load_entity_state("player")
+        if saved_player_state:
+            self.position = tuple(saved_player_state.get("pos", self.position))
+            self.rotation = tuple(saved_player_state.get("rot", self.rotation))
+            self.flying = saved_player_state.get("flying", self.flying)
+        self.player_entity = Player(self.model, HUMANOID_MODEL, position=self.position)
+        self.player_entity.id = 0
+        self.player_entity.position = np.array(self.position, dtype=float)
+        self.player_entity.rotation = np.array(self.rotation, dtype=float)
+
+        saved_snake_state = world_entity_store.load_entity_state("snake")
+        self.snake_entity = SnakeEntity(
+            self.model, player_position=self.position, entity_id=1, saved_state=saved_snake_state
+        )
         self.entity_renderers = {
-            'player': renderer.AnimatedEntityRenderer(self.block_program, HUMANOID_MODEL)
+            'player': renderer.AnimatedEntityRenderer(self.block_program, HUMANOID_MODEL),
+            'snake': renderer.SnakeRenderer(self.block_program, SNAKE_MODEL)
         }
-        self.entities = {0: self.player_entity}
+        self.entity_objects = {
+            self.player_entity.id: self.player_entity,
+            self.snake_entity.id: self.snake_entity
+        }
+        self.snake_enabled = True
+        self.entities = {}
+        self._entity_persist_interval = 5.0
+        self._entity_persist_timer = self._entity_persist_interval
+        self._persist_entity_states()
 
 
         # Texture atlas for UI previews.
@@ -260,42 +276,43 @@ class Window(pyglet.window.Window):
             The change in time since the last call.
 
         """
-        # walking
-        speed = FLYING_SPEED if self.flying else WALKING_SPEED
-        d = dt * speed # distance covered this tick.
-        dx, dy, dz = self.get_motion_vector()
-        dx0 = dx
-        dz0 = dz
-        # New position in space, before accounting for gravity.
-        dx, dy, dz = dx * d, dy * d, dz * d
-        # gravity
-        if not self.flying:
-            # Update your vertical speed: if you are falling, speed up until you
-            # hit terminal velocity; if you are jumping, slow down until you
-            # start falling.
-            self.dy -= dt * GRAVITY
-            self.dy = max(self.dy, -TERMINAL_VELOCITY)
-            dy += self.dy * dt
-        # collisions
-        x, y, z = self.position
-        self.position, vertical_collision = self.model.collide((x + dx, y + dy, z + dz), (0.8, PLAYER_HEIGHT, 0.8))
-        if vertical_collision:
-            self.dy = 0
-
-        # Update player entity state
-        self.player_entity['pos'] = self.position
-        # self.player_entity['rot'] = self.rotation
-        # Character always faces camera yaw
-        yaw, pitch = self.rotation
-        if abs(dx0)>1e-6 or abs(dz0)>1e-6:    
-            self.player_entity['rot'] = (-yaw, pitch)
-        else:
-            self.player_entity['rot'] = (self.player_entity['rot'][0], pitch)
-
-
-        is_moving = dx or dz
+        motion_vector = self.get_motion_vector()
+        dx, _, dz = motion_vector
+        is_moving = abs(dx) > 1e-6 or abs(dz) > 1e-6
         target_animation = 'walk' if is_moving else 'idle'
         self.entity_renderers['player'].set_animation(target_animation)
+
+        camera_rot = (-self.rotation[0], self.rotation[1])
+        context = {
+            "motion_vector": motion_vector,
+            "flying": self.flying,
+            "world_model": self.model,
+            "camera_rotation": camera_rot,
+            "apply_camera_rotation": is_moving,
+            "player_position": self.player_entity.position.copy(),
+        }
+        updated_entities = {}
+
+        for entity in self.entity_objects.values():
+            if entity is self.snake_entity and not self.snake_enabled:
+                continue
+            entity.update(dt, context)
+            updated_entities[entity.id] = entity.to_network_dict()
+            if entity is self.player_entity:
+                context["player_position"] = entity.position.copy()
+
+        self.entities = updated_entities
+        self.position = tuple(self.player_entity.position)
+        self._entity_persist_timer -= dt
+        if self._entity_persist_timer <= 0:
+            self._persist_entity_states()
+            self._entity_persist_timer = self._entity_persist_interval
+
+    def _persist_entity_states(self):
+        for entity in self.entity_objects.values():
+            state = entity.serialize_state()
+            if state is not None:
+                world_entity_store.save_entity_state(entity.type, state)
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
         ctrl = self.keys[key.LCTRL] or self.keys[key.RCTRL]
@@ -395,8 +412,8 @@ class Window(pyglet.window.Window):
         elif symbol == key.SPACE:
             if self.flying:
                 self.fly_climb += 1
-            if self.dy == 0:
-                self.dy = JUMP_SPEED
+            if self.player_entity.dy == 0:
+                self.player_entity.dy = JUMP_SPEED
         elif symbol == key.LSHIFT:
             if self.flying:
                 self.fly_climb -= 1
@@ -413,6 +430,13 @@ class Window(pyglet.window.Window):
             index = (symbol - self.num_keys[0]) % len(self.inventory)
             self.block = self.inventory[index]
             self.update_inventory_item_batch()
+        elif symbol == key.N:
+            self._toggle_snake()
+
+    def _toggle_snake(self):
+        self.snake_enabled = not self.snake_enabled
+        status = "enabled" if self.snake_enabled else "disabled"
+        print(f"Snake {status}")
 
     def on_key_release(self, symbol, modifiers):
         """ Called when the player releases a key. See pyglet docs for key
@@ -474,7 +498,7 @@ class Window(pyglet.window.Window):
         # Tint the HUD icon with the block's vertex color (use the displayed face).
         face_colors = BLOCK_COLORS[block_id].reshape(6, 4, 3)
         picker_colors = face_colors[picker_face]
-        avg_color = numpy.rint(picker_colors.mean(axis=0)).astype(int)
+        avg_color = np.rint(picker_colors.mean(axis=0)).astype(int)
         avg_color = tuple(int(max(0, min(255, c))) for c in avg_color)
         sprite.color = avg_color
         self.inventory_item = sprite
@@ -489,6 +513,7 @@ class Window(pyglet.window.Window):
 #        )
 
     def on_close(self):
+        self._persist_entity_states()
         self.model.quit()
         pyglet.window.Window.on_close(self)
 
@@ -538,8 +563,8 @@ class Window(pyglet.window.Window):
         self.model.set_matrices(projection, view, eye_pos)
         if config.DEBUG_SINGLE_BLOCK and not self._printed_mats:
             dx, dy, dz = self.get_sight_vector()
-            print("[DEBUG] projection matrix:\n", numpy.array(projection))
-            print("[DEBUG] view matrix:\n", numpy.array(view))
+            print("[DEBUG] projection matrix:\n", np.array(projection))
+            print("[DEBUG] view matrix:\n", np.array(view))
             print(f"[DEBUG] position {self.position} rotation {self.rotation} sight {(dx, dy, dz)}")
             self._printed_mats = True
 ##        gl.glLightfv(gl.GL_LIGHT1, gl.GL_POSITION, GLfloat4(0.35,1.0,0.65,0.0))
@@ -552,13 +577,13 @@ class Window(pyglet.window.Window):
         dz = math.sin(math.radians(x - 90))
 
         c = [0,2]
-        vec = numpy.array([dx,dz])
-        ovec = numpy.array([-dz,dx])
-        pos = numpy.array([x for x in self.position])[c]
+        vec = np.array([dx,dz])
+        ovec = np.array([-dz,dx])
+        pos = np.array([x for x in self.position])[c]
         # Pull the frustum center back when pitched to cover nearby terrain without disabling culling.
         forward_scale = max(0.25, math.cos(math.radians(pitch)))
         center = pos + vec * (DIST/2) * forward_scale
-        far_corner = pos + vec*DIST + ovec*DIST*numpy.tan(65.0/180.0 * numpy.pi)/2
+        far_corner = pos + vec*DIST + ovec*DIST*np.tan(65.0/180.0 * np.pi)/2
         rad = ((center-far_corner)**2).sum()**0.5/2
         # Inflate more as pitch increases (looking up/down) to reduce popping while staying bounded.
         tilt = min(1.0, abs(pitch) / 90.0)

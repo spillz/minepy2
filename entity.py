@@ -5,10 +5,10 @@ class BaseEntity:
     The base class for all non-block objects in the world.
     This class is managed by the server.
     """
-    def __init__(self, world, position=(0, 100, 0)):
+    def __init__(self, world, position=(0, 100, 0), entity_type='base_entity'):
         # Every entity needs these properties
         self.id = None  # Will be assigned by the server
-        self.type = 'base_entity'
+        self.type = entity_type
         self.world = world  # A reference to the world instance to query blocks
 
         # Physics and Position

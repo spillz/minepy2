@@ -1,5 +1,6 @@
 import numpy as np
 from entity import BaseEntity
+from config import FLYING_SPEED, WALKING_SPEED, GRAVITY, TERMINAL_VELOCITY, PLAYER_HEIGHT
 
 # This file contains a dictionary-based definition for an animated,
 # multi-part entity model. It's designed to be human-readable and
@@ -190,13 +191,23 @@ class Player(BaseEntity):
             model_definition (dict): A dictionary describing the entity's model and animations.
             position (tuple): The initial (x, y, z) coordinates of the player.
         """
-        super().__init__(world, entity_type='player', position=position)
+        super().__init__(world, position=position, entity_type='player')
         
         self.model_definition = model_definition
         self.name = "Player"  # Default name
 
         # Player-specific physics might differ slightly
-        self.bounding_box = np.array([0.8, 1.8, 0.8]) # width, height, depth
+        self.bounding_box = np.array([0.8, PLAYER_HEIGHT, 0.8])
+        self.dy = 0.0
+        self.on_ground = False
+        self.is_flying = False
+
+    def serialize_state(self):
+        return {
+            "pos": tuple(self.position.tolist()),
+            "rot": tuple(self.rotation.tolist()),
+            "flying": self.is_flying,
+        }
 
     def get_camera_position(self):
         """
@@ -223,25 +234,59 @@ class Player(BaseEntity):
         
         return camera_pos
 
-    def update(self, dt, motion_vector):
+    def update(self, dt, context):
         """
         Updates the player's state for the current frame.
 
         Args:
             dt (float): The time delta since the last frame.
-            motion_vector (tuple): The (dx, dy, dz) motion vector from user input.
+            context (dict): Shared context from the main loop (motion_vector, flying, rotation, world_model).
         """
-        # Player-specific movement logic
-        speed = 15.0 if self.flying else 5.0 # Example speeds
-        self.velocity[0] = motion_vector[0] * speed
-        self.velocity[2] = motion_vector[2] * speed
-        
-        # If jumping and on the ground
-        if motion_vector[1] > 0 and self.on_ground:
-            self.velocity[1] = 8.0 # Jump speed
+        motion_vector = context.get("motion_vector", (0.0, 0.0, 0.0))
+        flying = context.get("flying", False)
+        model_proxy = context.get("world_model")
+        camera_rotation = context.get("camera_rotation")
+        apply_rotation = context.get("apply_camera_rotation", False)
 
-        # Let the base class handle gravity and collision
-        super().update(dt)
+        if camera_rotation is not None:
+            if apply_rotation:
+                self.rotation[0] = float(camera_rotation[0])
+            self.rotation[1] = float(camera_rotation[1])
+
+        self.is_flying = bool(flying)
+        speed = FLYING_SPEED if flying else WALKING_SPEED
+        distance = dt * speed
+        dx, dy, dz = motion_vector
+        dx *= distance
+        dy *= distance
+        dz *= distance
+
+        if not flying:
+            self.dy -= GRAVITY * dt
+            self.dy = max(self.dy, -TERMINAL_VELOCITY)
+            dy += self.dy * dt
+        elif motion_vector[1] != 0:
+            # Motion vector already encodes climb direction.
+            pass
+
+        current_pos = self.position.copy()
+        if model_proxy is not None:
+            new_pos, vertical_collision = model_proxy.collide(
+                (current_pos[0] + dx, current_pos[1] + dy, current_pos[2] + dz),
+                self.bounding_box
+            )
+            self.position = np.array(new_pos, dtype=float)
+            self.on_ground = bool(vertical_collision)
+            if vertical_collision:
+                self.dy = 0.0
+        else:
+            self.position = current_pos + np.array([dx, dy, dz], dtype=float)
+            self.on_ground = False
+
+        if dt > 0:
+            self.velocity = np.array([dx / dt, dy / dt, dz / dt], dtype=float)
+        else:
+            self.velocity = np.zeros(3, dtype=float)
 
     def to_network_dict(self):
         """
