@@ -1,6 +1,6 @@
 import math
 
-DIST = 128
+DIST = 16*12
 
 TICKS_PER_SEC = 60
 TARGET_FPS = 60
@@ -9,8 +9,8 @@ TARGET_FPS = 60
 # UPLOAD_TRIANGLE_BUDGET = 10000
 
 # Size of sectors used to ease block loading.
-SECTOR_SIZE = 32 #width and depth
-SECTOR_HEIGHT = 256 #height of world
+SECTOR_SIZE = 16 #width and depth (x and z)
+SECTOR_HEIGHT = 256 #height of world (y)
 LOADED_SECTORS = DIST//SECTOR_SIZE + 1 #number of sections in (x,z) directions to load sectors for
 LOAD_RADIUS = LOADED_SECTORS + 1
 KEEP_RADIUS = LOAD_RADIUS*2

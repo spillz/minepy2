@@ -25,7 +25,7 @@ import util
 import config
 import shaders
 import renderer
-from humanoid_model import HUMANOID_MODEL
+from entities.player import HUMANOID_MODEL
 from blocks import TEXTURE_PATH
 from config import DIST, TICKS_PER_SEC, FLYING_SPEED, GRAVITY, JUMP_SPEED, \
         MAX_JUMP_HEIGHT, PLAYER_HEIGHT, TERMINAL_VELOCITY, TICKS_PER_SEC, \
