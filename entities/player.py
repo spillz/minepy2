@@ -288,6 +288,29 @@ class Player(BaseEntity):
         else:
             self.velocity = np.zeros(3, dtype=float)
 
+        if not self.is_flying:
+            self._snap_to_surface()
+
+    def _surface_height_center(self, x, z):
+        column = self.world.get_vertical_column(x, z)
+        if column is None or column.size == 0:
+            return None
+        non_air = column != 0
+        if not non_air.any():
+            return None
+        y = int(np.nonzero(non_air)[0][-1])
+        return float(y + 0.5)
+
+    def _snap_to_surface(self):
+        center = self._surface_height_center(self.position[0], self.position[2])
+        if center is None:
+            return
+        feet_y = center + 0.5
+        if self.position[1] + 0.01 < feet_y:
+            self.position[1] = feet_y
+            self.dy = 0.0
+            self.on_ground = True
+
     def to_network_dict(self):
         """
         Extends the base network dictionary with player-specific state.

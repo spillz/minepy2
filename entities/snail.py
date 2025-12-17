@@ -6,17 +6,14 @@ from typing import Dict, Any, Tuple
 
 import numpy as np
 
-import config
-import util
-from blocks import BLOCK_SOLID
 from entity import BaseEntity
 
 
 def build_snail_model(
-    foot_size: Tuple[float, float, float] = (0.90, 0.20, 0.30),
-    shell_size: Tuple[float, float, float] = (0.48, 0.48, 0.32),
-    head_size: Tuple[float, float, float] = (0.18, 0.10, 0.22),
-    stalk_size: Tuple[float, float, float] = (0.04, 0.28, 0.04),
+    foot_size: Tuple[float, float, float] = (0.20, 0.20, 1.30),
+    shell_size: Tuple[float, float, float] = (0.25, 0.48, 0.48),
+    shell_inner_size: Tuple[float, float, float] = (0.35, 0.36, 0.36),
+    stalk_size: Tuple[float, float, float] = (0.04, 0.24, 0.04),
 ) -> Dict[str, Any]:
     parts: Dict[str, Dict[str, Any]] = {}
     foot_w, foot_h, foot_d = foot_size
@@ -34,38 +31,24 @@ def build_snail_model(
         "size": [shell_size[0], shell_size[1], shell_size[2]],
         "material": {"color": (180, 110, 70)},
     }
-    parts["head"] = {
+    parts["shell_inner"] = {
         "parent": "foot",
-        "pivot": [0.0, 0.0, -foot_d / 2.0],
-        "position": [0.0, 0.0, -head_size[2] / 2.0 - 0.02],
-        "size": [head_size[0], head_size[1], head_size[2]],
-        "material": {"color": (160, 120, 80)},
-    }
-    parts["head_left"] = {
-        "parent": "head",
-        "pivot": [0.0, head_size[1] / 2.0, 0.0],
-        "position": [-head_size[0] / 2.0 + 0.04, 0.0, -head_size[2] / 2.0],
-        "size": [0.02, 0.08, 0.02],
-        "material": {"color": (75, 75, 75)},
-    }
-    parts["head_right"] = {
-        "parent": "head",
-        "pivot": [0.0, head_size[1] / 2.0, 0.0],
-        "position": [head_size[0] / 2.0 - 0.04, 0.0, -head_size[2] / 2.0],
-        "size": [0.02, 0.08, 0.02],
-        "material": {"color": (75, 75, 75)},
+        "pivot": [0.0, foot_h / 2.0, 0.0],
+        "position": [0.0, shell_size[1] / 2.0, 0.0],
+        "size": [shell_inner_size[0], shell_inner_size[1], shell_inner_size[2]],
+        "material": {"color": (120, 90, 60)},
     }
     for side, offset in (("stalk_left", -0.08), ("stalk_right", 0.08)):
         parts[side] = {
-            "parent": "head",
-            "pivot": [offset, head_size[1] / 2.0, -head_size[2] / 2.0],
+            "parent": "foot",
+            "pivot": [offset, foot_size[1] / 2.0, -foot_size[2] / 2.0],
             "position": [0.0, stalk_size[1] / 2.0, -stalk_size[2] / 2.0],
             "size": [stalk_size[0], stalk_size[1], stalk_size[2]],
             "material": {"color": (60, 60, 60)},
         }
     model = {
         "root_part": "foot",
-        "root_offset": [0.0, 0.0, 0.0],
+        "root_offset": [0.0, 0.1, 0.0],
         "parts": parts,
         "animations": {
             "idle": {"loop": True, "length": 1.0, "keyframes": [{"time": 0.0, "rotations": {}}, {"time": 1.0, "rotations": {}}]}
@@ -104,6 +87,7 @@ class SnailEntity(BaseEntity):
                 self.rotation = np.array(rot, dtype=float)
         else:
             self.position = self._find_spawn_position(player_position)
+        self._ground_reference = self.position[1]
 
     def update(self, dt, context):
         if dt <= 0:
@@ -120,25 +104,32 @@ class SnailEntity(BaseEntity):
             target_dir = np.array([dx / dist, dz / dist], dtype=float)
         else:
             target_dir = np.zeros(2, dtype=float)
-        wander = self._update_wander_direction(dt)
         moving = False
+        desired_dir = None
         if dist > self.MAX_ROAM_DISTANCE:
-            move_dir = target_dir * 0.8 + wander * 0.2
+            desired_dir = target_dir
+        elif dist < self.FOLLOW_DISTANCE:
+            desired_dir = -target_dir
         else:
-            strength = max(0.0, (self.FOLLOW_DISTANCE - dist) / self.FOLLOW_DISTANCE)
-            repulsion = -target_dir * strength
-            move_dir = wander * 0.7 + repulsion * 0.3
+            desired_dir = self._heading
+
+        if desired_dir is not None:
+            norm_dir = np.linalg.norm(desired_dir)
+            if norm_dir > 1e-6:
+                desired_dir = desired_dir / norm_dir
+                turn_weight = 0.02
+                self._heading = self._heading * (1 - turn_weight) + desired_dir * turn_weight
+        noise_angle = random.uniform(-0.01, 0.01)
+        heading_angle = math.atan2(self._heading[1], self._heading[0]) + noise_angle
+        self._heading = np.array([math.cos(heading_angle), math.sin(heading_angle)], dtype=float)
+
+        move_dir = self._heading
         norm = np.linalg.norm(move_dir)
         if norm > 1e-6:
             move_dir /= norm
             head[0] += move_dir[0] * self.SPEED * dt
             head[2] += move_dir[1] * self.SPEED * dt
             moving = True
-            turn_weight = 0.02
-            self._heading = self._heading * (1 - turn_weight) + move_dir * turn_weight
-            heading_norm = np.linalg.norm(self._heading)
-            if heading_norm > 1e-6:
-                self._heading /= heading_norm
             self.rotation[0] = math.degrees(math.atan2(-self._heading[0], -self._heading[1]))
         self._settle_height()
         self.current_animation = "walk" if moving else "idle"
@@ -171,46 +162,35 @@ class SnailEntity(BaseEntity):
         return np.array([px, py, pz], dtype=float)
 
     def _sample_ground(self, x, z, reference_y):
-        surface = self._find_surface_y(x, z, reference_y)
+        surface = self._find_surface_y(x, z)
         if surface is None:
             return None
         return np.array([x, surface, z], dtype=float)
 
-    def _find_surface_y(self, x, z, reference_y):
-        max_y = min(int(math.ceil(reference_y + 8.0)), config.SECTOR_HEIGHT - 1)
-        min_y = max(int(math.floor(reference_y - 32.0)), -config.SECTOR_HEIGHT)
-        for y in range(max_y, min_y - 1, -1):
-            if self._is_solid(x, y, z):
-                candidate = y + 0.5 + self.HEAD_CLEARANCE
-                if self._has_clearance(x, candidate, z):
-                    return candidate
-        return None
+    def _find_surface_y(self, x, z, reference_y=None):
+        column = self.world.get_vertical_column(x, z)
+        if column is None or column.size == 0:
+            return None
+        non_air = column != 0
+        if not non_air.any():
+            return None
+        y = int(np.nonzero(non_air)[0][-1])
+        return float(y + 0.5)
 
     def _settle_height(self):
-        target = self._find_surface_y(self.position[0], self.position[2], self.position[1] + 4.0)
+        target = self._find_surface_y(self.position[0], self.position[2])
         if target is not None:
             self.position[1] = target
             self._grounded = True
+            self._ground_reference = target
             return
         if not self._grounded:
-            self.position[1] -= 0.2
+            self.position[1] = max(self.position[1] - 0.05, self._ground_reference - 1.0)
 
     def _adjust_height(self):
-        target = self._find_surface_y(self.position[0], self.position[2], self.position[1] + 4.0)
+        target = self._find_surface_y(self.position[0], self.position[2])
         if target is not None:
             self.position[1] = target
-
-    def _has_clearance(self, x, y, z):
-        return (not self._is_solid(x, y, z)) and (not self._is_solid(x, y + 1.0, z))
-
-    def _is_solid(self, x, y, z):
-        block_id = self._block_id(x, y, z)
-        return BLOCK_SOLID[block_id]
-
-    def _block_id(self, x, y, z):
-        coords = util.normalize((x, y, z))
-        block = self.world[coords]
-        return int(block or 0)
 
     def _update_wander_direction(self, dt):
         self._wander_angle += (dt * self._wander_speed) + random.uniform(-0.2, 0.2)
