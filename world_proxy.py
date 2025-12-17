@@ -863,6 +863,21 @@ class ModelProxy(object):
         except:
             return None
 
+    def get_vertical_column(self, x, z):
+        """
+        Return the full column of blocks at integer (x,z) coordinates, or None
+        if the corresponding sector is not loaded.
+        """
+        sx = sectorize((x, 0, z))
+        sector = self.sectors.get(sx)
+        if sector is None:
+            return None
+        ix = int(round(x)) - (sector.position[0] - 1)
+        iz = int(round(z)) - (sector.position[2] - 1)
+        if not (0 <= ix < config.SECTOR_SIZE + 2 and 0 <= iz < config.SECTOR_SIZE + 2):
+            return None
+        return sector.blocks[ix, :, iz]
+
     def add_block(self, position, block, notify_server = True):
         spos = sectorize(position)
         if spos in self.sectors:

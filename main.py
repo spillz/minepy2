@@ -28,6 +28,8 @@ import renderer
 import world_entity_store
 from entities.player import HUMANOID_MODEL, Player
 from entities.snake import SNAKE_MODEL, SnakeEntity
+from entities.snail import SNAIL_MODEL, SnailEntity
+from entities.seagull import SEAGULL_MODEL, SeagullEntity
 from blocks import TEXTURE_PATH
 from config import DIST, TICKS_PER_SEC, FLYING_SPEED, GRAVITY, JUMP_SPEED, \
         MAX_JUMP_HEIGHT, PLAYER_HEIGHT, TERMINAL_VELOCITY, TICKS_PER_SEC, \
@@ -128,21 +130,45 @@ class Window(pyglet.window.Window):
         self.player_entity.id = 0
         self.player_entity.position = np.array(self.position, dtype=float)
         self.player_entity.rotation = np.array(self.rotation, dtype=float)
+        # ensure loaded position is grounded
+        grounded_pos, _ = self.model.collide(
+            tuple(self.player_entity.position), self.player_entity.bounding_box
+        )
+        self.player_entity.position = np.array(grounded_pos, dtype=float)
+        self.position = tuple(self.player_entity.position)
 
         saved_snake_state = world_entity_store.load_entity_state("snake")
         self.snake_entity = SnakeEntity(
             self.model, player_position=self.position, entity_id=1, saved_state=saved_snake_state
         )
+        saved_snail_state = world_entity_store.load_entity_state("snail")
+        self.snail_entity = SnailEntity(
+            self.model, player_position=self.position, entity_id=2, saved_state=saved_snail_state
+        )
+        saved_seagull_state = world_entity_store.load_entity_state("seagull")
+        self.seagull_entity = SeagullEntity(
+            self.model, player_position=self.position, entity_id=3, saved_state=saved_seagull_state
+        )
         self.entity_renderers = {
             'player': renderer.AnimatedEntityRenderer(self.block_program, HUMANOID_MODEL),
-            'snake': renderer.SnakeRenderer(self.block_program, SNAKE_MODEL)
+            'snake': renderer.SnakeRenderer(self.block_program, SNAKE_MODEL),
+            'snail': renderer.AnimatedEntityRenderer(self.block_program, SNAIL_MODEL),
+            'seagull': renderer.AnimatedEntityRenderer(self.block_program, SEAGULL_MODEL),
         }
         self.entity_objects = {
             self.player_entity.id: self.player_entity,
-            self.snake_entity.id: self.snake_entity
+            self.snake_entity.id: self.snake_entity,
+            self.snail_entity.id: self.snail_entity,
+            self.seagull_entity.id: self.seagull_entity,
         }
         self.snake_enabled = True
-        self.entities = {}
+        self.snail_enabled = True
+        self.seagull_enabled = True
+        self.entities = {
+            eid: entity.to_network_dict()
+            for eid, entity in self.entity_objects.items()
+            if self._entity_is_enabled(entity)
+        }
         self._entity_persist_interval = 5.0
         self._entity_persist_timer = self._entity_persist_interval
         self._persist_entity_states()
@@ -154,6 +180,10 @@ class Window(pyglet.window.Window):
         # The label that is displayed in the top left of the canvas.
         self.label = pyglet.text.Label('', font_name='Arial', font_size=18,
             x=10, y=self.height - 10, anchor_x='left', anchor_y='top',
+            color=(0, 0, 0, 255))
+        self.entity_label = pyglet.text.Label('', font_name='Arial', font_size=14,
+            x=10, y=self.height - 10 - self.label.content_height - 4,
+            anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
 
         # Target frame pacing and local FPS tracking (not dependent on pyglet internals).
@@ -294,7 +324,7 @@ class Window(pyglet.window.Window):
         updated_entities = {}
 
         for entity in self.entity_objects.values():
-            if entity is self.snake_entity and not self.snake_enabled:
+            if not self._entity_is_enabled(entity):
                 continue
             entity.update(dt, context)
             updated_entities[entity.id] = entity.to_network_dict()
@@ -307,6 +337,15 @@ class Window(pyglet.window.Window):
         if self._entity_persist_timer <= 0:
             self._persist_entity_states()
             self._entity_persist_timer = self._entity_persist_interval
+
+    def _entity_is_enabled(self, entity):
+        if entity is self.snake_entity:
+            return self.snake_enabled
+        if entity is self.snail_entity:
+            return self.snail_enabled
+        if entity is self.seagull_entity:
+            return self.seagull_enabled
+        return True
 
     def _persist_entity_states(self):
         for entity in self.entity_objects.values():
@@ -426,6 +465,10 @@ class Window(pyglet.window.Window):
                 self.camera_mode = 'third_person'
             else:
                 self.camera_mode = 'first_person'
+        elif symbol == key.B:
+            self._toggle_snail()
+        elif symbol == key.M:
+            self._toggle_seagull()
         elif symbol in self.num_keys:
             index = (symbol - self.num_keys[0]) % len(self.inventory)
             self.block = self.inventory[index]
@@ -437,6 +480,16 @@ class Window(pyglet.window.Window):
         self.snake_enabled = not self.snake_enabled
         status = "enabled" if self.snake_enabled else "disabled"
         print(f"Snake {status}")
+
+    def _toggle_snail(self):
+        self.snail_enabled = not self.snail_enabled
+        status = "enabled" if self.snail_enabled else "disabled"
+        print(f"Snail {status}")
+
+    def _toggle_seagull(self):
+        self.seagull_enabled = not self.seagull_enabled
+        status = "enabled" if self.seagull_enabled else "disabled"
+        print(f"Seagull {status}")
 
     def on_key_release(self, symbol, modifiers):
         """ Called when the player releases a key. See pyglet docs for key
@@ -469,6 +522,7 @@ class Window(pyglet.window.Window):
         """
         # label
         self.label.y = height - 10
+        self.entity_label.y = self.label.y - self.label.content_height - 4
         # reticle uses shader-based shapes instead of deprecated vertex_list
         self.reticle_batch = None
         cx, cy = self.width / 2, self.height / 2
@@ -664,17 +718,37 @@ class Window(pyglet.window.Window):
             mx, my, mz = mush_pos
             mush_text = f'{mx},{my},{mz}'
         self.label.text = 'FPS(%.1f), pos(%.2f, %.2f, %.2f) rot(%.1f, %.1f) void %s mush %s' % (fps, x, y, z, rx, ry, void_text, mush_text)
+        entity_lines = []
+        for entity_state in self.entities.values():
+            if entity_state['type'] == 'player':
+                continue
+            pos = entity_state.get('pos')
+            if pos is None:
+                continue
+            px, py, pz = pos
+            entity_lines.append(f"{entity_state['type']}({px:.1f},{py:.1f},{pz:.1f})")
+        if entity_lines:
+            entity_text = "Ent: " + " | ".join(entity_lines)
+        else:
+            entity_text = "Ent: none"
+        line_spacing = 4
+        self.entity_label.text = entity_text
+        self.entity_label.y = self.label.y - self.label.content_height - line_spacing
         # Light backdrop to keep text readable on bright backgrounds.
         pad_x = 6
         pad_y = 3
-        bg_width = self.label.content_width + pad_x * 2
-        bg_height = self.label.content_height + pad_y * 2
+        top = self.label.y
+        bottom = self.entity_label.y - self.entity_label.content_height
+        entity_width = max(self.label.content_width, self.entity_label.content_width)
+        bg_width = entity_width + pad_x * 2
+        bg_height = (top - bottom) + pad_y * 2
         bg_x = self.label.x - pad_x
-        bg_y = self.label.y - bg_height
+        bg_y = bottom - pad_y
         label_bg = shapes.Rectangle(bg_x, bg_y, bg_width, bg_height, color=(255, 255, 255))
         label_bg.opacity = 120  # semi-transparent
         label_bg.draw()
         self.label.draw()
+        self.entity_label.draw()
 
     def _current_fps(self):
         """Return a smoothed FPS based on recent draw intervals."""
