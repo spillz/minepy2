@@ -13,7 +13,7 @@ def get_cube_vertices(size):
         return _cube_mesh_cache[size_key]
 
     w, h, d = size[0] / 2.0, size[1] / 2.0, size[2] / 2.0
-    
+
     vertices = np.array([
         # top
         -w, h, -d,   -w, h, d,    w, h, d,    w, h, -d,
@@ -117,7 +117,7 @@ class AnimatedEntityRenderer:
         default_rot = {'pitch': 0, 'yaw': 0, 'roll': 0}
         if not anim or 'keyframes' not in anim:
             return self.get_parent_rotation(part_name, anim)
-        
+
         keyframes = [kf for kf in anim['keyframes'] if 'rotations' in kf and part_name in kf['rotations']]
         
         if not keyframes:
@@ -166,12 +166,12 @@ class AnimatedEntityRenderer:
     def draw(self, entity_state):
         pos = entity_state['pos']
         rot = entity_state['rot']
-        
+
         # Start with the entity's base transformation matrix (position and yaw)
         root_offset = Vec3(*self.model.get('root_offset', (0.0, 0.0, 0.0)))
         model_matrix = Mat4.from_translation(entity_state['pos'] + root_offset)
         model_matrix = model_matrix.rotate(math.radians(rot[0]), Vec3(0, 1, 0))
-        
+
         # Find the root part and start the recursive drawing
         root_part_name = self.model.get('root_part', 'body')
         if root_part_name in self.model['parts']:
@@ -179,16 +179,16 @@ class AnimatedEntityRenderer:
 
     def _draw_part(self, part_name, parent_matrix):
         part_data = self.model['parts'][part_name]
-        
+
         # Get transformations for this part
         pivot = part_data.get('pivot', [0, 0, 0])
         rotation = self.get_interpolated_rotation(part_name)
         position = part_data.get('position', [0, 0, 0])
-        
+
         # Create transformation matrices using pyglet.math methods
         pivot_vec = Vec3(*pivot)
         pivot_mat = Mat4.from_translation(pivot_vec)
-        
+
         pos_vec = Vec3(*position)
         pos_mat = Mat4.from_translation(pos_vec)
 
@@ -201,7 +201,7 @@ class AnimatedEntityRenderer:
 
         # Transformation for the part's coordinate system (to be inherited by children)
         child_parent_matrix = parent_matrix @ pivot_mat @ rot_mat
-        
+
         # Final transformation matrix to draw this part's mesh
         draw_matrix = child_parent_matrix @ pos_mat
         

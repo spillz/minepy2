@@ -749,7 +749,7 @@ class ModelProxy(object):
             wtcoords = face_tex.reshape(-1,2).ravel()
             wn = face_norm.reshape(-1,3).ravel()
             wc = face_col.reshape(-1,4).ravel()
-            water_count = len(wv)//3
+            water_count = len(wv) // 3
             water_data = (water_count, wv, wtcoords, wn, wc)
         else:
             water_data = None
@@ -877,6 +877,19 @@ class ModelProxy(object):
         if not (0 <= ix < config.SECTOR_SIZE + 2 and 0 <= iz < config.SECTOR_SIZE + 2):
             return None
         return sector.blocks[ix, :, iz]
+
+    def find_surface_y(self, x, z):
+        """
+        Find the y-coordinate of the ground at the given (x, z) position.
+        """
+        column = self.get_vertical_column(x, z)
+        if column is None or column.size == 0:
+            return None
+        non_air = column != 0
+        if not non_air.any():
+            return None
+        y = int(numpy.nonzero(non_air)[0][-1])
+        return float(y + 1)
 
     def add_block(self, position, block, notify_server = True):
         spos = sectorize(position)
@@ -1245,10 +1258,10 @@ class ModelProxy(object):
         emissive = numpy.full((6,4,1), BLOCK_GLOW[block_id]*255.0, dtype=numpy.float32)
         colors = numpy.concatenate([colors_rgb, emissive], axis=2)
         face_mask = numpy.ones((6,4), dtype=bool)
-        v = verts[face_mask].reshape(-1,3).ravel().astype('f4')
-        t = tex[face_mask].reshape(-1,2).ravel().astype('f4')
-        n = normals[face_mask].reshape(-1,3).ravel().astype('f4')
-        c = colors[face_mask].reshape(-1,4).ravel().astype('f4')
+        v = verts[face_mask].ravel().astype('f4')
+        t = tex[face_mask].ravel().astype('f4')
+        n = normals[face_mask].ravel().astype('f4')
+        c = colors[face_mask].ravel().astype('f4')
         count = len(v)//3
         if config.DEBUG_SINGLE_BLOCK:
             print("[DEBUG] block vertex sample:", v[:18], "tex:", t[:8])
@@ -1445,6 +1458,9 @@ class ModelProxy(object):
         Checks to see if an entity at the given `position` with the given
         `bounding_box` is colliding with any blocks in the world.
 
+        This version includes a "step-up" mechanic for climbing and more robust
+        ground detection.
+
         Parameters
         ----------
         position : tuple of len 3
@@ -1459,31 +1475,96 @@ class ModelProxy(object):
         vertical_collision : bool
             True if the entity collided with the ground or ceiling.
         """
-        # TODO: Add bounding box support to collision
-        height = int(bounding_box[1])
-        pad = 0.1
-        p = list(position)
-        np = normalize(position)
+        width, height, depth = bounding_box
+        x, y, z = position
+        p = [x, y, z]
+
+        # Get the AABB of the entity.
+        min_x, max_x = x - width / 2, x + width / 2
+        min_y, max_y = y, y + height
+        min_z, max_z = z - depth / 2, z + depth / 2
+
+        # Get the list of blocks that could potentially be colliding with the entity.
+        min_bx, max_bx = int(math.floor(min_x)), int(math.ceil(max_x))
+        min_by, max_by = int(math.floor(min_y)), int(math.ceil(max_y))
+        min_bz, max_bz = int(math.floor(min_z)), int(math.ceil(max_z))
+
         vertical_collision = False
-        for face in FACES:  # check all surrounding blocks
-            for i in range(3):  # check each dimension independently
-                if not face[i]:
-                    continue
-                # How much overlap you have with this dimension.
-                d = (p[i] - np[i]) * face[i]
-                if d < pad:
-                    continue
-                for dy in range(height):  # check each height
-                    op = list(np)
-                    op[1] -= dy
-                    op[i] += face[i]
-                    b = self[normalize(op)]
-                    if b is None or b == 0 or not BLOCK_SOLID[b]:
-                        continue
-                    p[i] -= (d - pad) * face[i]
-                    if face[1] != 0: # y-axis collision
+
+        # Check for ground contact before resolving collisions
+        # This helps with the "on_ground" status for jumping
+        ground_check_y = int(math.floor(min_y - 0.01))
+        for bx in range(min_bx, max_bx):
+            for bz in range(min_bz, max_bz):
+                block_pos = (bx, ground_check_y, bz)
+                block_id = self[normalize(block_pos)]
+                if block_id and BLOCK_SOLID[block_id]:
+                    # Check if entity's bottom is just above this block
+                    if abs(min_y - (ground_check_y + 1)) < 0.01:
                         vertical_collision = True
-                    break
+                        break
+            if vertical_collision:
+                break
+        
+        for bx in range(min_bx, max_bx):
+            for by in range(min_by, max_by):
+                for bz in range(min_bz, max_bz):
+                    block_pos = (bx, by, bz)
+                    block_id = self[normalize(block_pos)]
+                    if not block_id or not BLOCK_SOLID[block_id]:
+                        continue
+
+                    # There is a collision. Resolve it.
+                    block_min_x, block_max_x = bx, bx + 1
+                    block_min_y, block_max_y = by, by + 1
+                    block_min_z, block_max_z = bz, bz + 1
+
+                    # Find the minimum penetration vector.
+                    overlaps = [
+                        max_x - block_min_x,
+                        block_max_x - min_x,
+                        max_y - block_min_y,
+                        block_max_y - min_y,
+                        max_z - block_min_z,
+                        block_max_z - min_z,
+                    ]
+                    min_overlap = min((o for o in overlaps if o > 0.0001), default=0)
+
+                    # Check for climbing opportunity
+                    is_horizontal_collision = min_overlap > 0 and (min_overlap == overlaps[0] or min_overlap == overlaps[1] or min_overlap == overlaps[4] or min_overlap == overlaps[5])
+                    
+                    # A block is climbable if it's at the entity's feet.
+                    is_climbable = (by == int(math.floor(y)))
+
+                    if is_horizontal_collision and is_climbable:
+                        headroom_clear = True
+                        # Check space for entity to stand on top of the block
+                        for i in range(1, int(math.ceil(height)) + 1):
+                            headroom_block = self[normalize((bx, by + i, bz))]
+                            if headroom_block and BLOCK_SOLID[headroom_block]:
+                                headroom_clear = False
+                                break
+                        
+                        if headroom_clear:
+                            p[1] = by + 1.0
+                            vertical_collision = True
+                            continue # Solved by climbing, skip normal push-back for this block.
+
+                    if min_overlap == overlaps[0]: # push left
+                        p[0] -= min_overlap
+                    elif min_overlap == overlaps[1]: # push right
+                        p[0] += min_overlap
+                    elif min_overlap == overlaps[2]: # push down
+                        p[1] -= min_overlap
+                        vertical_collision = True
+                    elif min_overlap == overlaps[3]: # push up
+                        p[1] += min_overlap
+                        vertical_collision = True
+                    elif min_overlap == overlaps[4]: # push back
+                        p[2] -= min_overlap
+                    elif min_overlap == overlaps[5]: # push forward
+                        p[2] += min_overlap
+        
         return tuple(p), vertical_collision
 
     def quit(self,kill_server=True):

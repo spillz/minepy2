@@ -21,6 +21,24 @@ class BaseEntity:
 
         # State
         self.on_ground = False
+        self.flying = False
+
+        # Client can use this to drive the right animation
+        self.current_animation = 'idle'
+
+
+    def snap_to_ground(self):
+        """
+        Moves the entity to be on top of the ground.
+        """
+        # Set a high initial position to ensure we are above any terrain
+        self.position = np.array([self.position[0], 160, self.position[2]], dtype=float)
+        # Use the world's collide method to find the ground position
+        grounded_pos, _ = self.world.collide(tuple(self.position), self.bounding_box)
+        self.position = np.array(grounded_pos, dtype=float)
+        self.on_ground = True
+        if hasattr(self, 'velocity'):
+            self.velocity[1] = 0
 
     def update(self, dt):
         """
@@ -32,7 +50,7 @@ class BaseEntity:
         likely require some refactoring to move collision logic to a shared location.
         """
         # 1. Apply gravity
-        if not self.on_ground:
+        if not self.on_ground and not self.flying:
             self.velocity[1] -= 20.0 * dt # Gravity constant
 
         # 2. Apply velocity to position

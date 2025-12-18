@@ -41,8 +41,8 @@ def build_snail_model(
     for side, offset in (("stalk_left", -0.08), ("stalk_right", 0.08)):
         parts[side] = {
             "parent": "foot",
-            "pivot": [offset, foot_size[1] / 2.0, -foot_size[2] / 2.0],
-            "position": [0.0, stalk_size[1] / 2.0, -stalk_size[2] / 2.0],
+            "pivot": [0.0, -stalk_size[1] / 2.0, 0.0],
+            "position": [offset, foot_h / 2.0 + stalk_size[1] / 2.0, -foot_d / 2.0],
             "size": [stalk_size[0], stalk_size[1], stalk_size[2]],
             "material": {"color": (60, 60, 60)},
         }
@@ -77,8 +77,6 @@ class SnailEntity(BaseEntity):
         self.current_animation = "idle"
         self._wander_angle = random.random() * math.pi * 2
         self._wander_speed = 0.4
-        self._grounded = False
-        self._wander_offset = 0.0
         self._heading = np.array([0.0, 1.0], dtype=float)
         if saved_state:
             self.position = np.array(saved_state.get("pos", self.position), dtype=float)
@@ -86,8 +84,8 @@ class SnailEntity(BaseEntity):
             if rot:
                 self.rotation = np.array(rot, dtype=float)
         else:
-            self.position = self._find_spawn_position(player_position)
-        self._ground_reference = self.position[1]
+            self.position = player_position
+            self.snap_to_ground()
 
     def update(self, dt, context):
         if dt <= 0:
@@ -127,71 +125,17 @@ class SnailEntity(BaseEntity):
         norm = np.linalg.norm(move_dir)
         if norm > 1e-6:
             move_dir /= norm
-            head[0] += move_dir[0] * self.SPEED * dt
-            head[2] += move_dir[1] * self.SPEED * dt
+            self.velocity[0] = move_dir[0] * self.SPEED
+            self.velocity[2] = move_dir[1] * self.SPEED
             moving = True
             self.rotation[0] = math.degrees(math.atan2(-self._heading[0], -self._heading[1]))
-        self._settle_height()
+        else:
+            self.velocity[0] = 0
+            self.velocity[2] = 0
+        
+        super().update(dt)
+        
         self.current_animation = "walk" if moving else "idle"
-
-        if moving:
-            self._adjust_height()
-
-    def to_network_dict(self):
-        data = super().to_network_dict()
-        data["animation"] = self.current_animation
-        return data
 
     def serialize_state(self):
         return {"pos": tuple(self.position.tolist()), "rot": tuple(self.rotation.tolist())}
-
-    def _find_spawn_position(self, player_position):
-        px, py, pz = player_position
-        start_y = py + 12.0
-        primary = self._sample_ground(px, pz, start_y)
-        if primary is not None:
-            return primary
-        for radius in range(1, 4):
-            for dx in range(-radius, radius + 1):
-                for dz in range(-radius, radius + 1):
-                    if abs(dx) != radius and abs(dz) != radius:
-                        continue
-                    sample = self._sample_ground(px + dx, pz + dz, start_y)
-                    if sample is not None:
-                        return sample
-        return np.array([px, py, pz], dtype=float)
-
-    def _sample_ground(self, x, z, reference_y):
-        surface = self._find_surface_y(x, z)
-        if surface is None:
-            return None
-        return np.array([x, surface, z], dtype=float)
-
-    def _find_surface_y(self, x, z, reference_y=None):
-        column = self.world.get_vertical_column(x, z)
-        if column is None or column.size == 0:
-            return None
-        non_air = column != 0
-        if not non_air.any():
-            return None
-        y = int(np.nonzero(non_air)[0][-1])
-        return float(y + 0.5)
-
-    def _settle_height(self):
-        target = self._find_surface_y(self.position[0], self.position[2])
-        if target is not None:
-            self.position[1] = target
-            self._grounded = True
-            self._ground_reference = target
-            return
-        if not self._grounded:
-            self.position[1] = max(self.position[1] - 0.05, self._ground_reference - 1.0)
-
-    def _adjust_height(self):
-        target = self._find_surface_y(self.position[0], self.position[2])
-        if target is not None:
-            self.position[1] = target
-
-    def _update_wander_direction(self, dt):
-        self._wander_angle += (dt * self._wander_speed) + random.uniform(-0.2, 0.2)
-        return np.array([math.cos(self._wander_angle), math.sin(self._wander_angle)], dtype=float)

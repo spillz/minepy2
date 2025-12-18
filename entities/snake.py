@@ -158,9 +158,7 @@ class SnakeEntity(BaseEntity):
     MAX_ROAM_DISTANCE = 20.0
 
     def __init__(self, world, player_position, entity_id=1, saved_state=None):
-        self.world = world
-        spawn = self._find_spawn_position(player_position)
-        super().__init__(world, position=spawn)
+        super().__init__(world, position=player_position)
         self.type = "snake"
         self.model_definition = SNAKE_MODEL
         self.id = entity_id
@@ -168,7 +166,6 @@ class SnakeEntity(BaseEntity):
         self.current_animation = "idle"
         self.rotation = np.array([0.0, 0.0], dtype=float)
         self.segment_positions = np.zeros((self.SEGMENT_COUNT, 3), dtype=float)
-        self._grounded = False
         self._last_head_pos = self.position.copy()
         self.history = deque()
         self._distances = deque()
@@ -178,11 +175,12 @@ class SnakeEntity(BaseEntity):
         self._targets = np.arange(self.SEGMENT_COUNT, dtype=float) * self.SEGMENT_SPACING
         self._wander_angle = random.random() * math.pi * 2
         self._wander_speed = 0.6
+
         if saved_state:
             self._restore_state(saved_state)
         else:
+            self.snap_to_ground()
             self._initialize_segments()
-        self._settle_height(self.position[1])
 
     def update(self, dt, context):
         if dt <= 0:
@@ -197,20 +195,12 @@ class SnakeEntity(BaseEntity):
         dist_xz = math.hypot(dx, dz)
         moving = False
         move_dir = np.array([0.0, 0.0], dtype=float)
-        step = 0.0
         wander = self._update_wander_direction(dt)
         steer_target = np.zeros(2, dtype=float)
         if dist_xz > 1e-6:
             steer_target = np.array([dx / dist_xz, dz / dist_xz], dtype=float)
         if dist_xz > self.MAX_ROAM_DISTANCE:
-            if self._path_clear(px, pz):
-                move_dir = steer_target
-            else:
-                move_dir = steer_target * 0.65 + wander * 0.35
-            norm = np.linalg.norm(move_dir)
-            if norm > 1e-6:
-                move_dir /= norm
-            step = self.SPEED * dt
+            move_dir = steer_target
         else:
             move_dir = wander
             blend = 0.6
@@ -219,23 +209,19 @@ class SnakeEntity(BaseEntity):
                 strength = max(0.0, 1.0 - (dist_xz / self.MAX_ROAM_DISTANCE))
             repulsion = -steer_target * strength
             move_dir = move_dir * blend + repulsion * (1 - blend)
-            norm = np.linalg.norm(move_dir)
-            if norm < 1e-6:
-                fallback = wander
-                fallback_norm = np.linalg.norm(fallback)
-                if fallback_norm > 1e-6:
-                    move_dir = fallback / fallback_norm
-                    norm = 1.0
-                else:
-                    move_dir = np.array([1.0, 0.0], dtype=float)
-                    norm = 1.0
+
+        norm = np.linalg.norm(move_dir)
+        if norm > 1e-6:
             move_dir /= norm
-            step = self.SPEED * 0.5 * dt
-        if step > 1e-8:
-            head[0] += move_dir[0] * step
-            head[2] += move_dir[1] * step
+            self.velocity[0] = move_dir[0] * self.SPEED
+            self.velocity[2] = move_dir[1] * self.SPEED
             moving = True
-        self._settle_height(py)
+        else:
+            self.velocity[0] = 0
+            self.velocity[2] = 0
+
+        super().update(dt)
+
         if moving and np.linalg.norm(move_dir) > 1e-6:
             self.rotation[0] = math.degrees(math.atan2(move_dir[0], move_dir[1]))
         self.current_animation = "walk" if moving else "idle"
@@ -261,22 +247,6 @@ class SnakeEntity(BaseEntity):
             "segments": [list(pos) for pos in self.segment_positions],
         }
 
-    def _find_spawn_position(self, player_position):
-        px, py, pz = player_position
-        start_y = py + 24.0
-        primary = self._sample_ground(px, pz, start_y)
-        if primary is not None:
-            return primary
-        for radius in range(1, 5):
-            for dx in range(-radius, radius + 1):
-                for dz in range(-radius, radius + 1):
-                    if abs(dx) != radius and abs(dz) != radius:
-                        continue
-                    sample = self._sample_ground(px + dx, pz + dz, start_y)
-                    if sample is not None:
-                        return sample
-        return np.array([px, py, pz], dtype=float)
-
     def _restore_state(self, state):
         head = state.get("head")
         if head:
@@ -294,8 +264,6 @@ class SnakeEntity(BaseEntity):
         path.append(self.position.copy())
         self._initialize_history(path)
         self._update_segments()
-        self._grounded = False
-        self._settle_height(self.position[1])
 
     def _initialize_segments(self):
         for i in range(self.SEGMENT_COUNT):
@@ -325,11 +293,14 @@ class SnakeEntity(BaseEntity):
         dist = np.linalg.norm(delta)
         if dist < 1e-6:
             return
+        
         steps = max(int(math.ceil(dist / self.SEGMENT_SPACING)), 1)
-        for step in range(1, steps):
-            t = step / steps
-            inter_pos = last + delta * t
-            self._append_history_point(inter_pos)
+        if steps > 1:
+            t = np.arange(1, steps) / steps
+            inter_points = last + delta * t[:, np.newaxis]
+            for p in inter_points:
+                self._append_history_point(p)
+        
         self._append_history_point(position)
         self._prune_history()
 
@@ -359,62 +330,6 @@ class SnakeEntity(BaseEntity):
         if not self.history:
             return np.empty((0, 3), dtype=float)
         return np.array(self.history, dtype=float)[::-1]
-
-    def _sample_ground(self, x, z, reference_y):
-        surface = self._find_surface_y(x, z, reference_y)
-        if surface is None:
-            return None
-        return np.array([x, surface, z], dtype=float)
-
-    def _find_surface_y(self, x, z, reference_y):
-        max_y = min(int(math.ceil(reference_y + 8.0)), config.SECTOR_HEIGHT - 1)
-        min_y = max(int(math.floor(reference_y - 64.0)), -config.SECTOR_HEIGHT)
-        for y in range(max_y, min_y - 1, -1):
-            if self._is_solid(x, y, z):
-                head_y = y + 0.5 + self.HEAD_CLEARANCE
-                if self._has_clearance(x, head_y, z):
-                    return head_y
-        return None
-
-    def _settle_height(self, reference_y):
-        target = self._find_surface_y(self.position[0], self.position[2], self.position[1] + 8.0)
-        if target is not None:
-            self.position[1] = target
-            self._grounded = True
-            return True
-        if not self._grounded:
-            fallback = reference_y - 2.0
-            if fallback < self.position[1]:
-                self.position[1] = fallback
-        return False
-
-    def _path_clear(self, target_x, target_z):
-        head = self.position
-        dx = target_x - head[0]
-        dz = target_z - head[2]
-        dist = math.hypot(dx, dz)
-        if dist < 1e-4:
-            return True
-        samples = max(6, min(14, int(dist * 2) + 1))
-        for i in range(1, samples + 1):
-            t = i / samples
-            sample_x = head[0] + dx * t
-            sample_z = head[2] + dz * t
-            if self._find_surface_y(sample_x, sample_z, head[1] + 8.0) is None:
-                return False
-        return True
-
-    def _has_clearance(self, x, y, z):
-        return (not self._is_solid(x, y, z)) and (not self._is_solid(x, y + 1.0, z))
-
-    def _is_solid(self, x, y, z):
-        block_id = self._block_id(x, y, z)
-        return BLOCK_SOLID[block_id]
-
-    def _block_id(self, x, y, z):
-        coords = util.normalize((x, y, z))
-        block = self.world[coords]
-        return int(block or 0)
 
     def _update_segments(self):
         ordered = self._ordered_history()

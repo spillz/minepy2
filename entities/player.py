@@ -132,49 +132,7 @@ HUMANOID_MODEL = {
     }
 }
 
-def compute_bind_pose_min_y(model):
-    parts = model["parts"]
-    root = model["root_part"]
 
-    # Build children map
-    children = {name: [] for name in parts}
-    for name, p in parts.items():
-        parent = p.get("parent")
-        if parent is not None:
-            children[parent].append(name)
-
-    min_y = float("inf")
-
-    def dfs(part_name, parent_joint_y):
-        nonlocal min_y
-        p = parts[part_name]
-
-        pivot_y = float(p["pivot"][1])
-        pos_y   = float(p["position"][1])
-        size_y  = float(p["size"][1])
-
-        # Joint position in model space (bind pose; ignoring rotations)
-        joint_y = parent_joint_y + pivot_y
-
-        # Mesh center in model space
-        center_y = joint_y + pos_y
-
-        # Bottom of this box mesh
-        bottom_y = center_y - size_y * 0.5
-        min_y = min(min_y, bottom_y)
-
-        for ch in children.get(part_name, []):
-            dfs(ch, joint_y)
-
-    # parent_joint_y for root is 0.0 by convention
-    dfs(root, 0.0)
-    return min_y
-
-if False: #THIS MATH IS BROKEN
-    min_y = compute_bind_pose_min_y(HUMANOID_MODEL)
-    root_offset_y = -min_y
-    print("bind-pose min_y:", min_y, "=> root_offset_y:", root_offset_y)
-    HUMANOID_MODEL["root_offset"] = [0.0, root_offset_y, 0.0]
 
 
 class Player(BaseEntity):
@@ -198,15 +156,12 @@ class Player(BaseEntity):
 
         # Player-specific physics might differ slightly
         self.bounding_box = np.array([0.8, PLAYER_HEIGHT, 0.8])
-        self.dy = 0.0
-        self.on_ground = False
-        self.is_flying = False
 
     def serialize_state(self):
         return {
             "pos": tuple(self.position.tolist()),
             "rot": tuple(self.rotation.tolist()),
-            "flying": self.is_flying,
+            "flying": self.flying,
         }
 
     def get_camera_position(self):
@@ -244,7 +199,6 @@ class Player(BaseEntity):
         """
         motion_vector = context.get("motion_vector", (0.0, 0.0, 0.0))
         flying = context.get("flying", False)
-        model_proxy = context.get("world_model")
         camera_rotation = context.get("camera_rotation")
         apply_rotation = context.get("apply_camera_rotation", False)
 
@@ -253,63 +207,17 @@ class Player(BaseEntity):
                 self.rotation[0] = float(camera_rotation[0])
             self.rotation[1] = float(camera_rotation[1])
 
-        self.is_flying = bool(flying)
+        self.flying = bool(flying)
         speed = FLYING_SPEED if flying else WALKING_SPEED
-        distance = dt * speed
+        
         dx, dy, dz = motion_vector
-        dx *= distance
-        dy *= distance
-        dz *= distance
-
-        if not flying:
-            self.dy -= GRAVITY * dt
-            self.dy = max(self.dy, -TERMINAL_VELOCITY)
-            dy += self.dy * dt
-        elif motion_vector[1] != 0:
-            # Motion vector already encodes climb direction.
-            pass
-
-        current_pos = self.position.copy()
-        if model_proxy is not None:
-            new_pos, vertical_collision = model_proxy.collide(
-                (current_pos[0] + dx, current_pos[1] + dy, current_pos[2] + dz),
-                self.bounding_box
-            )
-            self.position = np.array(new_pos, dtype=float)
-            self.on_ground = bool(vertical_collision)
-            if vertical_collision:
-                self.dy = 0.0
-        else:
-            self.position = current_pos + np.array([dx, dy, dz], dtype=float)
-            self.on_ground = False
-
-        if dt > 0:
-            self.velocity = np.array([dx / dt, dy / dt, dz / dt], dtype=float)
-        else:
-            self.velocity = np.zeros(3, dtype=float)
-
-        if not self.is_flying:
-            self._snap_to_surface()
-
-    def _surface_height_center(self, x, z):
-        column = self.world.get_vertical_column(x, z)
-        if column is None or column.size == 0:
-            return None
-        non_air = column != 0
-        if not non_air.any():
-            return None
-        y = int(np.nonzero(non_air)[0][-1])
-        return float(y + 0.5)
-
-    def _snap_to_surface(self):
-        center = self._surface_height_center(self.position[0], self.position[2])
-        if center is None:
-            return
-        feet_y = center + 0.5
-        if self.position[1] + 0.01 < feet_y:
-            self.position[1] = feet_y
-            self.dy = 0.0
-            self.on_ground = True
+        
+        self.velocity[0] = dx * speed
+        self.velocity[2] = dz * speed
+        if flying:
+            self.velocity[1] = dy * speed
+        
+        super().update(dt)
 
     def to_network_dict(self):
         """

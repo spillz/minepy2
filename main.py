@@ -30,6 +30,7 @@ from entities.player import HUMANOID_MODEL, Player
 from entities.snake import SNAKE_MODEL, SnakeEntity
 from entities.snail import SNAIL_MODEL, SnailEntity
 from entities.seagull import SEAGULL_MODEL, SeagullEntity
+from entities.dog import DOG_MODEL, Dog
 from blocks import TEXTURE_PATH
 from config import DIST, TICKS_PER_SEC, FLYING_SPEED, GRAVITY, JUMP_SPEED, \
         MAX_JUMP_HEIGHT, PLAYER_HEIGHT, TERMINAL_VELOCITY, TICKS_PER_SEC, \
@@ -149,21 +150,27 @@ class Window(pyglet.window.Window):
         self.seagull_entity = SeagullEntity(
             self.model, player_position=self.position, entity_id=3, saved_state=saved_seagull_state
         )
+        saved_dog_state = world_entity_store.load_entity_state("dog")
+        self.dog_entity = Dog(self.model, entity_id=4, saved_state=saved_dog_state)
+        self.dog_entity.snap_to_ground()
         self.entity_renderers = {
             'player': renderer.AnimatedEntityRenderer(self.block_program, HUMANOID_MODEL),
             'snake': renderer.SnakeRenderer(self.block_program, SNAKE_MODEL),
             'snail': renderer.AnimatedEntityRenderer(self.block_program, SNAIL_MODEL),
             'seagull': renderer.AnimatedEntityRenderer(self.block_program, SEAGULL_MODEL),
+            'dog': renderer.AnimatedEntityRenderer(self.block_program, DOG_MODEL),
         }
         self.entity_objects = {
             self.player_entity.id: self.player_entity,
             self.snake_entity.id: self.snake_entity,
             self.snail_entity.id: self.snail_entity,
             self.seagull_entity.id: self.seagull_entity,
+            self.dog_entity.id: self.dog_entity,
         }
         self.snake_enabled = True
         self.snail_enabled = True
         self.seagull_enabled = True
+        self.dog_enabled = True
         self.entities = {
             eid: entity.to_network_dict()
             for eid, entity in self.entity_objects.items()
@@ -183,6 +190,10 @@ class Window(pyglet.window.Window):
             color=(0, 0, 0, 255))
         self.entity_label = pyglet.text.Label('', font_name='Arial', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - 4,
+            anchor_x='left', anchor_y='top',
+            color=(0, 0, 0, 255))
+        self.keybind_label = pyglet.text.Label('', font_name='Arial', font_size=14,
+            x=10, y=self.height - 10 - self.label.content_height - self.entity_label.content_height - 8,
             anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
 
@@ -327,6 +338,17 @@ class Window(pyglet.window.Window):
             if not self._entity_is_enabled(entity):
                 continue
             entity.update(dt, context)
+            
+            # Update the renderer's current animation based on the entity's state
+            entity_renderer = self.entity_renderers.get(entity.type)
+            if entity_renderer:
+                if isinstance(entity_renderer, renderer.SnakeRenderer):
+                    # SnakeRenderer has its own update for segments, and AnimatedEntityRenderer for the head.
+                    # The head's animation is set here.
+                    entity_renderer.head_renderer.set_animation(entity.current_animation)
+                else:
+                    entity_renderer.set_animation(entity.current_animation)
+
             updated_entities[entity.id] = entity.to_network_dict()
             if entity is self.player_entity:
                 context["player_position"] = entity.position.copy()
@@ -345,6 +367,8 @@ class Window(pyglet.window.Window):
             return self.snail_enabled
         if entity is self.seagull_entity:
             return self.seagull_enabled
+        if entity is self.dog_entity:
+            return self.dog_enabled
         return True
 
     def _persist_entity_states(self):
@@ -451,8 +475,8 @@ class Window(pyglet.window.Window):
         elif symbol == key.SPACE:
             if self.flying:
                 self.fly_climb += 1
-            if self.player_entity.dy == 0:
-                self.player_entity.dy = JUMP_SPEED
+            if self.player_entity.on_ground:
+                self.player_entity.velocity[1] = JUMP_SPEED
         elif symbol == key.LSHIFT:
             if self.flying:
                 self.fly_climb -= 1
@@ -475,6 +499,8 @@ class Window(pyglet.window.Window):
             self.update_inventory_item_batch()
         elif symbol == key.N:
             self._toggle_snake()
+        elif symbol == key.V:
+            self._toggle_dog()
 
     def _toggle_snake(self):
         self.snake_enabled = not self.snake_enabled
@@ -490,6 +516,11 @@ class Window(pyglet.window.Window):
         self.seagull_enabled = not self.seagull_enabled
         status = "enabled" if self.seagull_enabled else "disabled"
         print(f"Seagull {status}")
+
+    def _toggle_dog(self):
+        self.dog_enabled = not self.dog_enabled
+        status = "enabled" if self.dog_enabled else "disabled"
+        print(f"Dog {status}")
 
     def on_key_release(self, symbol, modifiers):
         """ Called when the player releases a key. See pyglet docs for key
@@ -523,6 +554,7 @@ class Window(pyglet.window.Window):
         # label
         self.label.y = height - 10
         self.entity_label.y = self.label.y - self.label.content_height - 4
+        self.keybind_label.y = self.entity_label.y - self.entity_label.content_height - 4
         # reticle uses shader-based shapes instead of deprecated vertex_list
         self.reticle_batch = None
         cx, cy = self.width / 2, self.height / 2
@@ -731,15 +763,22 @@ class Window(pyglet.window.Window):
             entity_text = "Ent: " + " | ".join(entity_lines)
         else:
             entity_text = "Ent: none"
+        
+        keybind_text = "Toggle: (N)ake, (B)Snail, (M)Seagull, (V)Dog"
+
         line_spacing = 4
         self.entity_label.text = entity_text
         self.entity_label.y = self.label.y - self.label.content_height - line_spacing
+        
+        self.keybind_label.text = keybind_text
+        self.keybind_label.y = self.entity_label.y - self.entity_label.content_height - line_spacing
+
         # Light backdrop to keep text readable on bright backgrounds.
         pad_x = 6
         pad_y = 3
         top = self.label.y
-        bottom = self.entity_label.y - self.entity_label.content_height
-        entity_width = max(self.label.content_width, self.entity_label.content_width)
+        bottom = self.keybind_label.y - self.keybind_label.content_height
+        entity_width = max(self.label.content_width, self.entity_label.content_width, self.keybind_label.content_width)
         bg_width = entity_width + pad_x * 2
         bg_height = (top - bottom) + pad_y * 2
         bg_x = self.label.x - pad_x
@@ -749,6 +788,7 @@ class Window(pyglet.window.Window):
         label_bg.draw()
         self.label.draw()
         self.entity_label.draw()
+        self.keybind_label.draw()
 
     def _current_fps(self):
         """Return a smoothed FPS based on recent draw intervals."""
