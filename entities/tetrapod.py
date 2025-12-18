@@ -33,7 +33,7 @@ def build_tetrapod_model(
     # Body
     parts["body"] = {
         "parent": None,
-        "pivot": [0.0, 0.0, 0.0],
+        "pivot": [0.0, leg_size[1], 0.0],
         "position": [0.0, 0.0, 0.0],
         "size": body_size,
         "material": {"color": body_color},
@@ -41,10 +41,10 @@ def build_tetrapod_model(
 
     # Legs
     leg_positions = {
-        "front_left_leg": [-body_size[0] / 2, -body_size[1]/2, -body_size[2] / 2],
-        "front_right_leg": [body_size[0] / 2, -body_size[1]/2, -body_size[2] / 2],
-        "back_left_leg": [-body_size[0] / 2,  -body_size[1]/2, body_size[2] / 2],
-        "back_right_leg": [body_size[0] / 2,  -body_size[1]/2, body_size[2] / 2],
+        "front_left_leg": [-body_size[0] / 2 + leg_size[0] /2 , -body_size[1]/2, -body_size[2] / 2 + leg_size[2] /2],
+        "front_right_leg": [body_size[0] / 2 - leg_size[0] /2 , -body_size[1]/2, -body_size[2] / 2 + leg_size[2] /2],
+        "back_left_leg": [-body_size[0] / 2 + leg_size[0] /2 ,  -body_size[1]/2, body_size[2] / 2 - leg_size[2] /2],
+        "back_right_leg": [body_size[0] / 2 - leg_size[0] /2 ,  -body_size[1]/2, body_size[2] / 2 - leg_size[2] /2],
     }
     for name, pos in leg_positions.items():
         parts[name] = {
@@ -99,8 +99,8 @@ def build_tetrapod_model(
     # snout
     parts["snout"] = {
         "parent": "head",
-        "pivot": [0, -head_size[1]/2 + snout_size[1]/2, 0],
-        "position": [0, -head_size[1]/2+snout_size[1]/2, +head_size[2]/2 - snout_size[2]/2],
+        "pivot": [0, -head_size[1]/2, +head_size[2]/2],
+        "position": [0, snout_size[1]/2, -snout_size[2]/2],
         "size": snout_size,
         "material": {"color": snout_color},
     }
@@ -108,8 +108,8 @@ def build_tetrapod_model(
     # Nose
     parts["nose"] = {
         "parent": "snout",
-        "pivot": [0, 0, -snout_size[2]/2],
-        "position": [0, 0, 0],
+        "pivot": [0, snout_size[1]/2, -snout_size[2]/2],
+        "position": [0, -nose_size[1]/2, 0],
         "size": nose_size,
         "material": {"color": nose_color},
     }
@@ -125,7 +125,6 @@ def build_tetrapod_model(
 
     model = {
         "root_part": "body",
-        "root_offset": [0.0, 0.0, 0.0],
         "parts": parts,
         "animations": {
             "idle": {
@@ -201,7 +200,9 @@ class Tetrapod(BaseEntity):
         self.model_definition = model_definition
         self.jump_height = jump_height
         self.jump_span = jump_span
-        self.bounding_box = np.array([0.5, 0.5, 1.0])
+        self.bounding_box = np.array([0.25, 0.5, 0.25])
+        # bp = model_definition['parts'][model_definition['root_part']]
+        # self.bounding_box = np.array([bp['size'][0], bp['size'][1], bp['size'][2]])
         self.current_animation = "idle"
 
     def jump(self):

@@ -321,7 +321,7 @@ class Window(pyglet.window.Window):
         dx, _, dz = motion_vector
         is_moving = abs(dx) > 1e-6 or abs(dz) > 1e-6
         target_animation = 'walk' if is_moving else 'idle'
-        self.entity_renderers['player'].set_animation(target_animation)
+        self.player_entity.current_animation = target_animation
 
         camera_rot = (-self.rotation[0], self.rotation[1])
         context = {

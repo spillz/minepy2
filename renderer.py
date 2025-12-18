@@ -167,9 +167,14 @@ class AnimatedEntityRenderer:
         pos = entity_state['pos']
         rot = entity_state['rot']
 
-        # Start with the entity's base transformation matrix (position and yaw)
-        root_offset = Vec3(*self.model.get('root_offset', (0.0, 0.0, 0.0)))
-        model_matrix = Mat4.from_translation(entity_state['pos'] + root_offset)
+        # Find the root part and its size to position its base flush with entity_state['pos'].y
+        root_part_name = self.model.get('root_part', 'body')
+        initial_y_offset = -0.5
+        if root_part_name in self.model['parts']:
+            root_part_size = self.model['parts'][root_part_name]['size']
+            initial_y_offset += root_part_size[1] / 2.0
+
+        model_matrix = Mat4.from_translation(entity_state['pos'] + Vec3(0.0, initial_y_offset, 0.0))
         model_matrix = model_matrix.rotate(math.radians(rot[0]), Vec3(0, 1, 0))
 
         # Find the root part and start the recursive drawing
@@ -198,12 +203,8 @@ class AnimatedEntityRenderer:
         rot_mat = rot_mat.rotate(math.radians(rotation.get('pitch', 0)), Vec3(1, 0, 0))
         rot_mat = rot_mat.rotate(math.radians(rotation.get('yaw', 0)), Vec3(0, 1, 0))
 
-
-        # Transformation for the part's coordinate system (to be inherited by children)
-        child_parent_matrix = parent_matrix @ pivot_mat @ rot_mat
-
         # Final transformation matrix to draw this part's mesh
-        draw_matrix = child_parent_matrix @ pos_mat
+        draw_matrix = parent_matrix @ pivot_mat @rot_mat @ pos_mat 
         
         # Set the model matrix uniform and draw the mesh
         self.program['u_model'] = draw_matrix
@@ -214,7 +215,7 @@ class AnimatedEntityRenderer:
         # Recursively draw children, passing the correct parent matrix
         for child_name, child_data in self.model['parts'].items():
             if child_data.get('parent') == part_name:
-                self._draw_part(child_name, child_parent_matrix)
+                self._draw_part(child_name, draw_matrix)
 
 
 class SnakeRenderer:
@@ -268,6 +269,7 @@ class SnakeRenderer:
             "normals": normals,
             "tex": tex,
             "colors": colors,
+            "size": size, # Add size here
         }
 
     def _update_variant_mesh(self, idx, translations):
@@ -276,6 +278,7 @@ class SnakeRenderer:
         tri_count = buffer["tri_count"]
         vertex_count = buffer["vertex_count"]
         target_trans = np.full((self.segment_capacity, 3), 1e6, dtype='f4')
+
         if translations is not None and len(translations):
             usable = min(len(translations), self.segment_capacity)
             target_trans[:usable] = translations[:usable]
@@ -284,8 +287,13 @@ class SnakeRenderer:
                     target_trans[usable:] = target_trans[usable - 1]
                 else:
                     target_trans[usable:] = np.array([1e6, 1e6, 1e6], dtype='f4')
+
         positions = buffer["base_positions"].copy()
+        initial_segment_y_offset = self._variant_buffers[idx]["size"][1] / 2.0 # Get segment height from buffer data
+
         offsets = np.repeat(target_trans, tri_count, axis=0)
+        offsets[:, 1] += initial_segment_y_offset # Add the vertical offset to the y-component
+
         positions += offsets[:vertex_count]
         mesh.position[:] = positions.ravel()
 

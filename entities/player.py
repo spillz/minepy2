@@ -14,11 +14,10 @@ HUMANOID_MODEL = {
     # 'pivot' is the point ON THE PARENT where this part attaches and rotates.
     # 'position' is the offset FROM THE PIVOT to the center of this part's mesh.
     'root_part': 'torso',
-    'root_offset': [0.0, -0.9, 0.0],
     'parts': {
         'torso': {
             'parent': None,
-            'pivot': [0, 0.8, 0],   # The model's origin is at its feet. The torso pivot is 0.8 units up.
+            'pivot': [0, 0.9, 0],   # The model's origin is at its feet. The torso pivot is 0.9 units up -- matching the leg height
             'position': [0, 0.0, 0], 
             'size': [0.6, 0.8, 0.3],
             'material': {'color': (58, 110, 165)}
@@ -155,7 +154,7 @@ class Player(BaseEntity):
         self.name = "Player"  # Default name
 
         # Player-specific physics might differ slightly
-        self.bounding_box = np.array([0.8, PLAYER_HEIGHT, 0.8])
+        self.bounding_box = np.array([0.2, PLAYER_HEIGHT, 0.2])
 
     def serialize_state(self):
         return {

@@ -33,9 +33,11 @@ class BaseEntity:
         """
         # Set a high initial position to ensure we are above any terrain
         self.position = np.array([self.position[0], 160, self.position[2]], dtype=float)
-        # Use the world's collide method to find the ground position
+        # Use the world's collide method to find the ground position (returns bottom of bbox)
         grounded_pos, _ = self.world.collide(tuple(self.position), self.bounding_box)
         self.position = np.array(grounded_pos, dtype=float)
+        # Adjust y to be the integer block coordinate, as collide returns top surface of block
+        # self.position[1] -= 0.5
         self.on_ground = True
         if hasattr(self, 'velocity'):
             self.velocity[1] = 0
