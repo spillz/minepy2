@@ -2,4 +2,5 @@
 *.pyo
 *~
 *.db
+*.db-lock
 web/node_modules
