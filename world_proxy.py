@@ -980,7 +980,7 @@ class ModelProxy(object):
     def _water_level(self):
         return getattr(mapgen, 'GLOBAL_WATER_LEVEL', getattr(mapgen, 'WATER_LEVEL', 70))
 
-    def draw(self, position, frustum_circle, frame_start=None, upload_budget=None, defer_uploads=False):
+    def draw(self, position, frustum_circle, frame_start=None, upload_budget=None, defer_uploads=False, draw_water=True):
         """Draw only sectors intersecting the current view frustum projection. Limit or defer GPU uploads to respect frame budget."""
         draw_invalid = True
         uploaded_tris = 0
@@ -1034,7 +1034,18 @@ class ModelProxy(object):
         # Drain pending uploads while budget remains (only when not deferring).
         if not defer_uploads:
             uploaded_tris = self.process_pending_uploads(frame_start, upload_budget, uploaded_tris, tri_budget)
-        # Transparent water draws after all opaque uploads/draws so depth writes stay intact.
+        if draw_water:
+            self.draw_water_pass()
+
+    def draw_water_pass(self):
+        """Draw transparent water after opaque passes so depth writes stay intact."""
+        # Ensure block shading path is active for water.
+        self.program['u_use_texture'] = True
+        self.program['u_use_vertex_color'] = True
+        # Reset model transform so water is rendered in world space.
+        self.program['u_model'] = Mat4()
+        # Keep alpha synced with config in case it changes.
+        self.program['u_water_alpha'] = getattr(config, 'WATER_ALPHA', 0.8)
         self.program['u_water_pass'] = True
         gl.glEnable(gl.GL_BLEND)
         gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)

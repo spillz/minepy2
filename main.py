@@ -691,8 +691,15 @@ class Window(pyglet.window.Window):
         self.clear()
         self.set_3d()
         
-        # Draw world
-        self.model.draw(self.position, self.get_frustum_circle(), frame_start, upload_budget, defer_uploads=True)
+        # Draw world (opaque pass only so water can overlay entities).
+        self.model.draw(
+            self.position,
+            self.get_frustum_circle(),
+            frame_start,
+            upload_budget,
+            defer_uploads=True,
+            draw_water=False,
+        )
         
         # Draw entities
         self.block_program.bind()
@@ -706,6 +713,9 @@ class Window(pyglet.window.Window):
                 r.draw(entity_state)
         self.block_program['u_use_texture'] = True
         # self.block_program['u_use_vertex_color'] = True
+
+        # Draw water after entities so it tints submerged parts.
+        self.model.draw_water_pass()
         self.block_program.unbind()
 
         # 2D overlay
