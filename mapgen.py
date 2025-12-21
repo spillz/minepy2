@@ -141,6 +141,9 @@ class BiomeGenerator:
             seed = int(time.time())
         self.seed = seed
         self.fast = getattr(config, 'BIOME_FAST_MODE', False)
+        self.spawn_point = tuple(getattr(config, 'SPAWN_POINT', (0.0, 0.0)))
+        self.spawn_bias_radius = float(getattr(config, 'SPAWN_BIAS_RADIUS', 40.0))
+        self.spawn_bias_boost = float(getattr(config, 'SPAWN_BIAS_BOOST', 10.0))
         # Broad elevation and details.
         self.continents = SectorNoise2D(seed=seed + 101, step=1600.0, step_offset=240,
             scale=55.0, offset=70.0)
@@ -251,7 +254,7 @@ class BiomeGenerator:
         grad = numpy.hypot(gx, gz)
         flat_zone = (grad < 0.45) & (~plateau_mask)
         avg = (height + numpy.roll(height, 1, 0) + numpy.roll(height, -1, 0) +
-               numpy.roll(height, 1, 1) + numpy.roll(height, -1, 1)) / 5.0
+                numpy.roll(height, 1, 1) + numpy.roll(height, -1, 1)) / 5.0
         flattened = numpy.round(avg / 2.0) * 2.0
         height = numpy.where(flat_zone, flattened, height)
 
@@ -259,6 +262,18 @@ class BiomeGenerator:
         height -= numpy.clip(-canyon_noise - 0.25, 0, None) * 18.0
         height = numpy.clip(height, 4, SECTOR_HEIGHT - 6)
         return height, canyon_noise
+
+    def _apply_spawn_bias(self, elevation, position):
+        """Raise terrain near the spawn point so new maps don't start over water."""
+        if self.spawn_bias_radius <= 0.0 or self.spawn_bias_boost <= 0.0:
+            return elevation
+        xs, zs = self._world_axes(position)
+        dx = xs[:, None] - self.spawn_point[0]
+        dz = zs[None, :] - self.spawn_point[1]
+        dist = numpy.hypot(dx, dz)
+        factor = numpy.clip(1.0 - dist / self.spawn_bias_radius, 0.0, 1.0)
+        min_height = float(WATER_LEVEL) + self.spawn_bias_boost * factor
+        return numpy.maximum(elevation, min_height)
 
     def _biome_masks(self, moisture, temperature, elevation, canyon_noise):
         moist01 = 0.5 + 0.5 * numpy.tanh(moisture)
@@ -759,7 +774,7 @@ class BiomeGenerator:
             'original_ground': original_ground,
         }
 
-    def _apply_river_columns(self, blocks, plan):
+    def _apply_river_columns(self, blocks, plan, ground_h=None, surface_block=None):
         if not plan:
             return
         sx = plan['mask'].shape[0]
@@ -779,7 +794,15 @@ class BiomeGenerator:
                 col[floor] = bed_block
                 water_top = max(surface, floor + 1)
                 col[floor + 1:water_top + 1] = WATER
-                col[water_top + 1:min(SECTOR_HEIGHT, water_top + 4)] = 0
+                if ground_h is not None:
+                    level_top = int(ground_h[x, z])
+                    bank_start = water_top + 1
+                    if level_top >= bank_start:
+                        bank_end = min(level_top + 1, SECTOR_HEIGHT)
+                        # Replace the old grassy ledge with stone so the carved bank has a clean face.
+                        col[bank_start:bank_end] = STONE
+                        if surface_block is not None and 0 <= level_top < SECTOR_HEIGHT:
+                            col[level_top] = surface_block[x, z]
 
     def _apply_roads(self, blocks, plan, position):
         """
@@ -1201,6 +1224,7 @@ class BiomeGenerator:
 
     def generate(self, position):
         elevation, canyon_noise = self._height_field(position)
+        elevation = self._apply_spawn_bias(elevation, position)
         moisture = self.moisture(position)
         temperature = self.temperature(position)
         moist01 = 0.5 + 0.5 * numpy.tanh(moisture)
