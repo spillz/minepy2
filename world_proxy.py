@@ -35,17 +35,17 @@ from blocks import (
     BLOCK_VERTICES,
     BLOCK_COLORS,
     BLOCK_NORMALS,
-    BLOCK_TEXTURES,
+    BLOCK_TEXTURES_FLIPPED,
     BLOCK_ID,
     BLOCK_SOLID,
     BLOCK_OCCLUDES,
     BLOCK_OCCLUDES_SAME,
+    BLOCK_RENDER_ALL,
     BLOCK_GLOW,
     TEXTURE_PATH,
     BLOCK_LIGHT_LEVELS,
     DOOR_LOWER_IDS,
     DOOR_UPPER_IDS,
-    DOOR_UV_FLIP_FACES,
     BLOCK_COLLIDES,
     BLOCK_COLLISION_MIN,
     BLOCK_COLLISION_MAX,
@@ -55,24 +55,6 @@ import mapgen
 import numpy
 
 WATER = BLOCK_ID['Water']
-
-def _flip_door_uvs(tex, b):
-    if not DOOR_UV_FLIP_FACES:
-        return tex
-    for bid, faces in DOOR_UV_FLIP_FACES.items():
-        mask = b == bid
-        if not mask.any():
-            continue
-        for face in faces:
-            face_tex = tex[mask, face]
-            u0 = face_tex[:, 0, 0].copy()
-            u1 = face_tex[:, 1, 0].copy()
-            face_tex[:, 0, 0] = u1
-            face_tex[:, 1, 0] = u0
-            face_tex[:, 2, 0] = u0
-            face_tex[:, 3, 0] = u1
-            tex[mask, face] = face_tex
-    return tex
 #import logging
 #logging.basicConfig(level = logging.INFO)
 #def world_log(msg, *args):
@@ -298,7 +280,8 @@ class ModelProxy(object):
         neighbor = blocks[:,:,:-1]
         neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[:,:,1:]))
         exposed_faces[:,:,1:,5] = ~neighbor_occ
-        exposed_faces = exposed_faces & solid[..., None]
+        render_all = BLOCK_RENDER_ALL[blocks] != 0
+        exposed_faces = (exposed_faces | render_all[..., None]) & solid[..., None]
 
         if light_full is None:
             light = numpy.zeros(blocks.shape, dtype=numpy.float32)
@@ -388,8 +371,7 @@ class ModelProxy(object):
             b = blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
             verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
                      + pos[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
-            tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
-            tex = _flip_door_uvs(tex, b)
+            tex = BLOCK_TEXTURES_FLIPPED[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
             colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
             light = light_flat[:, :, None, None]  # (N,6,1,1)
@@ -441,8 +423,7 @@ class ModelProxy(object):
             b = numpy.full(len(pos_w), WATER, dtype=numpy.int32)
             verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
                      + pos_w[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
-            tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
-            tex = _flip_door_uvs(tex, b)
+            tex = BLOCK_TEXTURES_FLIPPED[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
             colors = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
 
@@ -584,7 +565,8 @@ class ModelProxy(object):
         neighbor_occ = BLOCK_OCCLUDES[neighbor].astype(bool) | (BLOCK_OCCLUDES_SAME[neighbor].astype(bool) & (neighbor == blocks[:,:,1:]))
         exposed_faces[:,:,1:,5] = ~neighbor_occ
 
-        exposed_faces = exposed_faces & solid[..., None]
+        render_all = BLOCK_RENDER_ALL[blocks] != 0
+        exposed_faces = (exposed_faces | render_all[..., None]) & solid[..., None]
 
         # Recompute baked lighting locally (skylight + optional block emitters)
         light = numpy.zeros(blocks.shape, dtype=numpy.float32)
@@ -680,7 +662,8 @@ class ModelProxy(object):
             exposed_faces[:,:,:-1,4] = ~neighbor_occ_mask(blocks[:,:,:-1], neighbor)
             neighbor = blocks[:,:,:-1]
             exposed_faces[:,:,1:,5] = ~neighbor_occ_mask(blocks[:,:,1:], neighbor)
-            exposed_faces = exposed_faces & solid[..., None]
+            render_all = BLOCK_RENDER_ALL[blocks] != 0
+            exposed_faces = (exposed_faces | render_all[..., None]) & solid[..., None]
 
             exposed_light = numpy.zeros(blocks.shape+(6,),dtype=numpy.float32)
             exposed_light[:,:-1,:,0] = light_full[:,1:,:] # up
@@ -720,8 +703,7 @@ class ModelProxy(object):
             b = sector.blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
             verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
                      + pos[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
-            tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
-            tex = _flip_door_uvs(tex, b)
+            tex = BLOCK_TEXTURES_FLIPPED[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
             colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
             ambient = getattr(config, 'AMBIENT_LIGHT', 0.0)
@@ -768,8 +750,7 @@ class ModelProxy(object):
             b = numpy.full(len(pos_w), WATER, dtype=numpy.int32)
             verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
                      + pos_w[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
-            tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
-            tex = _flip_door_uvs(tex, b)
+            tex = BLOCK_TEXTURES_FLIPPED[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
             colors = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
 
@@ -1365,9 +1346,7 @@ class ModelProxy(object):
     def _build_block_vt(self, block_id, pos):
         verts = (0.5*BLOCK_VERTICES[block_id][:6].reshape(6,4,3)
                  + pos[None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
-        tex = BLOCK_TEXTURES[block_id][:6].reshape(6,4,2).astype(numpy.float32)
-        if DOOR_UV_FLIP_FACES:
-            tex = _flip_door_uvs(tex[None, ...], numpy.array([block_id], dtype=numpy.int32))[0]
+        tex = BLOCK_TEXTURES_FLIPPED[block_id][:6].reshape(6,4,2).astype(numpy.float32)
         normals = numpy.broadcast_to(BLOCK_NORMALS[:,None,:], (6,4,3)).astype(numpy.float32)
         colors_rgb = BLOCK_COLORS[block_id][:6].reshape(6,4,3).astype(numpy.float32)
         emissive = numpy.full((6,4,1), BLOCK_GLOW[block_id]*255.0, dtype=numpy.float32)

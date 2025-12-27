@@ -46,7 +46,12 @@ from blocks import (
     ORIENTED_BLOCK_IDS,
     WALL_MOUNTED_BLOCK_IDS,
     DOOR_BASE_IDS,
+    DOOR_LOWER_IDS,
+    DOOR_UPPER_IDS,
     DOOR_LOWER_TO_UPPER,
+    DOOR_UPPER_TO_LOWER,
+    DOOR_LOWER_TOGGLE,
+    DOOR_UPPER_TOGGLE,
     ORIENT_SOUTH,
     ORIENT_WEST,
     ORIENT_NORTH,
@@ -462,6 +467,24 @@ class Window(pyglet.window.Window):
             if (button == mouse.RIGHT) or \
                     ((button == mouse.LEFT) and (modifiers & key.MOD_CTRL)):
                 # ON OSX, control + left click = right click.
+                if block:
+                    block_id = self.model[block]
+                    if block_id in DOOR_LOWER_IDS or block_id in DOOR_UPPER_IDS:
+                        if block_id in DOOR_UPPER_IDS:
+                            lower_pos = (block[0], block[1] - 1, block[2])
+                            lower_id = self.model[lower_pos]
+                        else:
+                            lower_pos = block
+                            lower_id = block_id
+                        if lower_id in DOOR_LOWER_TOGGLE:
+                            upper_pos = (lower_pos[0], lower_pos[1] + 1, lower_pos[2])
+                            new_lower = DOOR_LOWER_TOGGLE[lower_id]
+                            new_upper = DOOR_LOWER_TO_UPPER[new_lower]
+                            updates = [(lower_pos, new_lower)]
+                            if self.model[upper_pos] in DOOR_UPPER_TO_LOWER:
+                                updates.append((upper_pos, new_upper))
+                            self.model.add_blocks(updates)
+                            return
                 if previous:
                     px, py, pz = util.normalize(self.position)
                     if not (previous == (px, py, pz) or previous == (px, py-1, pz)):

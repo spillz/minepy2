@@ -21,15 +21,15 @@ from blocks import (
     BLOCK_VERTICES,
     BLOCK_COLORS,
     BLOCK_NORMALS,
-    BLOCK_TEXTURES,
+    BLOCK_TEXTURES_FLIPPED,
     BLOCK_ID,
     BLOCK_SOLID,
     BLOCK_OCCLUDES,
     BLOCK_OCCLUDES_SAME,
+    BLOCK_RENDER_ALL,
     BLOCK_GLOW,
     TEXTURE_PATH,
     BLOCK_LIGHT_LEVELS,
-    DOOR_UV_FLIP_FACES,
     BLOCK_RENDER_OFFSET,
 )
 import mapgen
@@ -243,7 +243,8 @@ class WorldLoader(object):
         exposed_faces[:,:,1:,5] = ~neighbor_occ
 
         solid = (self.blocks > 0) & (self.blocks != WATER)
-        self.exposed_faces = exposed_faces & solid[..., None]
+        render_all = BLOCK_RENDER_ALL[self.blocks] != 0
+        self.exposed_faces = (exposed_faces | render_all[..., None]) & solid[..., None]
 
         # Air mask reused for lighting (treat non-occluding blocks as light-permeable).
         air = (BLOCK_OCCLUDES[self.blocks] == 0)
@@ -353,21 +354,7 @@ class WorldLoader(object):
 
             verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
                      + pos[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
-            tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
-            if DOOR_UV_FLIP_FACES:
-                for bid, faces in DOOR_UV_FLIP_FACES.items():
-                    mask = b == bid
-                    if not mask.any():
-                        continue
-                    for face in faces:
-                        face_tex = tex[mask, face]
-                        u0 = face_tex[:, 0, 0].copy()
-                        u1 = face_tex[:, 1, 0].copy()
-                        face_tex[:, 0, 0] = u1
-                        face_tex[:, 1, 0] = u0
-                        face_tex[:, 2, 0] = u0
-                        face_tex[:, 3, 0] = u1
-                        tex[mask, face] = face_tex
+            tex = BLOCK_TEXTURES_FLIPPED[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
             light = light_flat[:, :, None, None]  # (N,6,1,1)
             colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
             ambient = config.AMBIENT_LIGHT
@@ -440,7 +427,7 @@ class WorldLoader(object):
             b = numpy.full(len(pos_w), WATER, dtype=numpy.int32)
             verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
                      + pos_w[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
-            tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+            tex = BLOCK_TEXTURES_FLIPPED[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
             colors = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
 

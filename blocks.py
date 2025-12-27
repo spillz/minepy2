@@ -52,10 +52,13 @@ class Block(object):
     show_in_inventory = True
     # Collision behavior: None (no collision), "full" (1x1x1), or "mesh" (use vertices AABB).
     collision = None
+    # Render all faces regardless of neighbor occlusion (useful for thin meshes).
+    render_all_faces = False
 
 class Decoration(object):
     vertices = de_v
     solid = False
+    render_all_faces = True
 
 class DirtWithGrass(Block):
     name = 'Grass'
@@ -208,6 +211,7 @@ class Door(Block):
     occludes = False
     solid = True
     collision = 'mesh'
+    render_all_faces = True
 
 class DoorLower(Block):
     name = 'Door Lower'
@@ -217,6 +221,7 @@ class DoorLower(Block):
     solid = True
     show_in_inventory = False
     collision = 'mesh'
+    render_all_faces = True
 
 class DoorUpper(Block):
     name = 'Door Upper'
@@ -226,6 +231,7 @@ class DoorUpper(Block):
     solid = True
     show_in_inventory = False
     collision = 'mesh'
+    render_all_faces = True
 
 class DoorLowerSouth(DoorLower):
     name = 'Door Lower South'
@@ -273,7 +279,7 @@ class DoorUpperEast(DoorUpper):
 
 class WindowPane(Block):
     name = 'Window Pane'
-    coords = ((4, 7), (4, 7), (4, 7))
+    coords = ((1, 12), (1, 12), (1, 12))
     vertices = window_pane_south
     solid = False
     occludes = False
@@ -392,6 +398,7 @@ BLOCK_VERTICES = numpy.array([cb_v]+[x.vertices for x in BLOCKS])
 BLOCK_SOLID = numpy.array([False]+[x.solid for x in BLOCKS], dtype = numpy.uint8)
 BLOCK_OCCLUDES = numpy.array([False]+[getattr(x,'occludes', True) for x in BLOCKS], dtype = numpy.uint8)
 BLOCK_OCCLUDES_SAME = numpy.array([False]+[getattr(x,'occludes_same', False) for x in BLOCKS], dtype = numpy.uint8)
+BLOCK_RENDER_ALL = numpy.array([False]+[getattr(x,'render_all_faces', False) for x in BLOCKS], dtype = numpy.uint8)
 # Per-block collision AABBs in world space (block-local [0,1] coords).
 _scaled_verts = (0.5 * BLOCK_VERTICES).reshape(len(BLOCKS) + 1, 6, 4, 3)
 _mesh_aabb_min = _scaled_verts.min(axis=(1, 2))
@@ -471,14 +478,57 @@ DOOR_LOWER_TO_UPPER = {
     BLOCK_ID['Door Lower North']: BLOCK_ID['Door Upper North'],
     BLOCK_ID['Door Lower East']: BLOCK_ID['Door Upper East'],
 }
+DOOR_UPPER_TO_LOWER = {
+    BLOCK_ID['Door Upper South']: BLOCK_ID['Door Lower South'],
+    BLOCK_ID['Door Upper West']: BLOCK_ID['Door Lower West'],
+    BLOCK_ID['Door Upper North']: BLOCK_ID['Door Lower North'],
+    BLOCK_ID['Door Upper East']: BLOCK_ID['Door Lower East'],
+}
+# Toggle pairs for open/close (rotate 90 degrees around Y).
+DOOR_LOWER_TOGGLE = {
+    BLOCK_ID['Door Lower South']: BLOCK_ID['Door Lower West'],
+    BLOCK_ID['Door Lower West']: BLOCK_ID['Door Lower South'],
+    BLOCK_ID['Door Lower North']: BLOCK_ID['Door Lower East'],
+    BLOCK_ID['Door Lower East']: BLOCK_ID['Door Lower North'],
+}
+DOOR_UPPER_TOGGLE = {
+    BLOCK_ID['Door Upper South']: BLOCK_ID['Door Upper West'],
+    BLOCK_ID['Door Upper West']: BLOCK_ID['Door Upper South'],
+    BLOCK_ID['Door Upper North']: BLOCK_ID['Door Upper East'],
+    BLOCK_ID['Door Upper East']: BLOCK_ID['Door Upper North'],
+}
 
 # Faces that should have horizontal UV flips (per block id).
 DOOR_UV_FLIP_FACES = {
-    BLOCK_ID['Door Lower South']: (4, 5),
-    BLOCK_ID['Door Upper South']: (4, 5),
-    BLOCK_ID['Door Lower West']: (2, 3),
-    BLOCK_ID['Door Upper West']: (2, 3),
+    # BLOCK_ID['Door Lower South']: (2, 3),
+    # BLOCK_ID['Door Upper South']: (2, 3),
+    # BLOCK_ID['Door Lower North']: (4, 5),
+    # BLOCK_ID['Door Upper North']: (4, 5),
+    # BLOCK_ID['Door Lower West']: (4, 5),
+    # BLOCK_ID['Door Upper West']: (4, 5),
+    # BLOCK_ID['Door Lower East']: (2, 3),
+    # BLOCK_ID['Door Upper East']: (2, 3),
+    BLOCK_ID['Door Lower South']: (5, ),
+    BLOCK_ID['Door Upper South']: (5, ),
+    BLOCK_ID['Door Lower North']: (4, ),
+    BLOCK_ID['Door Upper North']: (4, ),
+    BLOCK_ID['Door Lower West']: (2, ),
+    BLOCK_ID['Door Upper West']: (2, ),
+    BLOCK_ID['Door Lower East']: (3, ),
+    BLOCK_ID['Door Upper East']: (3, ),
 }
+
+# Pre-flip UVs for door faces to avoid per-mesh updates.
+BLOCK_TEXTURES_FLIPPED = BLOCK_TEXTURES.copy()
+_tex_view = BLOCK_TEXTURES_FLIPPED.reshape(len(BLOCKS) + 1, 7, 4, 2)
+for _bid, _faces in DOOR_UV_FLIP_FACES.items():
+    for _face in _faces:
+        _u0 = _tex_view[_bid, _face, 0, 0].copy()
+        _u1 = _tex_view[_bid, _face, 1, 0].copy()
+        _tex_view[_bid, _face, 0, 0] = _u1
+        _tex_view[_bid, _face, 1, 0] = _u0
+        _tex_view[_bid, _face, 2, 0] = _u0
+        _tex_view[_bid, _face, 3, 0] = _u1
 
 # Block light emitters (0-1 brightness). Defined here so IDs stay in sync.
 BLOCK_LIGHT_LEVELS = {
