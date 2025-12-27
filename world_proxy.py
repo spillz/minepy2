@@ -5,17 +5,7 @@ import time
 import numpy
 from collections import deque
 import queue
-import multiprocessing.connection
-import multiprocessing.sharedctypes
-import multiprocessing
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
-import gc
 import concurrent.futures
-
-#gc.set_debug(gc.DEBUG_LEAK)
 
 # pyglet imports
 import pyglet
@@ -41,11 +31,48 @@ import server_connection
 import config
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS
 from util import normalize, sectorize, FACES, cube_v, cube_v2, compute_vertex_ao
-from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, BLOCK_OCCLUDES, BLOCK_OCCLUDES_SAME, BLOCK_GLOW, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
+from blocks import (
+    BLOCK_VERTICES,
+    BLOCK_COLORS,
+    BLOCK_NORMALS,
+    BLOCK_TEXTURES,
+    BLOCK_ID,
+    BLOCK_SOLID,
+    BLOCK_OCCLUDES,
+    BLOCK_OCCLUDES_SAME,
+    BLOCK_GLOW,
+    TEXTURE_PATH,
+    BLOCK_LIGHT_LEVELS,
+    DOOR_LOWER_IDS,
+    DOOR_UPPER_IDS,
+    DOOR_UV_FLIP_FACES,
+    BLOCK_COLLIDES,
+    BLOCK_COLLISION_MIN,
+    BLOCK_COLLISION_MAX,
+    BLOCK_RENDER_OFFSET,
+)
 import mapgen
 import numpy
 
 WATER = BLOCK_ID['Water']
+
+def _flip_door_uvs(tex, b):
+    if not DOOR_UV_FLIP_FACES:
+        return tex
+    for bid, faces in DOOR_UV_FLIP_FACES.items():
+        mask = b == bid
+        if not mask.any():
+            continue
+        for face in faces:
+            face_tex = tex[mask, face]
+            u0 = face_tex[:, 0, 0].copy()
+            u1 = face_tex[:, 1, 0].copy()
+            face_tex[:, 0, 0] = u1
+            face_tex[:, 1, 0] = u0
+            face_tex[:, 2, 0] = u0
+            face_tex[:, 3, 0] = u1
+            tex[mask, face] = face_tex
+    return tex
 #import logging
 #logging.basicConfig(level = logging.INFO)
 #def world_log(msg, *args):
@@ -250,7 +277,7 @@ class ModelProxy(object):
         """Build vt_data for a sector snapshot; runs off the main thread."""
         # Compute exposed faces and lighting (if provided).
         # Reuse _compute_exposed logic inline to avoid touching shared state.
-        air = (BLOCK_SOLID[blocks] == 0)
+        air = (BLOCK_OCCLUDES[blocks] == 0)
         solid = (blocks > 0) & (blocks != WATER)
         exposed_faces = numpy.zeros(blocks.shape + (6,), dtype=bool)
         neighbor = blocks[:,1:,:]
@@ -359,8 +386,10 @@ class ModelProxy(object):
             face_mask = face_mask[block_mask]
             light_flat = light_flat[block_mask]
             b = blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
-            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos[:,None,None,:]).astype(numpy.float32)
+            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
+                     + pos[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
             tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+            tex = _flip_door_uvs(tex, b)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
             colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
             light = light_flat[:, :, None, None]  # (N,6,1,1)
@@ -410,8 +439,10 @@ class ModelProxy(object):
             pos_w = sector_grid[water_mask] + numpy.array(position)
             face_mask_w = w_face_mask[water_mask]
             b = numpy.full(len(pos_w), WATER, dtype=numpy.int32)
-            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos_w[:,None,None,:]).astype(numpy.float32)
+            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
+                     + pos_w[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
             tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+            tex = _flip_door_uvs(tex, b)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
             colors = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
 
@@ -525,7 +556,7 @@ class ModelProxy(object):
 
     def _compute_exposed(self, blocks):
         # Occlusion mask: general occluders + same-type occluders (e.g., leaves occlude leaves).
-        air = (BLOCK_SOLID[blocks] == 0)
+        air = (BLOCK_OCCLUDES[blocks] == 0)
         solid = (blocks > 0) & (blocks != WATER)
         exposed_faces = numpy.zeros(blocks.shape + (6,), dtype=bool)
         # up (+y)
@@ -687,8 +718,10 @@ class ModelProxy(object):
             face_mask = face_mask[block_mask]
             light_flat = light_flat[block_mask]
             b = sector.blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
-            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos[:,None,None,:]).astype(numpy.float32)
+            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
+                     + pos[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
             tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+            tex = _flip_door_uvs(tex, b)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
             colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
             ambient = getattr(config, 'AMBIENT_LIGHT', 0.0)
@@ -733,8 +766,10 @@ class ModelProxy(object):
             pos_w = sector_grid[water_mask] + numpy.array(sector.position)
             face_mask_w = w_face_mask[water_mask]
             b = numpy.full(len(pos_w), WATER, dtype=numpy.int32)
-            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos_w[:,None,None,:]).astype(numpy.float32)
+            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
+                     + pos_w[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
             tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+            tex = _flip_door_uvs(tex, b)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
             colors = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
 
@@ -891,7 +926,7 @@ class ModelProxy(object):
         y = int(numpy.nonzero(non_air)[0][-1])
         return float(y + 1)
 
-    def add_block(self, position, block, notify_server = True):
+    def add_block(self, position, block, notify_server = True, keep_patches=False):
         spos = sectorize(position)
         if spos in self.sectors:
             s = self.sectors[spos]
@@ -920,9 +955,10 @@ class ModelProxy(object):
             self.sector_edit_tokens[spos] = s.edit_token
             self.loader_requests.insert(0,['set_block', [notify_server, position, block, sector_data, s.edit_token]])
             # Immediate visual patch
-            for pv in s.patch_vt:
-                pv.delete()
-            s.patch_vt = []
+            if not keep_patches:
+                for pv in s.patch_vt:
+                    pv.delete()
+                s.patch_vt = []
             if block != 0:
                 world_pos = numpy.array(position, dtype=float)
                 vt = self._build_block_vt(block, world_pos)
@@ -940,8 +976,65 @@ class ModelProxy(object):
                         tex_coords=('f', tri_tex.ravel().astype('f4')),
                         normal=('f', tri_norm.ravel().astype('f4')),
                         color=('f', tri_col.ravel().astype('f4')),
-                    )
+                      )
                     s.patch_vt.append(patch)
+
+    def add_blocks(self, updates, notify_server=True):
+        """Batch apply multiple block updates in one loader request."""
+        if not updates:
+            return
+        sector_updates = {}
+        for position, block in updates:
+            spos = sectorize(position)
+            if spos not in self.sectors:
+                continue
+            s = self.sectors[spos]
+            rel = numpy.array(position) - numpy.array(s.position) + numpy.array([1, 0, 1])
+            try:
+                s.blocks[rel[0], rel[1], rel[2]] = block
+            except Exception:
+                continue
+            s.invalidate_vt = True
+            self._submit_mesh_job(s)
+            s.edit_inflight = True
+            sector_updates.setdefault(spos, s)
+        if not sector_updates:
+            return
+        sector_data = [(spos, sector.blocks) for spos, sector in sector_updates.items()]
+        # Purge queued background sector loads so edits jump the line.
+        self.loader_requests = [req for req in self.loader_requests if req[0] != 'sector_blocks']
+        if self.active_loader_request[0] == 'sector_blocks':
+            self._skip_active_sector = True
+        for spos, sector in sector_updates.items():
+            sector.edit_token += 1
+            self.sector_edit_tokens[spos] = sector.edit_token
+        token = max(sector.edit_token for sector in sector_updates.values())
+        self.loader_requests.insert(0, ['set_blocks', [notify_server, updates, sector_data, token]])
+        # Immediate visual patch geometry.
+        for position, block in updates:
+            spos = sectorize(position)
+            if spos not in self.sectors:
+                continue
+            s = self.sectors[spos]
+            world_pos = numpy.array(position, dtype=float)
+            vt = self._build_block_vt(block, world_pos)
+            key = 'water' if block == WATER else 'solid'
+            tri_verts, tri_tex, tri_norm, tri_col = self._triangulate_vt(vt, key)
+            if len(tri_verts) == 0:
+                continue
+            group = s.water_group if block == WATER else s.group
+            batch = s.batch_water if block == WATER else s.batch
+            patch = self.program.vertex_list(
+                len(tri_verts),
+                gl.GL_TRIANGLES,
+                batch=batch,
+                group=group,
+                position=('f', tri_verts.ravel().astype('f4')),
+                tex_coords=('f', tri_tex.ravel().astype('f4')),
+                normal=('f', tri_norm.ravel().astype('f4')),
+                color=('f', tri_col.ravel().astype('f4')),
+            )
+            s.patch_vt.append(patch)
 
     def remove_block(self, position, notify_server = True):
         pos = normalize(position)
@@ -949,6 +1042,14 @@ class ModelProxy(object):
         if existing == WATER:
             if not self._can_remove_water(pos):
                 return
+        if existing in DOOR_LOWER_IDS:
+            upper_pos = (pos[0], pos[1] + 1, pos[2])
+            if self[upper_pos] in DOOR_UPPER_IDS:
+                self.add_block(upper_pos, 0, notify_server)
+        elif existing in DOOR_UPPER_IDS:
+            lower_pos = (pos[0], pos[1] - 1, pos[2])
+            if self[lower_pos] in DOOR_LOWER_IDS:
+                self.add_block(lower_pos, 0, notify_server)
         self.add_block(pos, 0)
         # If we removed terrain below the waterline and there's adjacent water, flow in.
         if existing != WATER and pos[1] < self._water_level():
@@ -1262,8 +1363,11 @@ class ModelProxy(object):
                 print('server returned EOF')
 
     def _build_block_vt(self, block_id, pos):
-        verts = (0.5*BLOCK_VERTICES[block_id][:6].reshape(6,4,3) + pos[None,None,:]).astype(numpy.float32)
+        verts = (0.5*BLOCK_VERTICES[block_id][:6].reshape(6,4,3)
+                 + pos[None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
         tex = BLOCK_TEXTURES[block_id][:6].reshape(6,4,2).astype(numpy.float32)
+        if DOOR_UV_FLIP_FACES:
+            tex = _flip_door_uvs(tex[None, ...], numpy.array([block_id], dtype=numpy.int32))[0]
         normals = numpy.broadcast_to(BLOCK_NORMALS[:,None,:], (6,4,3)).astype(numpy.float32)
         colors_rgb = BLOCK_COLORS[block_id][:6].reshape(6,4,3).astype(numpy.float32)
         emissive = numpy.full((6,4,1), BLOCK_GLOW[block_id]*255.0, dtype=numpy.float32)
@@ -1464,13 +1568,12 @@ class ModelProxy(object):
                 return True
         return False
 
-    def collide(self, position, bounding_box):
+    def collide(self, position, bounding_box, velocity=None, prev_position=None):
         """
         Checks to see if an entity at the given `position` with the given
         `bounding_box` is colliding with any blocks in the world.
 
-        This version includes a "step-up" mechanic for climbing and more robust
-        ground detection.
+        Axis-aligned resolution against block AABBs.
 
         Parameters
         ----------
@@ -1487,95 +1590,118 @@ class ModelProxy(object):
             True if the entity collided with the ground or ceiling.
         """
         width, height, depth = bounding_box
-        x, y, z = position
-        p = [x, y, z]
-
-        # Get the AABB of the entity.
-        min_x, max_x = x - width / 2, x + width / 2
-        min_y, max_y = y, y + height
-        min_z, max_z = z - depth / 2, z + depth / 2
-
-        # Get the list of blocks that could potentially be colliding with the entity.
-        min_bx, max_bx = int(math.floor(min_x)), int(math.ceil(max_x))
-        min_by, max_by = int(math.floor(min_y)), int(math.ceil(max_y))
-        min_bz, max_bz = int(math.floor(min_z)), int(math.ceil(max_z))
-
+        prev = prev_position if prev_position is not None else position
+        p = [position[0], position[1], position[2]]
         vertical_collision = False
 
-        # Check for ground contact before resolving collisions
-        # This helps with the "on_ground" status for jumping
-        ground_check_y = int(math.floor(min_y - 0.01))
-        for bx in range(min_bx, max_bx):
-            for bz in range(min_bz, max_bz):
-                block_pos = (bx, ground_check_y, bz)
-                block_id = self[normalize(block_pos)]
-                if block_id and BLOCK_SOLID[block_id]:
-                    # Check if entity's bottom is just above this block
-                    if abs(min_y - (ground_check_y + 1)) < 0.01:
-                        vertical_collision = True
-                        break
+        def axis_bounds(pos):
+            min_x = pos[0] - width / 2
+            max_x = pos[0] + width / 2
+            min_y = pos[1]
+            max_y = pos[1] + height
+            min_z = pos[2] - depth / 2
+            max_z = pos[2] + depth / 2
+            return min_x, max_x, min_y, max_y, min_z, max_z
+
+        def block_range(min_v, max_v, centered):
+            eps = 1e-6
+            if centered:
+                lo = int(math.floor(min_v - 0.5 + eps))
+                hi = int(math.floor(max_v + 0.5 - eps))
+            else:
+                lo = int(math.floor(min_v + eps))
+                hi = int(math.floor(max_v - eps))
+            return range(lo, hi + 1)
+
+        def resolve_axis(axis, base_pos):
+            nonlocal vertical_collision
+            delta = p[axis] - prev[axis]
+            if abs(delta) < 1e-6:
+                return
+
+            pos = [base_pos[0], base_pos[1], base_pos[2]]
+            pos[axis] = prev[axis] + delta
+            min_x, max_x, min_y, max_y, min_z, max_z = axis_bounds(pos)
+            min_bx = block_range(min_x, max_x, centered=True)
+            min_by = block_range(min_y, max_y, centered=False)
+            min_bz = block_range(min_z, max_z, centered=True)
+
+            prev_min_x, prev_max_x, prev_min_y, prev_max_y, prev_min_z, prev_max_z = axis_bounds(prev)
+
+            for bx in min_bx:
+                for by in min_by:
+                    for bz in min_bz:
+                        block_id = self[normalize((bx, by, bz))]
+                        if not block_id or not BLOCK_COLLIDES[block_id]:
+                            continue
+                        block_min_x = bx + BLOCK_COLLISION_MIN[block_id][0]
+                        block_max_x = bx + BLOCK_COLLISION_MAX[block_id][0]
+                        block_min_y = by + BLOCK_COLLISION_MIN[block_id][1]
+                        block_max_y = by + BLOCK_COLLISION_MAX[block_id][1]
+                        block_min_z = bz + BLOCK_COLLISION_MIN[block_id][2]
+                        block_max_z = bz + BLOCK_COLLISION_MAX[block_id][2]
+
+                        if axis == 0:
+                            if max_y <= block_min_y or min_y >= block_max_y:
+                                continue
+                            if max_z <= block_min_z or min_z >= block_max_z:
+                                continue
+                            if max_x <= block_min_x or min_x >= block_max_x:
+                                continue
+                            if delta > 0:
+                                pos[0] = block_min_x - width / 2
+                            else:
+                                pos[0] = block_max_x + width / 2
+                            min_x, max_x, min_y, max_y, min_z, max_z = axis_bounds(pos)
+                        elif axis == 2:
+                            if max_y <= block_min_y or min_y >= block_max_y:
+                                continue
+                            if max_x <= block_min_x or min_x >= block_max_x:
+                                continue
+                            if max_z <= block_min_z or min_z >= block_max_z:
+                                continue
+                            if delta > 0:
+                                pos[2] = block_min_z - depth / 2
+                            else:
+                                pos[2] = block_max_z + depth / 2
+                            min_x, max_x, min_y, max_y, min_z, max_z = axis_bounds(pos)
+                        else:
+                            if max_x <= block_min_x or min_x >= block_max_x:
+                                continue
+                            if max_z <= block_min_z or min_z >= block_max_z:
+                                continue
+                            if delta < 0 and prev_min_y >= block_max_y and min_y < block_max_y:
+                                pos[1] = block_max_y
+                                vertical_collision = True
+                            elif delta > 0 and prev_max_y <= block_min_y and max_y > block_min_y:
+                                pos[1] = block_min_y - height
+                            min_x, max_x, min_y, max_y, min_z, max_z = axis_bounds(pos)
+
+            p[axis] = pos[axis]
+
+        # Resolve X with Y/Z at previous position.
+        resolve_axis(0, prev)
+        # Resolve Z with X resolved, Y at previous position.
+        resolve_axis(2, (p[0], prev[1], prev[2]))
+        # Resolve Y with X/Z resolved.
+        resolve_axis(1, (p[0], prev[1], p[2]))
+
+        # Snap to ground when within a small epsilon to prevent jitter.
+        min_x, max_x, min_y, max_y, min_z, max_z = axis_bounds(p)
+        eps = 1e-4
+        for bx in block_range(min_x, max_x, centered=True):
+            for bz in block_range(min_z, max_z, centered=True):
+                by = int(math.floor(min_y - eps))
+                block_id = self[normalize((bx, by, bz))]
+                if not block_id or not BLOCK_COLLIDES[block_id]:
+                    continue
+                block_max_y = by + BLOCK_COLLISION_MAX[block_id][1]
+                if min_y >= block_max_y - eps and min_y <= block_max_y + eps:
+                    p[1] = block_max_y
+                    vertical_collision = True
+                    break
             if vertical_collision:
                 break
-        
-        for bx in range(min_bx, max_bx):
-            for by in range(min_by, max_by):
-                for bz in range(min_bz, max_bz):
-                    block_pos = (bx, by, bz)
-                    block_id = self[normalize(block_pos)]
-                    if not block_id or not BLOCK_SOLID[block_id]:
-                        continue
-
-                    # There is a collision. Resolve it.
-                    block_min_x, block_max_x = bx, bx + 1
-                    block_min_y, block_max_y = by, by + 1
-                    block_min_z, block_max_z = bz, bz + 1
-
-                    # Find the minimum penetration vector.
-                    overlaps = [
-                        max_x - block_min_x,
-                        block_max_x - min_x,
-                        max_y - block_min_y,
-                        block_max_y - min_y,
-                        max_z - block_min_z,
-                        block_max_z - min_z,
-                    ]
-                    min_overlap = min((o for o in overlaps if o > 0.0001), default=0)
-
-                    # Check for climbing opportunity
-                    is_horizontal_collision = min_overlap > 0 and (min_overlap == overlaps[0] or min_overlap == overlaps[1] or min_overlap == overlaps[4] or min_overlap == overlaps[5])
-                    
-                    # A block is climbable if it's at the entity's feet.
-                    is_climbable = (by == int(math.floor(y)))
-
-                    if is_horizontal_collision and is_climbable:
-                        headroom_clear = True
-                        # Check space for entity to stand on top of the block
-                        for i in range(1, int(math.ceil(height)) + 1):
-                            headroom_block = self[normalize((bx, by + i, bz))]
-                            if headroom_block and BLOCK_SOLID[headroom_block]:
-                                headroom_clear = False
-                                break
-                        
-                        if headroom_clear:
-                            p[1] = by + 1.0
-                            vertical_collision = True
-                            continue # Solved by climbing, skip normal push-back for this block.
-
-                    if min_overlap == overlaps[0]: # push left
-                        p[0] -= min_overlap
-                    elif min_overlap == overlaps[1]: # push right
-                        p[0] += min_overlap
-                    elif min_overlap == overlaps[2]: # push down
-                        p[1] -= min_overlap
-                        vertical_collision = True
-                    elif min_overlap == overlaps[3]: # push up
-                        p[1] += min_overlap
-                        vertical_collision = True
-                    elif min_overlap == overlaps[4]: # push back
-                        p[2] -= min_overlap
-                    elif min_overlap == overlaps[5]: # push forward
-                        p[2] += min_overlap
-        
         return tuple(p), vertical_collision
 
     def quit(self,kill_server=True):
