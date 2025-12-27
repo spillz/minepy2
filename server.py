@@ -2,10 +2,7 @@
 import time
 import numpy
 import select
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
+import pickle
 import msocket
 import socket
 import sys

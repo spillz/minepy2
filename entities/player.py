@@ -1,3 +1,4 @@
+import math
 import numpy as np
 from entity import BaseEntity
 from config import FLYING_SPEED, WALKING_SPEED, GRAVITY, TERMINAL_VELOCITY, PLAYER_HEIGHT
@@ -154,7 +155,8 @@ class Player(BaseEntity):
         self.name = "Player"  # Default name
 
         # Player-specific physics might differ slightly
-        self.bounding_box = np.array([0.2, PLAYER_HEIGHT, 0.2])
+        # Collision box: 0.5x0.5 footprint centered on player, 1.5 blocks tall from feet.
+        self.bounding_box = np.array([0.5, 1.5, 0.5])
 
     def serialize_state(self):
         return {
@@ -172,6 +174,11 @@ class Player(BaseEntity):
             np.ndarray: The 3D world coordinates for the camera.
         """
         # The player's self.position is at their feet.
+        # Renderer anchors the root mesh at the base, so include that offset here too.
+        root_part = self.model_definition.get('root_part', 'torso')
+        root_size = self.model_definition.get('parts', {}).get(root_part, {}).get('size', [0.0, 0.0, 0.0])
+        base_offset = np.array([0.0, root_size[1] / 2.0, 0.0], dtype=float)
+
         # Find the torso's pivot relative to the feet.
         torso_pivot = self.model_definition['parts']['torso']['pivot']
         
@@ -180,12 +187,17 @@ class Player(BaseEntity):
         
         # Calculate the absolute position of the head's pivot point.
         # Camera is at: player_pos + torso_pivot_offset + head_pivot_offset
-        camera_pos = self.position + np.array(torso_pivot) + np.array(head_pivot)
+        camera_pos = self.position + base_offset + np.array(torso_pivot) + np.array(head_pivot)
         
-        # Add a slight forward offset to prevent clipping into the head model
-        sight_vector = self.get_sight_vector()
+        # Add a slight forward offset to prevent clipping into the head model.
+        yaw, pitch = self.rotation
+        m = math.cos(math.radians(pitch))
+        sight_vector = np.array([
+            math.cos(math.radians(yaw - 90)) * m,
+            math.sin(math.radians(pitch)),
+            math.sin(math.radians(yaw - 90)) * m,
+        ], dtype=float)
         camera_pos += sight_vector * 0.2
-        
         return camera_pos
 
     def update(self, dt, context):

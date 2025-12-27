@@ -1,7 +1,4 @@
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
+import pickle
 import multiprocessing
 import msocket
 import select

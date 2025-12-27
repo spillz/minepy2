@@ -1224,7 +1224,8 @@ class BiomeGenerator:
 
     def generate(self, position):
         elevation, canyon_noise = self._height_field(position)
-        elevation = self._apply_spawn_bias(elevation, position)
+        if False:
+            elevation = self._apply_spawn_bias(elevation, position)
         moisture = self.moisture(position)
         temperature = self.temperature(position)
         moist01 = 0.5 + 0.5 * numpy.tanh(moisture)

@@ -35,7 +35,23 @@ from blocks import TEXTURE_PATH
 from config import DIST, TICKS_PER_SEC, FLYING_SPEED, GRAVITY, JUMP_SPEED, \
         MAX_JUMP_HEIGHT, PLAYER_HEIGHT, TERMINAL_VELOCITY, TICKS_PER_SEC, \
         WALKING_SPEED
-from blocks import BLOCK_ID, BLOCK_TEXTURES, BLOCK_VERTICES, BLOCK_COLORS, BLOCK_SOLID, BLOCK_PICKER_FACE
+from blocks import (
+    BLOCK_ID,
+    BLOCK_TEXTURES,
+    BLOCK_VERTICES,
+    BLOCK_COLORS,
+    BLOCK_SOLID,
+    BLOCK_PICKER_FACE,
+    BLOCK_INVENTORY,
+    ORIENTED_BLOCK_IDS,
+    WALL_MOUNTED_BLOCK_IDS,
+    DOOR_BASE_IDS,
+    DOOR_LOWER_TO_UPPER,
+    ORIENT_SOUTH,
+    ORIENT_WEST,
+    ORIENT_NORTH,
+    ORIENT_EAST,
+)
 WATER = BLOCK_ID['Water']
 
 
@@ -94,7 +110,7 @@ class Window(pyglet.window.Window):
         self._printed_mats = False
 
         # A list of blocks the player can place. Hit num keys to cycle.
-        self.inventory = list(BLOCK_ID)
+        self.inventory = list(BLOCK_INVENTORY)
 
         # The current block the user can place. Hit num keys to cycle.
         self.block = self.inventory[0]
@@ -103,6 +119,8 @@ class Window(pyglet.window.Window):
         self.num_keys = [
             key._1, key._2, key._3, key._4, key._5,
             key._6, key._7, key._8, key._9, key._0]
+        self.inv_prev_keys = [key.MINUS]
+        self.inv_next_keys = [key.EQUAL]
 
         # Shader program used for world rendering.
         self.block_program = shaders.create_block_shader()
@@ -239,6 +257,28 @@ class Window(pyglet.window.Window):
         dx = math.cos(math.radians(x - 90)) * m
         dz = math.sin(math.radians(x - 90)) * m
         return (dx, dy, dz)
+
+    def _player_back_orient(self):
+        """Return orientation for wall-attached blocks based on player facing."""
+        dx, _, dz = self.get_sight_vector()
+        if abs(dx) > abs(dz):
+            return ORIENT_WEST if dx > 0 else ORIENT_EAST
+        return ORIENT_NORTH if dz > 0 else ORIENT_SOUTH
+
+    def _face_orient(self, face):
+        """Return orientation from a hit face (block - empty)."""
+        dx, dy, dz = face
+        if dy != 0:
+            return None
+        if dx == 1:
+            return ORIENT_EAST
+        if dx == -1:
+            return ORIENT_WEST
+        if dz == 1:
+            return ORIENT_SOUTH
+        if dz == -1:
+            return ORIENT_NORTH
+        return None
 
     def get_motion_vector(self):
         """ Returns the current motion vector indicating the velocity of the
@@ -425,7 +465,29 @@ class Window(pyglet.window.Window):
                 if previous:
                     px, py, pz = util.normalize(self.position)
                     if not (previous == (px, py, pz) or previous == (px, py-1, pz)):
-                        self.model.add_block(previous, BLOCK_ID[self.block])
+                        block_id = BLOCK_ID[self.block]
+                        oriented = ORIENTED_BLOCK_IDS.get(block_id)
+                        if oriented is not None:
+                            if block_id in WALL_MOUNTED_BLOCK_IDS:
+                                if block is None:
+                                    return
+                                face = (block[0] - previous[0], block[1] - previous[1], block[2] - previous[2])
+                                orient = self._face_orient(face)
+                                if orient is None:
+                                    return
+                            else:
+                                orient = self._player_back_orient()
+                            block_id = oriented[orient]
+                            if block_id in DOOR_LOWER_TO_UPPER:
+                                upper_pos = (previous[0], previous[1] + 1, previous[2])
+                                if self.model[upper_pos] not in (0, None):
+                                    return
+                                upper_id = DOOR_LOWER_TO_UPPER[block_id]
+                                self.model.add_blocks(
+                                    [(previous, block_id), (upper_pos, upper_id)]
+                                )
+                                return
+                        self.model.add_block(previous, block_id)
             elif button == pyglet.window.mouse.LEFT and block:
                 self.model.remove_block(block)
         else:
@@ -496,6 +558,14 @@ class Window(pyglet.window.Window):
         elif symbol in self.num_keys:
             index = (symbol - self.num_keys[0]) % len(self.inventory)
             self.block = self.inventory[index]
+            self.update_inventory_item_batch()
+        elif symbol in self.inv_prev_keys:
+            ind = self.inventory.index(self.block)
+            self.block = self.inventory[(ind - 1) % len(self.inventory)]
+            self.update_inventory_item_batch()
+        elif symbol in self.inv_next_keys:
+            ind = self.inventory.index(self.block)
+            self.block = self.inventory[(ind + 1) % len(self.inventory)]
             self.update_inventory_item_batch()
         elif symbol == key.N:
             self._toggle_snake()
@@ -616,10 +686,8 @@ class Window(pyglet.window.Window):
         aspect = width / float(height)
         projection = Mat4.perspective_projection(aspect, 0.1, 512.0, 65)
 
-        x, y, z = self.position
-        head_pivot = HUMANOID_MODEL['parts']['head']['pivot']
-        torso_pivot = HUMANOID_MODEL['parts']['torso']['pivot']
-        player_head_pos = Vec3(x, y + torso_pivot[1] + head_pivot[1], z)  # :contentReference[oaicite:3]{index=3}
+        camera_pos = self.player_entity.get_camera_position()
+        player_head_pos = Vec3(camera_pos[0], camera_pos[1], camera_pos[2])
 
         dx, dy, dz = self.get_sight_vector()
         forward = Vec3(dx, dy, dz).normalize()  # :contentReference[oaicite:4]{index=4}

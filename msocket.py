@@ -51,10 +51,7 @@ if use_multiprocessing:
 else:
     
     import socket
-    try:
-        import cPickle as pickle
-    except ImportError:
-        import pickle
+    import pickle
     import struct
 
     fmt = 'l'

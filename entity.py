@@ -56,12 +56,23 @@ class BaseEntity:
             self.velocity[1] -= 20.0 * dt # Gravity constant
 
         # 2. Apply velocity to position
+        prev_pos = self.position.copy()
         self.position += self.velocity * dt
 
         # 3. Handle collisions with the world
         # The collide method should return the new position and a boolean for on_ground
         if hasattr(self.world, 'collide') and callable(self.world.collide):
-            new_pos, vertical_collision = self.world.collide(self.position, self.bounding_box)
+            new_pos, vertical_collision = self.world.collide(
+                self.position,
+                self.bounding_box,
+                velocity=self.velocity,
+                prev_position=prev_pos,
+            )
+            def dist(a,b):
+                return ((np.array(b)-np.array(a))**2).sum()**0.5
+            if self.__class__.__name__ == 'Player':
+                if(dist(self.position, new_pos)>0.01):
+                    print('collide', self.position, new_pos, vertical_collision)
             self.position = np.array(new_pos, dtype=float)
             self.on_ground = vertical_collision
         

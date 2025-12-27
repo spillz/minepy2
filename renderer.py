@@ -167,18 +167,18 @@ class AnimatedEntityRenderer:
         pos = entity_state['pos']
         rot = entity_state['rot']
 
-        # Find the root part and its size to position its base flush with entity_state['pos'].y
         root_part_name = self.model.get('root_part', 'body')
-        initial_y_offset = -0.5
+        root_part_size = None
         if root_part_name in self.model['parts']:
             root_part_size = self.model['parts'][root_part_name]['size']
-            initial_y_offset += root_part_size[1] / 2.0
 
-        model_matrix = Mat4.from_translation(entity_state['pos'] + Vec3(0.0, initial_y_offset, 0.0))
+        root_offset = self.model.get('root_offset', (0.0, 0.0, 0.0))
+        base_offset_y = root_part_size[1] / 2.0 if root_part_size is not None else 0.0
+        base_offset = Vec3(0.0, base_offset_y, 0.0)
+        model_matrix = Mat4.from_translation(entity_state['pos'] + Vec3(*root_offset) + base_offset)
         model_matrix = model_matrix.rotate(math.radians(rot[0]), Vec3(0, 1, 0))
 
         # Find the root part and start the recursive drawing
-        root_part_name = self.model.get('root_part', 'body')
         if root_part_name in self.model['parts']:
             self._draw_part(root_part_name, model_matrix)
 

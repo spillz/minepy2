@@ -8,10 +8,7 @@ import itertools
 import time
 import numpy
 import select
-try:
-    import cPickle as pickle
-except ImportError:
-    import pickle
+import pickle
 import multiprocessing.connection
 import socket
 import sys
@@ -20,7 +17,21 @@ import sys
 import config
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS, SERVER_IP, SERVER_PORT, LOADER_IP, LOADER_PORT
 from util import normalize, sectorize, FACES, cube_v, cube_v2, compute_vertex_ao
-from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, BLOCK_OCCLUDES, BLOCK_OCCLUDES_SAME, BLOCK_GLOW, TEXTURE_PATH, BLOCK_LIGHT_LEVELS
+from blocks import (
+    BLOCK_VERTICES,
+    BLOCK_COLORS,
+    BLOCK_NORMALS,
+    BLOCK_TEXTURES,
+    BLOCK_ID,
+    BLOCK_SOLID,
+    BLOCK_OCCLUDES,
+    BLOCK_OCCLUDES_SAME,
+    BLOCK_GLOW,
+    TEXTURE_PATH,
+    BLOCK_LIGHT_LEVELS,
+    DOOR_UV_FLIP_FACES,
+    BLOCK_RENDER_OFFSET,
+)
 import mapgen
 
 import logging
@@ -136,6 +147,33 @@ class WorldLoader(object):
                         spipe.send(('set_block', [pos, block_id]))
                 else:
                     self.db.set_block(pos, block_id)
+            if msg == 'set_blocks':
+                if len(data) == 3:
+                    notify_server, updates, sector_data = data
+                    token = None
+                else:
+                    notify_server, updates, sector_data, token = data
+                sector_result = []
+                for spos, blocks in sector_data:
+                    self.blocks = blocks
+                    for pos, block_id in updates:
+                        self.set_block(pos, spos, block_id)
+                    self._calc_vertex_data(spos)
+                    sector_result.append((spos, self.blocks, self.vt_data, self.light))
+                t0 = time.perf_counter()
+                payload = pickle.dumps(['sector_blocks2', sector_result, token], -1)
+                t_dump = (time.perf_counter() - t0) * 1000.0
+                t1 = time.perf_counter()
+                cpipe.send_bytes(payload)
+                t_send = (time.perf_counter() - t1) * 1000.0
+                loader_log('pickle.dumps+send set_blocks batch: %.1fms dump, %.1fms send, %d bytes', t_dump, t_send, len(payload))
+                if spipe is not None:
+                    if notify_server:
+                        for pos, block_id in updates:
+                            spipe.send(('set_block', [pos, block_id]))
+                else:
+                    for pos, block_id in updates:
+                        self.db.set_block(pos, block_id)
 
     def _initialize(self, position, sector_block_delta):
         """ Initialize the sector by procedurally generating terrain using
@@ -166,9 +204,10 @@ class WorldLoader(object):
         # Face exposure booleans: up, down, left, right, front, back
         exposed_faces = numpy.zeros(self.blocks.shape + (6,), dtype=bool)
 
-        # Helper: neighbor occludes if it is solid or if it is the same type as a same-occluding block (e.g., leaves).
+        # Helper: neighbor occludes if its block type is marked as occluding,
+        # or if it is the same type as a same-occluding block (e.g., leaves).
         def neighbor_occ_mask(cur_block, neighbor_block):
-            solid_occ = BLOCK_SOLID[neighbor_block] != 0
+            solid_occ = BLOCK_OCCLUDES[neighbor_block] != 0
             same_occ = (BLOCK_OCCLUDES_SAME[neighbor_block] != 0) & (neighbor_block == cur_block)
             return solid_occ | same_occ
 
@@ -206,8 +245,8 @@ class WorldLoader(object):
         solid = (self.blocks > 0) & (self.blocks != WATER)
         self.exposed_faces = exposed_faces & solid[..., None]
 
-        # Air mask reused for lighting
-        air = (BLOCK_SOLID[self.blocks] == 0)
+        # Air mask reused for lighting (treat non-occluding blocks as light-permeable).
+        air = (BLOCK_OCCLUDES[self.blocks] == 0)
 
         # Flood-fill lighting (skylight + optional block emitters), vectorized relaxation
         light = numpy.zeros(self.blocks.shape, dtype=numpy.float32)
@@ -312,8 +351,23 @@ class WorldLoader(object):
                 if numpy.any(glow > 0):
                     light_flat = numpy.maximum(light_flat, glow[:, None])
 
-            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos[:,None,None,:]).astype(numpy.float32)
+            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
+                     + pos[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
             tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+            if DOOR_UV_FLIP_FACES:
+                for bid, faces in DOOR_UV_FLIP_FACES.items():
+                    mask = b == bid
+                    if not mask.any():
+                        continue
+                    for face in faces:
+                        face_tex = tex[mask, face]
+                        u0 = face_tex[:, 0, 0].copy()
+                        u1 = face_tex[:, 1, 0].copy()
+                        face_tex[:, 0, 0] = u1
+                        face_tex[:, 1, 0] = u0
+                        face_tex[:, 2, 0] = u0
+                        face_tex[:, 3, 0] = u1
+                        tex[mask, face] = face_tex
             light = light_flat[:, :, None, None]  # (N,6,1,1)
             colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
             ambient = config.AMBIENT_LIGHT
@@ -384,7 +438,8 @@ class WorldLoader(object):
             pos_w = SECTOR_GRID[water_mask] + position
             face_mask_w = w_face_mask[water_mask]
             b = numpy.full(len(pos_w), WATER, dtype=numpy.int32)
-            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3) + pos_w[:,None,None,:]).astype(numpy.float32)
+            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
+                     + pos_w[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
             tex = BLOCK_TEXTURES[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
             colors = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
@@ -431,4 +486,3 @@ def start_loader(server_pipe = None):
     process = multiprocessing.Process(target = _start_loader, args = (_pipe, server_pipe))
     process.start()
     return pipe
-

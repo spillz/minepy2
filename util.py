@@ -1,5 +1,6 @@
 import numpy as np
 import time
+import math
 import pyglet
 
 import noise
@@ -42,6 +43,44 @@ de_v = np.array([
         [-1,-1,-1, +1,-1,+1, +1,+1,+1, -1,+1,-1], 
         [+1,-1,+1, -1,-1,-1, -1,+1,-1, +1,+1,+1],
 ],dtype = np.float32)
+
+def box_vertices(min_x, max_x, min_y, max_y, min_z, max_z):
+    """Return axis-aligned box vertices in the engine's 6-face layout."""
+    return np.array([
+        [min_x, max_y, min_z,  min_x, max_y, max_z,  max_x, max_y, max_z,  max_x, max_y, min_z],  # top
+        [min_x, min_y, min_z,  max_x, min_y, min_z,  max_x, min_y, max_z,  min_x, min_y, max_z],  # bottom
+        [min_x, min_y, min_z,  min_x, min_y, max_z,  min_x, max_y, max_z,  min_x, max_y, min_z],  # left
+        [max_x, min_y, max_z,  max_x, min_y, min_z,  max_x, max_y, min_z,  max_x, max_y, max_z],  # right
+        [min_x, min_y, max_z,  max_x, min_y, max_z,  max_x, max_y, max_z,  min_x, max_y, max_z],  # front
+        [max_x, min_y, min_z,  min_x, min_y, min_z,  min_x, max_y, min_z,  max_x, max_y, min_z],  # back
+    ], dtype=np.float32)
+
+# Wall-attached geometry helpers (coordinates are in the [-1, 1] block space).
+WALL_PLANK_T = 0.2
+WINDOW_PANE_T = 0.16
+DOOR_T = 0.2
+TORCH_T = 0.4
+
+wall_plank_south = box_vertices(-1.0, 1.0, -1.0, 1.0, 1.0 - WALL_PLANK_T, 1.0)
+wall_plank_north = box_vertices(-1.0, 1.0, -1.0, 1.0, -1.0, -1.0 + WALL_PLANK_T)
+wall_plank_east = box_vertices(1.0 - WALL_PLANK_T, 1.0, -1.0, 1.0, -1.0, 1.0)
+wall_plank_west = box_vertices(-1.0, -1.0 + WALL_PLANK_T, -1.0, 1.0, -1.0, 1.0)
+
+window_pane_south = box_vertices(-1.0, 1.0, -1.0, 1.0, 1.0 - WINDOW_PANE_T, 1.0)
+window_pane_north = box_vertices(-1.0, 1.0, -1.0, 1.0, -1.0, -1.0 + WINDOW_PANE_T)
+window_pane_east = box_vertices(1.0 - WINDOW_PANE_T, 1.0, -1.0, 1.0, -1.0, 1.0)
+window_pane_west = box_vertices(-1.0, -1.0 + WINDOW_PANE_T, -1.0, 1.0, -1.0, 1.0)
+
+# Door slab geometry (per-block; upper/lower are separate blocks).
+door_south = box_vertices(-1.0, 1.0, -1.0, 1.0, 1.0 - DOOR_T, 1.0)
+door_north = box_vertices(-1.0, 1.0, -1.0, 1.0, -1.0, -1.0 + DOOR_T)
+door_east = box_vertices(1.0 - DOOR_T, 1.0, -1.0, 1.0, -1.0, 1.0)
+door_west = box_vertices(-1.0, -1.0 + DOOR_T, -1.0, 1.0, -1.0, 1.0)
+
+torch_south = box_vertices(-0.2, 0.2, -0.2, 0.8, 1.0 - TORCH_T, 1.0)
+torch_north = box_vertices(-0.2, 0.2, -0.2, 0.8, -1.0, -1.0 + TORCH_T)
+torch_east = box_vertices(1.0 - TORCH_T, 1.0, -0.2, 0.8, -0.2, 0.2)
+torch_west = box_vertices(-1.0, -1.0 + TORCH_T, -0.2, 0.8, -0.2, 0.2)
 
 def cube_v(pos,n):
     return n*cb_v+np.tile(pos,4)
@@ -268,7 +307,10 @@ def normalize(position):
 
     """
     x, y, z = position
-    x, y, z = (int(round(x)), int(round(y)), int(round(z)))
+    # X/Z are centered on integer block coords; Y is base-aligned.
+    x = int(round(x))
+    y = int(math.floor(y))
+    z = int(round(z))
     return (x, y, z)
 
 
