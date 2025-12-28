@@ -1,4 +1,6 @@
 
+import logutil
+
 def get_network_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -14,9 +16,9 @@ def broadcast_server(port):
     server_socket.bind(address)
 
     while True:
-        print("Listening")
+        logutil.log("MSOCKET", "Listening")
         recv_data, addr = server_socket.recvfrom(2048)
-        print(addr, ':', recv_data)
+        logutil.log("MSOCKET", f"{addr}: {recv_data}")
         server_socket.sendto(b"*" + recv_data, addr)
 
 def broadcast_client(port):
@@ -30,7 +32,7 @@ def broadcast_client(port):
     client_socket.sendto(data, address)
     while True:
         recv_data, addr = client_socket.recvfrom(2048)
-        print(addr, recv_data)
+        logutil.log("MSOCKET", f"{addr} {recv_data}")
 
 use_multiprocessing = True
 

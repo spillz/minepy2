@@ -34,10 +34,12 @@ from blocks import (
 )
 import mapgen
 
-import logging
-logging.basicConfig(level = logging.INFO)
+import logutil
+
 def loader_log(msg, *args):
-    logging.log(logging.INFO, 'LOADER: '+msg, *args)
+    if args:
+        msg = msg % args
+    logutil.log("LOADER", msg)
 
 SECTOR_ARRAY = numpy.indices((SECTOR_SIZE, SECTOR_HEIGHT, SECTOR_SIZE)).transpose(1, 2, 3, 0)
 SH = SECTOR_ARRAY.shape
@@ -114,7 +116,11 @@ class WorldLoader(object):
                 else:
                     sector_block_delta = self.db.get_sector_data(self.pos)
                 self._initialize(self.pos, sector_block_delta)
-                self._calc_vertex_data(self.pos)
+                if getattr(config, 'LOADER_SEND_MESH', True):
+                    self._calc_vertex_data(self.pos)
+                else:
+                    self.vt_data = None
+                    self.light = None
                 t0 = time.perf_counter()
                 payload = pickle.dumps(['sector_blocks',[self.pos, self.blocks, self.vt_data, self.light]],-1)
                 t_dump = (time.perf_counter() - t0) * 1000.0
@@ -133,7 +139,11 @@ class WorldLoader(object):
                 for spos, blocks in sector_data:
                     self.blocks = blocks
                     self.set_block(pos, spos, block_id)
-                    self._calc_vertex_data(spos)
+                    if getattr(config, 'LOADER_SEND_MESH', True):
+                        self._calc_vertex_data(spos)
+                    else:
+                        self.vt_data = None
+                        self.light = None
                     sector_result.append((spos, self.blocks, self.vt_data, self.light))
                 t0 = time.perf_counter()
                 payload = pickle.dumps(['sector_blocks2',sector_result, token],-1)
@@ -158,7 +168,11 @@ class WorldLoader(object):
                     self.blocks = blocks
                     for pos, block_id in updates:
                         self.set_block(pos, spos, block_id)
-                    self._calc_vertex_data(spos)
+                    if getattr(config, 'LOADER_SEND_MESH', True):
+                        self._calc_vertex_data(spos)
+                    else:
+                        self.vt_data = None
+                        self.light = None
                     sector_result.append((spos, self.blocks, self.vt_data, self.light))
                 t0 = time.perf_counter()
                 payload = pickle.dumps(['sector_blocks2', sector_result, token], -1)
@@ -195,7 +209,11 @@ class WorldLoader(object):
                 coords = numpy.argwhere(self.blocks == MUSH)
                 for cx, cy, cz in coords[:1]:
                     world_pos = (int(position[0] + cx - 1), int(cy), int(position[2] + cz - 1))
-                    print(f"[DEBUG] Loader mushroom at world {world_pos} from sector {position} (local {int(cx)}, {int(cy)}, {int(cz)})")
+                    logutil.log(
+                        "LOADER",
+                        f"mushroom world {world_pos} sector {position} local ({int(cx)}, {int(cy)}, {int(cz)})",
+                        level="DEBUG",
+                    )
         except Exception:
             pass
 
@@ -362,8 +380,9 @@ class WorldLoader(object):
 
             ao = None
             if getattr(config, 'AO_ENABLED', True):
+                ao_solid = (BLOCK_SOLID[self.blocks] != 0) & (BLOCK_RENDER_ALL[self.blocks] == 0)
                 ao = compute_vertex_ao(
-                    BLOCK_SOLID[self.blocks].astype(bool),
+                    ao_solid,
                     (sx, sy, sz),
                     getattr(config, 'AO_STRENGTH', 0.0),
                     block_mask=block_mask,
@@ -390,10 +409,14 @@ class WorldLoader(object):
             if getattr(config, 'AO_DEBUG', False) and not getattr(self, '_ao_debug_once_vt', False):
                 self._ao_debug_once_vt = True
                 try:
-                    print("[AO] vt colors min/max sample:", float(c.min()), float(c.max()), "sample first 12:", c[:12])
-                    print("[AO] vt verts sample first 9:", v[:9])
+                    logutil.log(
+                        "AO",
+                        f"vt colors min/max {float(c.min()):.2f}/{float(c.max()):.2f} sample {c[:12]}",
+                        level="DEBUG",
+                    )
+                    logutil.log("AO", f"vt verts sample {v[:9]}", level="DEBUG")
                 except Exception as e:
-                    print("[AO] vt debug error", e)
+                    logutil.log("AO", f"vt debug error {e}", level="WARN")
 
         # Water geometry: exposed faces of water blocks (only to air), duplicated for visibility above/below.
         water_blocks = (self.blocks == WATER)

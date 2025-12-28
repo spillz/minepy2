@@ -26,6 +26,7 @@ import config
 import shaders
 import renderer
 import world_entity_store
+import logutil
 from entities.player import HUMANOID_MODEL, Player
 from entities.snake import SNAKE_MODEL, SnakeEntity
 from entities.snail import SNAIL_MODEL, SnailEntity
@@ -34,7 +35,7 @@ from entities.dog import DOG_MODEL, Dog
 from blocks import TEXTURE_PATH
 from config import DIST, TICKS_PER_SEC, FLYING_SPEED, GRAVITY, JUMP_SPEED, \
         MAX_JUMP_HEIGHT, PLAYER_HEIGHT, TERMINAL_VELOCITY, TICKS_PER_SEC, \
-        WALKING_SPEED
+        WALKING_SPEED, LOADED_SECTORS
 from blocks import (
     BLOCK_ID,
     BLOCK_TEXTURES,
@@ -88,7 +89,7 @@ class Window(pyglet.window.Window):
             by = config.SECTOR_HEIGHT//2
             bz = config.SECTOR_SIZE//2 + 2
             self.position = (bx, by, bz)
-            print(f"[DEBUG] Starting at {self.position} for single-block debug")
+            logutil.log("MAIN", f"starting at {self.position} for single-block debug", level="DEBUG")
         else:
             self.position = (0, 160, 0)
 
@@ -146,6 +147,7 @@ class Window(pyglet.window.Window):
 
         # Entity rendering setup
         saved_player_state = world_entity_store.load_entity_state("player")
+        has_saved_player = saved_player_state is not None
         if saved_player_state:
             self.position = tuple(saved_player_state.get("pos", self.position))
             self.rotation = tuple(saved_player_state.get("rot", self.rotation))
@@ -154,11 +156,16 @@ class Window(pyglet.window.Window):
         self.player_entity.id = 0
         self.player_entity.position = np.array(self.position, dtype=float)
         self.player_entity.rotation = np.array(self.rotation, dtype=float)
-        # ensure loaded position is grounded
-        grounded_pos, _ = self.model.collide(
-            tuple(self.player_entity.position), self.player_entity.bounding_box
-        )
-        self.player_entity.position = np.array(grounded_pos, dtype=float)
+        if saved_player_state:
+            self.player_entity.on_ground = saved_player_state.get("on_ground", False)
+            if self.player_entity.on_ground:
+                self.player_entity.velocity[1] = 0.0
+        if not has_saved_player:
+            # New player spawns should snap to ground; saved positions are restored verbatim.
+            grounded_pos, _ = self.model.collide(
+                tuple(self.player_entity.position), self.player_entity.bounding_box
+            )
+            self.player_entity.position = np.array(grounded_pos, dtype=float)
         self.position = tuple(self.player_entity.position)
 
         saved_snake_state = world_entity_store.load_entity_state("snake")
@@ -190,6 +197,12 @@ class Window(pyglet.window.Window):
             self.seagull_entity.id: self.seagull_entity,
             self.dog_entity.id: self.dog_entity,
         }
+        ready_radius = getattr(config, 'READY_SECTOR_RADIUS', None)
+        if ready_radius is None:
+            ready_fraction = getattr(config, 'READY_SECTOR_FRACTION', 1.0)
+            self.ready_sector_radius = max(1, int(round(config.LOADED_SECTORS * ready_fraction)))
+        else:
+            self.ready_sector_radius = int(ready_radius)
         self.snake_enabled = True
         self.snail_enabled = True
         self.seagull_enabled = True
@@ -202,6 +215,7 @@ class Window(pyglet.window.Window):
         self._entity_persist_interval = 5.0
         self._entity_persist_timer = self._entity_persist_interval
         self._persist_entity_states()
+        self.frame_id = 0
 
 
         # Texture atlas for UI previews.
@@ -219,6 +233,15 @@ class Window(pyglet.window.Window):
             x=10, y=self.height - 10 - self.label.content_height - self.entity_label.content_height - 8,
             anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
+        self._label_bg = shapes.Rectangle(0, 0, 1, 1, color=(255, 255, 255))
+        self._label_bg.opacity = 120  # semi-transparent
+        self._underwater_overlay = shapes.Rectangle(0, 0, 1, 1, color=config.UNDERWATER_COLOR)
+        self.last_draw_ms = 0.0
+        self.last_update_ms = 0.0
+        self._hud_probe_frame = 0
+        self._hud_probe_sector = None
+        self._hud_probe_void = 'N/A'
+        self._hud_probe_mush = 'NA'
 
         # Target frame pacing and local FPS tracking (not dependent on pyglet internals).
         desired_fps = getattr(config, 'TARGET_FPS', None)
@@ -336,20 +359,71 @@ class Window(pyglet.window.Window):
             The change in time since the last call.
 
         """
-#        self.model.process_queue()
+        update_start = time.perf_counter()
         sector = util.sectorize(self.position)
+        mesh_budget_ms = None
+        ipc_budget_ms = None
+        t0 = time.perf_counter()
+        frustum_circle = None
+        update_sectors_ms = 0.0
+        mesh_jobs_ms = 0.0
         if self.model.loader is not None:
             look_vec = self.get_sight_vector()
-            self.model.update_sectors(self.sector, sector, self.position, look_vec)
+            frustum_circle = self.get_frustum_circle()
+            work = self.model.pick_frame_work(sector, self.position, look_vec, frustum_circle)
+            allow_send = (work == "load")
+            allow_mesh = (work == "mesh")
+            t1 = time.perf_counter()
+            self.model.update_sectors(
+                self.sector,
+                sector,
+                self.position,
+                look_vec,
+                ipc_budget_ms=ipc_budget_ms,
+                allow_send=allow_send,
+            )
+            update_sectors_ms = (time.perf_counter() - t1) * 1000.0
             self.sector = sector
+        else:
+            allow_mesh = True
+        self.model.mesh_budget_deadline = None
+        t2 = time.perf_counter()
+        self.model.process_pending_mesh_jobs(frustum_circle=frustum_circle, allow_submit=allow_mesh)
+        mesh_jobs_ms = (time.perf_counter() - t2) * 1000.0
+        sector_ms = (time.perf_counter() - t0) * 1000.0
         m = 20
         dt = min(dt, 0.2)
+        entity_ms_total = 0.0
+        entity_updates_total = 0
+        substeps = 0
+        t0 = time.perf_counter()
         for _ in range(m):
-            self._update(dt / m)
+            step_ms, step_updates = self._update(dt / m)
+            entity_ms_total += step_ms
+            entity_updates_total += step_updates
+            substeps += 1
+        physics_ms = (time.perf_counter() - t0) * 1000.0
+        enabled_entities = sum(
+            1 for entity in self.entity_objects.values() if self._entity_is_enabled(entity)
+        )
         
         # Update entity animations
+        t0 = time.perf_counter()
         for entity_renderer in self.entity_renderers.values():
             entity_renderer.update(dt)
+        anim_ms = (time.perf_counter() - t0) * 1000.0
+        total_ms = (time.perf_counter() - update_start) * 1000.0
+        logutil.log(
+            "MAINLOOP",
+            f"update sector_ms={sector_ms:.2f} update_sectors_ms={update_sectors_ms:.2f} "
+            f"mesh_jobs_ms={mesh_jobs_ms:.2f} physics_ms={physics_ms:.2f} anim_ms={anim_ms:.2f} "
+            f"total_ms={total_ms:.2f} mesh_budget_ms={mesh_budget_ms} ipc_budget_ms={ipc_budget_ms}",
+        )
+        logutil.log(
+            "MAINLOOP",
+            f"entities enabled={enabled_entities} updates={entity_updates_total} substeps={substeps} ms={entity_ms_total:.2f}",
+        )
+        self.last_update_ms = total_ms
 
 
     def _update(self, dt):
@@ -368,6 +442,9 @@ class Window(pyglet.window.Window):
         target_animation = 'walk' if is_moving else 'idle'
         self.player_entity.current_animation = target_animation
 
+        if not self.model.is_sector_ready(self.player_entity.position, radius=self.ready_sector_radius):
+            return 0.0, 0
+
         camera_rot = (-self.rotation[0], self.rotation[1])
         context = {
             "motion_vector": motion_vector,
@@ -377,12 +454,17 @@ class Window(pyglet.window.Window):
             "apply_camera_rotation": is_moving,
             "player_position": self.player_entity.position.copy(),
         }
+        t0 = time.perf_counter()
+        update_count = 0
         updated_entities = {}
 
         for entity in self.entity_objects.values():
             if not self._entity_is_enabled(entity):
                 continue
+            if not self.model.is_sector_ready(entity.position, radius=0):
+                continue
             entity.update(dt, context)
+            update_count += 1
             
             # Update the renderer's current animation based on the entity's state
             entity_renderer = self.entity_renderers.get(entity.type)
@@ -399,11 +481,13 @@ class Window(pyglet.window.Window):
                 context["player_position"] = entity.position.copy()
 
         self.entities = updated_entities
+        entity_ms = (time.perf_counter() - t0) * 1000.0
         self.position = tuple(self.player_entity.position)
         self._entity_persist_timer -= dt
         if self._entity_persist_timer <= 0:
             self._persist_entity_states()
             self._entity_persist_timer = self._entity_persist_interval
+        return entity_ms, update_count
 
     def _entity_is_enabled(self, entity):
         if entity is self.snake_entity:
@@ -420,6 +504,7 @@ class Window(pyglet.window.Window):
         for entity in self.entity_objects.values():
             state = entity.serialize_state()
             if state is not None:
+                # print('persisting',entity, state)
                 world_entity_store.save_entity_state(entity.type, state)
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
@@ -483,7 +568,7 @@ class Window(pyglet.window.Window):
                             updates = [(lower_pos, new_lower)]
                             if self.model[upper_pos] in DOOR_UPPER_TO_LOWER:
                                 updates.append((upper_pos, new_upper))
-                            self.model.add_blocks(updates)
+                            self.model.add_blocks(updates, priority=True)
                             return
                 if previous:
                     px, py, pz = util.normalize(self.position)
@@ -507,12 +592,13 @@ class Window(pyglet.window.Window):
                                     return
                                 upper_id = DOOR_LOWER_TO_UPPER[block_id]
                                 self.model.add_blocks(
-                                    [(previous, block_id), (upper_pos, upper_id)]
+                                    [(previous, block_id), (upper_pos, upper_id)],
+                                    priority=True,
                                 )
                                 return
-                        self.model.add_block(previous, block_id)
+                        self.model.add_block(previous, block_id, priority=True)
             elif button == pyglet.window.mouse.LEFT and block:
-                self.model.remove_block(block)
+                self.model.remove_block(block, priority=True)
         else:
             self.set_exclusive_mouse(True)
 
@@ -535,7 +621,7 @@ class Window(pyglet.window.Window):
             y = max(-90, min(90, y + dy * m))
             self.rotation = (x, y)
             if config.DEBUG_SINGLE_BLOCK:
-                print(f"[DEBUG] rotation yaw={x:.2f} pitch={y:.2f}")
+                logutil.log("MAIN", f"rotation yaw={x:.2f} pitch={y:.2f}", level="DEBUG")
 
     def on_key_press(self, symbol, modifiers):
         """ Called when the player presses a key. See pyglet docs for key
@@ -598,22 +684,22 @@ class Window(pyglet.window.Window):
     def _toggle_snake(self):
         self.snake_enabled = not self.snake_enabled
         status = "enabled" if self.snake_enabled else "disabled"
-        print(f"Snake {status}")
+        logutil.log("MAIN", f"Snake {status}")
 
     def _toggle_snail(self):
         self.snail_enabled = not self.snail_enabled
         status = "enabled" if self.snail_enabled else "disabled"
-        print(f"Snail {status}")
+        logutil.log("MAIN", f"Snail {status}")
 
     def _toggle_seagull(self):
         self.seagull_enabled = not self.seagull_enabled
         status = "enabled" if self.seagull_enabled else "disabled"
-        print(f"Seagull {status}")
+        logutil.log("MAIN", f"Seagull {status}")
 
     def _toggle_dog(self):
         self.dog_enabled = not self.dog_enabled
         status = "enabled" if self.dog_enabled else "disabled"
-        print(f"Dog {status}")
+        logutil.log("MAIN", f"Dog {status}")
 
     def on_key_release(self, symbol, modifiers):
         """ Called when the player releases a key. See pyglet docs for key
@@ -740,9 +826,9 @@ class Window(pyglet.window.Window):
         self.model.set_matrices(projection, view, eye_pos)
         if config.DEBUG_SINGLE_BLOCK and not self._printed_mats:
             dx, dy, dz = self.get_sight_vector()
-            print("[DEBUG] projection matrix:\n", np.array(projection))
-            print("[DEBUG] view matrix:\n", np.array(view))
-            print(f"[DEBUG] position {self.position} rotation {self.rotation} sight {(dx, dy, dz)}")
+            logutil.log("MAIN", f"projection matrix {np.array(projection)}", level="DEBUG")
+            logutil.log("MAIN", f"view matrix {np.array(view)}", level="DEBUG")
+            logutil.log("MAIN", f"position {self.position} rotation {self.rotation} sight {(dx, dy, dz)}", level="DEBUG")
             self._printed_mats = True
 ##        gl.glLightfv(gl.GL_LIGHT1, gl.GL_POSITION, GLfloat4(0.35,1.0,0.65,0.0))
         #gl.glLightfv(gl.GL_LIGHT0,gl.GL_SPECULAR, GLfloat4(1,1,1,1))
@@ -756,7 +842,7 @@ class Window(pyglet.window.Window):
         c = [0,2]
         vec = np.array([dx,dz])
         ovec = np.array([-dz,dx])
-        pos = np.array([x for x in self.position])[c]
+        pos = np.array([self.position[0], self.position[2]])
         # Pull the frustum center back when pitched to cover nearby terrain without disabling culling.
         forward_scale = max(0.25, math.cos(math.radians(pitch)))
         center = pos + vec * (DIST/2) * forward_scale
@@ -775,6 +861,10 @@ class Window(pyglet.window.Window):
         dt = frame_start - self._last_frame_time
         self._last_frame_time = frame_start
         self._frame_times.append(dt)
+        self.frame_id += 1
+        logutil.set_frame(self.frame_id)
+        logutil.log("FRAME", f"start dt_ms={dt*1000.0:.2f}")
+        self.model.frame_id = self.frame_id
         # Allow a small slice of the frame for mesh uploads; keep rendering priority.
         frame_budget = 1.0 / self.target_fps if self.target_fps else 1.0 / 60.0
         # upload_budget = 0.3 * frame_budget
@@ -782,6 +872,7 @@ class Window(pyglet.window.Window):
         self.clear()
         self.set_3d()
         
+        t0 = time.perf_counter()
         # Draw world (opaque pass only so water can overlay entities).
         self.model.draw(
             self.position,
@@ -791,7 +882,9 @@ class Window(pyglet.window.Window):
             defer_uploads=True,
             draw_water=False,
         )
+        world_ms = (time.perf_counter() - t0) * 1000.0
         
+        t0 = time.perf_counter()
         # Draw entities
         self.block_program.bind()
         self.block_program['u_use_texture'] = False
@@ -804,11 +897,15 @@ class Window(pyglet.window.Window):
                 r.draw(entity_state)
         self.block_program['u_use_texture'] = True
         # self.block_program['u_use_vertex_color'] = True
+        entity_draw_ms = (time.perf_counter() - t0) * 1000.0
 
+        t0 = time.perf_counter()
         # Draw water after entities so it tints submerged parts.
         self.model.draw_water_pass()
         self.block_program.unbind()
+        water_ms = (time.perf_counter() - t0) * 1000.0
 
+        t0 = time.perf_counter()
         # 2D overlay
         self.set_2d()
         if self._is_underwater():
@@ -817,6 +914,7 @@ class Window(pyglet.window.Window):
         self.draw_reticle()
         self.draw_inventory_item()
         self.draw_focused_block()
+        overlay_ms = (time.perf_counter() - t0) * 1000.0
         
         # Use leftover budget to upload meshes at the end of the frame.
         elapsed = time.perf_counter() - frame_start
@@ -826,6 +924,14 @@ class Window(pyglet.window.Window):
             extra_budget = min(upload_budget, frame_budget - (time.perf_counter() - frame_start))
             if extra_budget > 0:
                 self.model.process_pending_uploads(upload_start, extra_budget)
+        upload_ms = (time.perf_counter() - upload_start) * 1000.0 if elapsed < frame_budget else 0.0
+        logutil.log(
+            "MAINLOOP",
+            f"draw world_ms={world_ms:.2f} entity_ms={entity_draw_ms:.2f} "
+            f"water_ms={water_ms:.2f} overlay_ms={overlay_ms:.2f} upload_ms={upload_ms:.2f}",
+        )
+        self.last_draw_ms = (time.perf_counter()-frame_start)*1000.0
+        logutil.log("FRAME", f"end ms={self.last_draw_ms:.2f}")
 
     def draw_label(self):
         """ Draw the label in the top left of the screen.
@@ -834,22 +940,35 @@ class Window(pyglet.window.Window):
         x, y, z = self.position
         rx, ry = self.rotation
         fps = self._current_fps()
-        # Void probe: count solid blocks along reticle until next air.
-        sight = self.get_sight_vector()
-        void_dist = self.model.measure_void_distance(self.position, sight, max_distance=64)
-        if void_dist is None:
-            void_text = 'N/A'
-        elif void_dist >= 64:
-            void_text = '>=64'
-        else:
-            void_text = str(void_dist)
         sector = util.sectorize((x, y, z))
-        mush_pos = self.model.nearest_mushroom_in_sector(sector, self.position)
-        if mush_pos is None:
-            mush_text = 'NA'
+        if getattr(config, 'HUD_PROBE_ENABLED', False):
+            self._hud_probe_frame += 1
+            needs_refresh = (
+                self._hud_probe_sector != sector
+                or self._hud_probe_frame >= getattr(config, 'HUD_PROBE_EVERY_N_FRAMES', 15)
+            )
+            if needs_refresh:
+                self._hud_probe_sector = sector
+                self._hud_probe_frame = 0
+                sight = self.get_sight_vector()
+                void_dist = self.model.measure_void_distance(self.position, sight, max_distance=64)
+                if void_dist is None:
+                    self._hud_probe_void = 'N/A'
+                elif void_dist >= 64:
+                    self._hud_probe_void = '>=64'
+                else:
+                    self._hud_probe_void = str(void_dist)
+                mush_pos = self.model.nearest_mushroom_in_sector(sector, self.position)
+                if mush_pos is None:
+                    self._hud_probe_mush = 'NA'
+                else:
+                    mx, my, mz = mush_pos
+                    self._hud_probe_mush = f'{mx},{my},{mz}'
+            void_text = self._hud_probe_void
+            mush_text = self._hud_probe_mush
         else:
-            mx, my, mz = mush_pos
-            mush_text = f'{mx},{my},{mz}'
+            void_text = 'N/A'
+            mush_text = 'NA'
         self.label.text = 'FPS(%.1f), pos(%.2f, %.2f, %.2f) rot(%.1f, %.1f) void %s mush %s' % (fps, x, y, z, rx, ry, void_text, mush_text)
         entity_lines = []
         for entity_state in self.entities.values():
@@ -884,9 +1003,11 @@ class Window(pyglet.window.Window):
         bg_height = (top - bottom) + pad_y * 2
         bg_x = self.label.x - pad_x
         bg_y = bottom - pad_y
-        label_bg = shapes.Rectangle(bg_x, bg_y, bg_width, bg_height, color=(255, 255, 255))
-        label_bg.opacity = 120  # semi-transparent
-        label_bg.draw()
+        self._label_bg.x = bg_x
+        self._label_bg.y = bg_y
+        self._label_bg.width = bg_width
+        self._label_bg.height = bg_height
+        self._label_bg.draw()
         self.label.draw()
         self.entity_label.draw()
         self.keybind_label.draw()
@@ -907,7 +1028,7 @@ class Window(pyglet.window.Window):
             if rate:
                 return rate
         except Exception:
-            print('Refresh rate not detected')
+            logutil.log("MAIN", "refresh rate not detected", level="WARN")
             pass
         return None
 
@@ -947,8 +1068,11 @@ class Window(pyglet.window.Window):
     def draw_underwater_overlay(self):
         """Render a full-viewport tint when submerged to avoid per-block transparency."""
         width, height = self.get_size()
-        overlay = shapes.Rectangle(0, 0, width, height, color=config.UNDERWATER_COLOR)
-        overlay.draw()
+        self._underwater_overlay.x = 0
+        self._underwater_overlay.y = 0
+        self._underwater_overlay.width = width
+        self._underwater_overlay.height = height
+        self._underwater_overlay.draw()
 
 
 
@@ -999,7 +1123,7 @@ def main():
                 pass
         else:
             config.SERVER_IP = arg
-        print('Using server IP address',config.SERVER_IP,':',config.SERVER_PORT)
+        logutil.log("MAIN", f"Using server IP address {config.SERVER_IP}:{config.SERVER_PORT}")
     window = Window(width=300, height=200, caption='Pyglet', resizable=True, vsync=True)
     # Hide the mouse cursor and prevent the mouse from leaving the window.
     window.set_exclusive_mouse(True)
@@ -1009,7 +1133,7 @@ def main():
     except:
         import traceback
         traceback.print_exc()
-        print('terminating child processes')
+        logutil.log("MAIN", "terminating child processes")
         window.model.quit()
         window.set_exclusive_mouse(False)
 

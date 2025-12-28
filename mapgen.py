@@ -8,6 +8,7 @@ from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS
 from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH
 import noise
 import config
+import logutil
 
 STONE = BLOCK_ID['Stone']
 SAND = BLOCK_ID['Sand']
@@ -48,7 +49,11 @@ def _record_mushroom_hint(world_pos, sector_pos, local_pos):
         _debug_mushroom_hint['best'] = world_pos
         _debug_mushroom_hint['best_dist2'] = dist2
         horiz = math.sqrt(dist2)
-        print(f"[DEBUG] Mushroom placed world {world_pos} (sector {sector_pos}, local {local_pos}) horiz~{horiz:.1f}")
+        logutil.log(
+            "MAPGEN",
+            f"mushroom placed world {world_pos} sector {sector_pos} local {local_pos} horiz~{horiz:.1f}",
+            level="DEBUG",
+        )
 
 
 class SectorNoise2D(object):

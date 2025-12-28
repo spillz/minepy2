@@ -163,6 +163,7 @@ class Player(BaseEntity):
             "pos": tuple(self.position.tolist()),
             "rot": tuple(self.rotation.tolist()),
             "flying": self.flying,
+            "on_ground": self.on_ground,
         }
 
     def get_camera_position(self):
@@ -189,15 +190,7 @@ class Player(BaseEntity):
         # Camera is at: player_pos + torso_pivot_offset + head_pivot_offset
         camera_pos = self.position + base_offset + np.array(torso_pivot) + np.array(head_pivot)
         
-        # Add a slight forward offset to prevent clipping into the head model.
-        yaw, pitch = self.rotation
-        m = math.cos(math.radians(pitch))
-        sight_vector = np.array([
-            math.cos(math.radians(yaw - 90)) * m,
-            math.sin(math.radians(pitch)),
-            math.sin(math.radians(yaw - 90)) * m,
-        ], dtype=float)
-        camera_pos += sight_vector * 0.2
+        # Keep the camera at the head pivot to avoid peeking past the collider.
         return camera_pos
 
     def update(self, dt, context):

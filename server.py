@@ -5,6 +5,7 @@ import select
 import pickle
 import msocket
 import socket
+import logutil
 import sys
 import traceback
 
@@ -23,7 +24,7 @@ class ServerConnectionHandler(object):
     Handles the low level connection handling details of the multiplayer server
     '''
     def __init__(self):
-        print('starting server at %s:%i'%(SERVER_IP,SERVER_PORT))
+        logutil.log("SERVER", f"starting server at {SERVER_IP}:{SERVER_PORT}")
         self.listener = msocket.Listener(SERVER_IP, SERVER_PORT)
         self.players = []
         self.fn_dict = {}
@@ -61,14 +62,14 @@ class ServerConnectionHandler(object):
             accept_new = True
             for p in self.players:
                 if p.conn in r:
-                    print('r select for ',p.id,p.name)
+                    logutil.log("SERVER", f"r select for {p.id} {p.name}", level="DEBUG")
                     accept_new = False
                     try:
                         result = p.conn.recv()
                         if result is not None:
                             msg, data = result
-                            print('received %s from player %i (%s)'%(msg, p.id, p.name))
-                            print(data)
+                            logutil.log("SERVER", f"received {msg} from player {p.id} ({p.name})")
+                            logutil.log("SERVER", f"data {data}", level="DEBUG")
                             if msg == 'quit':
                                 alive = False
                             else:
@@ -78,16 +79,16 @@ class ServerConnectionHandler(object):
                                     traceback.print_exc()
                     except EOFError:
                         #TODO: Could allow a few retries before dropping the player
-                        print('Disconnect due to EOF error on connection for player %i (%s)'%(p.id,p.name))
+                        logutil.log("SERVER", f"disconnect EOF for player {p.id} ({p.name})", level="WARN")
                         p.conn.close()
                         self.players.remove(p)
             for p in self.players:
                 if p.conn in w:
-                    print('w select for ',p.id,p.name)
+                    logutil.log("SERVER", f"w select for {p.id} {p.name}", level="DEBUG")
                     self.dispatch_top_message(p)
             if accept_new and self.listener in r:
                 p = self.accept_connection()
-                print('connected new player with id %i'%(p.id,))
+                logutil.log("SERVER", f"connected new player id {p.id}")
                 self.queue_for_player(p, 'connected', ClientPlayer(p), [ClientPlayer(ap) for ap in self.players])
                 self.queue_for_others(p, 'other_player_join', ClientPlayer(p))
         self.listener.close()
@@ -116,7 +117,7 @@ class ServerConnectionHandler(object):
                     return
         except AttributeError: #multiprocessing version is blocking
             pass
-        print('sending %s to %i (%s)'%(player.comms_queue[0][0], player.id, player.name))
+        logutil.log("SERVER", f"sending {player.comms_queue[0][0]} to {player.id} ({player.name})")
         #player.conn.send_bytes(pickle.dumps(player.comms_queue.pop(0), -1))
         player.conn.send(player.comms_queue.pop(0))
 
@@ -156,8 +157,8 @@ class Server(object):
         try:
             self.handler.serve()
         except KeyboardInterrupt:
-            print('Received keyboard interrupt')
-            print('Shutting down...')
+            logutil.log("SERVER", "received keyboard interrupt", level="WARN")
+            logutil.log("SERVER", "shutting down")
             #TODO: Notify players that we're shutting down
 
     def set_name(self, player, name):

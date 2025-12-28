@@ -1,4 +1,5 @@
 import numpy as np
+import logutil
 
 class BaseEntity:
     """
@@ -72,7 +73,11 @@ class BaseEntity:
                 return ((np.array(b)-np.array(a))**2).sum()**0.5
             if self.__class__.__name__ == 'Player':
                 if(dist(self.position, new_pos)>0.01):
-                    print('collide', self.position, new_pos, vertical_collision)
+                    logutil.log(
+                        "ENTITY",
+                        f"collide pos={self.position} new_pos={new_pos} vertical={vertical_collision}",
+                        level="DEBUG",
+                    )
             self.position = np.array(new_pos, dtype=float)
             self.on_ground = vertical_collision
         

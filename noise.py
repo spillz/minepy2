@@ -16,6 +16,7 @@
 #
 import numpy
 import itertools
+import logutil
 
 
 grad3 = numpy.array([(1,1,0),(-1,1,0),(1,-1,0),(-1,-1,0),
@@ -299,29 +300,29 @@ if __name__ == '__main__':
     n2 = []
     t=time.time()
     arr2 = numpy.mgrid[0:8:0.1,0:8:0.1].T
-    print('arr2 mgrid',time.time()-t)
+    logutil.log("NOISE", f"arr2 mgrid {time.time()-t:.4f}")
     shape2 = arr2.shape
     arr2 = arr2.reshape((shape2[0]*shape2[1],2))
     t=time.time()
     arr3 = numpy.mgrid[0:8:0.1,0:8:0.1,0:8:0.1].T
     shape3 = arr3.shape
     arr3 = arr3.reshape((shape3[0]*shape3[1]*shape3[2],3))
-    print('arr3 mgrid',time.time()-t)
+    logutil.log("NOISE", f"arr3 mgrid {time.time()-t:.4f}")
 
-    print('gen noise')
+    logutil.log("NOISE", "gen noise")
     #n = numpy.array(n2).reshape(80,80)
     t=time.time()
     n = noisen(arr2,seed=3332).reshape(shape2[0],shape2[1])
-    print('arr2 noise',time.time()-t)
+    logutil.log("NOISE", f"arr2 noise {time.time()-t:.4f}")
     t=time.time()
     n3 = noisen(arr3)
-    print('arr3 noise',time.time()-t)
-    print('STATS')
-    print('######')
-    print(n.min(),n.max(),numpy.average(n))
-    print(n3.min(),n3.max(),numpy.average(n3))
+    logutil.log("NOISE", f"arr3 noise {time.time()-t:.4f}")
+    logutil.log("NOISE", "STATS")
+    logutil.log("NOISE", "######")
+    logutil.log("NOISE", f"{n.min()} {n.max()} {numpy.average(n)}")
+    logutil.log("NOISE", f"{n3.min()} {n3.max()} {numpy.average(n3)}")
     n = numpy.array((n - n.min()) / (n.max()-n.min())*255,dtype='u1')
     im = Image.fromarray(n,'L')
-    print(im.size)
+    logutil.log("NOISE", f"{im.size}")
     im.save('noise2.png')
     
