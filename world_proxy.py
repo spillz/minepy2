@@ -77,6 +77,7 @@ class SectorProxy(object):
         self.blocks = numpy.zeros((SECTOR_SIZE+2,SECTOR_HEIGHT,SECTOR_SIZE+2),dtype='u2')
         self.light = None  # full (padded) light grid from loader
         self.light_iters_done = 0
+        self.light_invalidated = False
         self.shown = shown
         # Mapping from position to a pyglet `VertextList` for all shown blocks.
         self.vt = []
@@ -463,6 +464,8 @@ class ModelProxy(object):
         return True
 
     def _needs_light(self, sector):
+        if sector.light_invalidated:
+            return True
         if sector.light is None:
             return True
         return sector.light_iters_done < 64
@@ -893,8 +896,12 @@ class ModelProxy(object):
         sector.mesh_job_dirty = False
         sector.mesh_gen += 1
         blocks = sector.blocks.copy()
-        light_copy = sector.light.copy() if sector.light is not None else None
-        light_iters_done = sector.light_iters_done if sector.light is not None else 0
+        if sector.light_invalidated:
+            light_copy = None
+            light_iters_done = 0
+        else:
+            light_copy = sector.light.copy() if sector.light is not None else None
+            light_iters_done = sector.light_iters_done if sector.light is not None else 0
         ao_strength = getattr(config, 'AO_STRENGTH', 0.0)
         ao_enabled = getattr(config, 'AO_ENABLED', True)
         ambient = getattr(config, 'AMBIENT_LIGHT', 0.0)
@@ -960,6 +967,7 @@ class ModelProxy(object):
                 _, light_full, iters_done = vt_data
                 sector.light = light_full
                 sector.light_iters_done = iters_done
+                sector.light_invalidated = False
                 sector.mesh_job_dirty = False
                 self.pending_mesh_resume.add(sector)
                 if elapsed_ms is not None:
@@ -971,6 +979,7 @@ class ModelProxy(object):
                 _, vt_data, light_full, iters_done = vt_data
                 sector.light = light_full
                 sector.light_iters_done = 64
+                sector.light_invalidated = False
             if sector.mesh_job_dirty:
                 sector.mesh_job_dirty = False
                 self._submit_mesh_job(sector, priority=sector.mesh_job_priority)
@@ -1165,7 +1174,7 @@ class ModelProxy(object):
         exposed_light[:-1,:,:,3] = light[1:,:,:] # right
         exposed_light[:,:,:-1,4] = light[:,:,1:] # front
         exposed_light[:,:,1:,5] = light[:,:,:-1] # back
-        return exposed_faces, exposed_light
+        return exposed_faces, exposed_light, light
 
     def _recompute_vt(self, sector, force_no_light=False, reuse_light=True):
         ao_strength = getattr(config, 'AO_STRENGTH', 0.0)
@@ -1225,7 +1234,10 @@ class ModelProxy(object):
             exposed_faces = (exposed_faces | render_all[..., None]) & solid[..., None]
             exposed_light = numpy.zeros(blocks.shape+(6,),dtype=numpy.float32)
         else:
-            exposed_faces, exposed_light = self._compute_exposed(sector.blocks)
+            exposed_faces, exposed_light, light_full = self._compute_exposed(sector.blocks)
+            sector.light = light_full
+            sector.light_iters_done = 64
+            sector.light_invalidated = False
 
         exposed_faces = exposed_faces[1:-1,:,1:-1]
         exposed_light = exposed_light[1:-1,:,1:-1]
@@ -1339,6 +1351,8 @@ class ModelProxy(object):
             if not self._neighbors_ready(sector, require_diag):
                 force_no_light = True
         reuse_light = getattr(config, 'REUSE_LIGHTING_WHEN_AVAILABLE', True)
+        if sector.light_invalidated:
+            reuse_light = False
         self._recompute_vt(sector, force_no_light=force_no_light, reuse_light=reuse_light)
         sector.vt_upload_prepared = False
         sector.vt_clear_pending = True
@@ -1356,7 +1370,7 @@ class ModelProxy(object):
             f"sync sector={sector.position} priority={priority} force_no_light={force_no_light} ms={elapsed_ms:.1f}"
         )
 
-    def _sync_edges_and_rebuild(self, sector, sync=False, priority=False):
+    def _sync_edges_and_rebuild(self, sector, sync=False, priority=False, invalidate_light=False):
         # Copy boundary columns between this sector and loaded neighbors, then queue rebuilds.
         require_diag = True
         if not self._neighbors_ready(sector, require_diag):
@@ -1370,32 +1384,59 @@ class ModelProxy(object):
             return
         self.pending_seam_rebuild.discard(sector.position)
         neighbors = list(self.neighbor_sectors(sector.position))
+        changed_self = False
         for dx, dz, n in neighbors:
+            changed_neighbor = False
             if dx == 1:
                 # neighbor to the east
-                n.blocks[0,:,:] = sector.blocks[SECTOR_SIZE,:,:]
-                sector.blocks[SECTOR_SIZE+1,:,:] = n.blocks[1,:,:]
+                if not numpy.array_equal(n.blocks[0, :, :], sector.blocks[SECTOR_SIZE, :, :]):
+                    n.blocks[0, :, :] = sector.blocks[SECTOR_SIZE, :, :]
+                    changed_neighbor = True
+                if not numpy.array_equal(sector.blocks[SECTOR_SIZE + 1, :, :], n.blocks[1, :, :]):
+                    sector.blocks[SECTOR_SIZE + 1, :, :] = n.blocks[1, :, :]
+                    changed_self = True
             elif dx == -1:
-                n.blocks[SECTOR_SIZE+1,:,:] = sector.blocks[1,:,:]
-                sector.blocks[0,:,:] = n.blocks[SECTOR_SIZE,:,:]
+                if not numpy.array_equal(n.blocks[SECTOR_SIZE + 1, :, :], sector.blocks[1, :, :]):
+                    n.blocks[SECTOR_SIZE + 1, :, :] = sector.blocks[1, :, :]
+                    changed_neighbor = True
+                if not numpy.array_equal(sector.blocks[0, :, :], n.blocks[SECTOR_SIZE, :, :]):
+                    sector.blocks[0, :, :] = n.blocks[SECTOR_SIZE, :, :]
+                    changed_self = True
             if dz == 1:
                 # neighbor to the south (positive z)
-                n.blocks[:,:,0] = sector.blocks[:,:,SECTOR_SIZE]
-                sector.blocks[:,:,SECTOR_SIZE+1] = n.blocks[:,:,1]
+                if not numpy.array_equal(n.blocks[:, :, 0], sector.blocks[:, :, SECTOR_SIZE]):
+                    n.blocks[:, :, 0] = sector.blocks[:, :, SECTOR_SIZE]
+                    changed_neighbor = True
+                if not numpy.array_equal(sector.blocks[:, :, SECTOR_SIZE + 1], n.blocks[:, :, 1]):
+                    sector.blocks[:, :, SECTOR_SIZE + 1] = n.blocks[:, :, 1]
+                    changed_self = True
             elif dz == -1:
-                n.blocks[:,:,SECTOR_SIZE+1] = sector.blocks[:,:,1]
-                sector.blocks[:,:,0] = n.blocks[:,:,SECTOR_SIZE]
+                if not numpy.array_equal(n.blocks[:, :, SECTOR_SIZE + 1], sector.blocks[:, :, 1]):
+                    n.blocks[:, :, SECTOR_SIZE + 1] = sector.blocks[:, :, 1]
+                    changed_neighbor = True
+                if not numpy.array_equal(sector.blocks[:, :, 0], n.blocks[:, :, SECTOR_SIZE]):
+                    sector.blocks[:, :, 0] = n.blocks[:, :, SECTOR_SIZE]
+                    changed_self = True
+            if changed_neighbor and invalidate_light:
+                n.light_invalidated = True
             self._mesh_log(f"seam_invalidate sector={n.position} source={sector.position}")
             if sync:
-                self._rebuild_sector_now(n, priority=priority)
-            elif n.shown:
-                self._submit_mesh_job(n)
-            else:
-                n.needs_seam_refresh = True
+                if changed_neighbor:
+                    self._rebuild_sector_now(n, priority=priority)
+            elif changed_neighbor:
+                n.invalidate()
+                if n.shown:
+                    self._submit_mesh_job(n)
+                else:
+                    n.needs_seam_refresh = True
+        if invalidate_light:
+            sector.light_invalidated = True
         self._mesh_log(f"seam_invalidate sector={sector.position} source=self")
         if sync:
             self._rebuild_sector_now(sector, priority=priority)
         else:
+            if changed_self:
+                sector.invalidate()
             if sector.shown:
                 # Self rebuild with normal priority to minimize reordering churn.
                 self._submit_mesh_job(sector)
@@ -1492,9 +1533,10 @@ class ModelProxy(object):
             except Exception:
                 pass
             s.invalidate_vt = True
+            s.light_invalidated = True
             on_edge = rel[0] in (1, SECTOR_SIZE) or rel[2] in (1, SECTOR_SIZE)
             if priority or on_edge:
-                self._sync_edges_and_rebuild(s, sync=True, priority=True)
+                self._sync_edges_and_rebuild(s, sync=True, priority=True, invalidate_light=True)
             else:
                 self._submit_mesh_job(s, priority=True)
             s.edit_inflight = True
@@ -1551,6 +1593,7 @@ class ModelProxy(object):
             except Exception:
                 continue
             s.invalidate_vt = True
+            s.light_invalidated = True
             on_edge = rel[0] in (1, SECTOR_SIZE) or rel[2] in (1, SECTOR_SIZE)
             if on_edge:
                 edge_sectors.add(spos)
@@ -1560,7 +1603,7 @@ class ModelProxy(object):
             return
         for spos, s in sector_updates.items():
             if priority or spos in edge_sectors:
-                self._sync_edges_and_rebuild(s, sync=True, priority=True)
+                self._sync_edges_and_rebuild(s, sync=True, priority=True, invalidate_light=True)
             else:
                 self._submit_mesh_job(s, priority=True)
         sector_data = [(spos, sector.blocks) for spos, sector in sector_updates.items()]
@@ -2128,6 +2171,7 @@ class ModelProxy(object):
                 s.blocks[:,:,:] = b
                 s.light = light
                 s.light_iters_done = 64 if light is not None else 0
+                s.light_invalidated = False
                 s.vt_data = v
                 s.mesh_built = v is not None
                 s.vt_upload_prepared = False
@@ -2140,6 +2184,7 @@ class ModelProxy(object):
                 s.blocks[:,:,:] = b
                 s.light = light
                 s.light_iters_done = 64 if light is not None else 0
+                s.light_invalidated = False
                 s.vt_data = v
                 s.mesh_built = v is not None
                 s.vt_upload_prepared = False
