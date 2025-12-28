@@ -154,9 +154,9 @@ class Player(BaseEntity):
         self.model_definition = model_definition
         self.name = "Player"  # Default name
 
-        # Player-specific physics might differ slightly
-        # Collision box: 0.5x0.5 footprint centered on player, 1.5 blocks tall from feet.
-        self.bounding_box = np.array([0.5, 1.5, 0.5])
+        # Player-specific physics might differ slightly.
+        # Collision box: 0.5x0.5 footprint centered on player, PLAYER_HEIGHT blocks tall from feet.
+        self.bounding_box = np.array([0.5, float(PLAYER_HEIGHT), 0.5])
 
     def serialize_state(self):
         return {
