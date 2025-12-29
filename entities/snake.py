@@ -152,6 +152,8 @@ class SnakeEntity(BaseEntity):
     SEGMENT_COUNT = 60
     FOLLOW_DISTANCE = 10.0
     SPEED = 4.0
+    GRAVITY = 20.0
+    CLIMB_SPEED = 3.0
     SEGMENT_SPACING = 0.36
     HEAD_CLEARANCE = 0.05
     HISTORY_SCALAR = 3.0
@@ -175,6 +177,8 @@ class SnakeEntity(BaseEntity):
         self._targets = np.arange(self.SEGMENT_COUNT, dtype=float) * self.SEGMENT_SPACING
         self._wander_angle = random.random() * math.pi * 2
         self._wander_speed = 0.6
+        self._climbing = False
+        self._climb_dir = np.array([0.0, 0.0], dtype=float)
 
         if saved_state:
             self._restore_state(saved_state)
@@ -185,11 +189,11 @@ class SnakeEntity(BaseEntity):
     def update(self, dt, context):
         if dt <= 0:
             return
-        head = self.position
         player_position = context.get("player_position")
         if player_position is None:
             return
         px, py, pz = player_position
+        head = self.position
         dx = px - head[0]
         dz = pz - head[2]
         dist_xz = math.hypot(dx, dz)
@@ -220,13 +224,56 @@ class SnakeEntity(BaseEntity):
             self.velocity[0] = 0
             self.velocity[2] = 0
 
-        super().update(dt)
+        prev_pos = self.position.copy()
+        if self._climbing:
+            self.velocity[1] = self.CLIMB_SPEED
+        else:
+            if not self.on_ground and not self.flying:
+                self.velocity[1] -= self.GRAVITY * dt
+
+        desired_pos = self.position + self.velocity * dt
+        if hasattr(self.world, 'collide') and callable(self.world.collide):
+            new_pos, vertical_collision = self.world.collide(
+                desired_pos,
+                self.bounding_box,
+                velocity=self.velocity,
+                prev_position=prev_pos,
+            )
+        else:
+            new_pos = desired_pos
+            vertical_collision = False
+
+        new_pos = np.array(new_pos, dtype=float)
+        desired_pos = np.array(desired_pos, dtype=float)
+        delta_xz = desired_pos[[0, 2]] - new_pos[[0, 2]]
+        horiz_blocked = moving and np.dot(delta_xz, delta_xz) > 1e-6
+        ceiling_hit = self.velocity[1] > 0 and new_pos[1] < desired_pos[1] - 1e-6
+
+        self.on_ground = vertical_collision and not ceiling_hit
+        if self.on_ground and self.velocity[1] < 0:
+            self.velocity[1] = 0
+
+        if self._climbing:
+            if ceiling_hit:
+                self.velocity[1] = 0.0
+                self._climbing = False
+                self._turn_from_wall()
+            elif not horiz_blocked:
+                self._climbing = False
+        else:
+            if moving and horiz_blocked and not ceiling_hit:
+                self._climbing = True
+                self._climb_dir[:] = move_dir
+                self.velocity[1] = self.CLIMB_SPEED
+
+        self.position = new_pos
 
         if moving and np.linalg.norm(move_dir) > 1e-6:
             self.rotation[0] = math.degrees(math.atan2(move_dir[0], move_dir[1]))
         self.current_animation = "walk" if moving else "idle"
-        head_dxz = math.hypot(head[0] - self._last_head_pos[0], head[2] - self._last_head_pos[2])
-        if head_dxz > 1e-4:
+        head = self.position
+        head_delta = np.linalg.norm(head - self._last_head_pos)
+        if head_delta > 1e-4:
             self._last_head_pos[:] = head
             self._record_history_position(head.copy())
         self._update_segments()
@@ -278,15 +325,22 @@ class SnakeEntity(BaseEntity):
         self._distances.clear()
         self._path_length = 0.0
         if path:
-            for pos in path:
-                self._append_history_point(np.array(pos, dtype=float))
+            points = np.array(path, dtype=float)
+            if points.size == 0:
+                return
+            self.history.extend(points)
+            if len(points) > 1:
+                diffs = np.diff(points, axis=0)
+                dists = np.linalg.norm(diffs, axis=1)
+                self._distances.extend(dists.tolist())
+                self._path_length = float(dists.sum())
         else:
-            self._append_history_point(self.position.copy())
+            self._append_history_points(self.position.copy())
 
     def _record_history_position(self, position):
         position = np.array(position, dtype=float)
         if not self.history:
-            self._append_history_point(position)
+            self._append_history_points(position)
             return
         last = self.history[-1]
         delta = position - last
@@ -298,22 +352,31 @@ class SnakeEntity(BaseEntity):
         if steps > 1:
             t = np.arange(1, steps) / steps
             inter_points = last + delta * t[:, np.newaxis]
-            for p in inter_points:
-                self._append_history_point(p)
-        
-        self._append_history_point(position)
+            points = np.vstack((inter_points, position))
+        else:
+            points = position
+        self._append_history_points(points)
         self._prune_history()
 
-    def _append_history_point(self, point):
+    def _append_history_points(self, points):
+        points_arr = np.asarray(points, dtype=float)
+        if points_arr.size == 0:
+            return
+        if points_arr.ndim == 1:
+            points_arr = points_arr[np.newaxis, :]
         if self.history:
             prev = self.history[-1]
-            delta = point - prev
-            dist = np.linalg.norm(delta)
-            if dist < 1e-6:
+            stack = np.vstack((prev, points_arr))
+            diffs = np.diff(stack, axis=0)
+            dists = np.linalg.norm(diffs, axis=1)
+            mask = dists > 1e-6
+            if not np.any(mask):
                 return
-            self._distances.append(dist)
-            self._path_length += dist
-        self.history.append(point)
+            points_arr = points_arr[mask]
+            dists = dists[mask]
+            self._distances.extend(dists.tolist())
+            self._path_length += float(dists.sum())
+        self.history.extend(points_arr)
 
     def _prune_history(self):
         while (
@@ -370,3 +433,6 @@ class SnakeEntity(BaseEntity):
     def _update_wander_direction(self, dt):
         self._wander_angle += (dt * self._wander_speed) + random.uniform(-0.1, 0.1)
         return np.array([math.cos(self._wander_angle), math.sin(self._wander_angle)], dtype=float)
+
+    def _turn_from_wall(self):
+        self._wander_angle += math.pi * 0.75 + random.uniform(-0.4, 0.4)
