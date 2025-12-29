@@ -361,8 +361,6 @@ class Window(pyglet.window.Window):
         """
         update_start = time.perf_counter()
         sector = util.sectorize(self.position)
-        mesh_budget_ms = None
-        ipc_budget_ms = None
         t0 = time.perf_counter()
         frustum_circle = None
         update_sectors_ms = 0.0
@@ -370,25 +368,20 @@ class Window(pyglet.window.Window):
         if self.model.loader is not None:
             look_vec = self.get_sight_vector()
             frustum_circle = self.get_frustum_circle()
-            work = self.model.pick_frame_work(sector, self.position, look_vec, frustum_circle)
-            allow_send = (work == "load")
-            allow_mesh = (work == "mesh")
             t1 = time.perf_counter()
             self.model.update_sectors(
                 self.sector,
                 sector,
                 self.position,
                 look_vec,
-                ipc_budget_ms=ipc_budget_ms,
-                allow_send=allow_send,
+                frustum_circle=frustum_circle,
+                allow_send=True,
             )
             update_sectors_ms = (time.perf_counter() - t1) * 1000.0
             self.sector = sector
-        else:
-            allow_mesh = True
         self.model.mesh_budget_deadline = None
         t2 = time.perf_counter()
-        self.model.process_pending_mesh_jobs(frustum_circle=frustum_circle, allow_submit=allow_mesh)
+        self.model.process_pending_mesh_jobs(frustum_circle=frustum_circle, allow_submit=True)
         mesh_jobs_ms = (time.perf_counter() - t2) * 1000.0
         sector_ms = (time.perf_counter() - t0) * 1000.0
         m = 20
@@ -417,7 +410,7 @@ class Window(pyglet.window.Window):
             "MAINLOOP",
             f"update sector_ms={sector_ms:.2f} update_sectors_ms={update_sectors_ms:.2f} "
             f"mesh_jobs_ms={mesh_jobs_ms:.2f} physics_ms={physics_ms:.2f} anim_ms={anim_ms:.2f} "
-            f"total_ms={total_ms:.2f} mesh_budget_ms={mesh_budget_ms} ipc_budget_ms={ipc_budget_ms}",
+            f"total_ms={total_ms:.2f}",
         )
         logutil.log(
             "MAINLOOP",

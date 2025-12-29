@@ -53,6 +53,9 @@ DEBUG_SINGLE_BLOCK = False
 # Mesh build worker counts (edit queue is higher priority).
 MESH_EDIT_WORKERS = 1
 
+# Single long-lived mesh worker instead of a thread pool.
+MESH_SINGLE_WORKER = True
+
 # Upload throttling: max triangles per sector upload chunk (None for full).
 UPLOAD_TRIANGLE_CHUNK = 4000
 
@@ -84,16 +87,18 @@ LOG_MISSING_SECTORS_EVERY_N_FRAMES = 30
 # Logging for mesh activity.
 MESH_LOG = True
 
-# Budget caps for background work (scaled down when frame time is tight).
-MESH_BUDGET_MS = 4.0
-IPC_BUDGET_MS = 2.0
-
 # HUD probe/debug info (void distance, mushroom lookup).
 HUD_PROBE_ENABLED = False
 HUD_PROBE_EVERY_N_FRAMES = 15
 
 # Loader inflight requests (sector loads).
 LOADER_MAX_INFLIGHT = 1
+
+# When True, never send any loader request while another is in flight.
+LOADER_STRICT_INFLIGHT = True
+
+# When True, pause loader sends while mesh work is pending on loaded sectors.
+LOADER_BLOCK_ON_MESH_BACKLOG = True
 
 # Recompute load candidates at most every N ms while staying in same sector.
 LOAD_CANDIDATE_REFRESH_MS = 250
@@ -109,7 +114,7 @@ VIEW_PRIORITY_SCALE = 0.0
 
 # Sector streaming / seam rebuild behavior
 # How many deferred seam rebuilds to process per tick (None for unlimited).
-MAX_SEAM_REBUILDS_PER_TICK = 1
+MAX_SEAM_REBUILDS_PER_TICK = None
 
 # Lighting settings
 LIGHT_DECAY = 0.1  # per-step attenuation for flood-fill lighting
