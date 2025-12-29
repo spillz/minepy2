@@ -151,7 +151,7 @@ class SeagullEntity(BaseEntity):
             norm_heading = np.linalg.norm(self._heading)
             if norm_heading > 1e-6:
                 self._heading /= norm_heading
-            self.rotation[0] = math.degrees(math.atan2(self._heading[0], -self._heading[1]))
+            self.rotation[0] = math.degrees(math.atan2(-self._heading[0], -self._heading[1]))
         
         ground_y = self.world.find_surface_y(head[0], head[2])
         if ground_y is None:
