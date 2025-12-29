@@ -46,6 +46,8 @@ LOADER_IP = 'localhost'
 LOADER_PORT = 20230
 # Send mesh (vt_data) from the loader process instead of building in world_proxy.
 LOADER_SEND_MESH = False
+# Send per-block light field from the loader process even when mesh is client-built.
+LOADER_SEND_LIGHT = True
 
 # Debug: skip world loading and render a single block in front of the player.
 DEBUG_SINGLE_BLOCK = False
@@ -71,6 +73,13 @@ USE_PATCH_MESH = False
 MESH_READY_REQUIRE_NEIGHBORS = False
 MESH_READY_REQUIRE_DIAGONALS = False
 
+# When True, wait for neighbors before meshing so lighting can be combined once.
+MESH_WAIT_FOR_NEIGHBORS = True
+MESH_WAIT_REQUIRE_DIAGONALS = False
+
+# Strict terrain pipeline: seam sync -> light combine -> mesh.
+STRICT_TERRAIN_PIPELINE = True
+
 # Enable ANSI colors in logs.
 LOG_COLOR = True
 
@@ -78,11 +87,27 @@ LOG_COLOR = True
 LOG_MAIN_LOOP = True
 
 # Log queue/inflight state (loader + mesh).
-LOG_QUEUE_STATE = False
+LOG_QUEUE_STATE = True
 
 # Log missing sectors around the player (3x3).
-LOG_MISSING_SECTORS = False
+LOG_MISSING_SECTORS = True
 LOG_MISSING_SECTORS_EVERY_N_FRAMES = 30
+
+# Log strict terrain pipeline stage and candidate counts.
+LOG_STRICT_PIPELINE = True
+LOG_STRICT_PIPELINE_EVERY_N_FRAMES = 30
+
+# Show placeholder blocks while waiting for strict pipeline stages.
+STRICT_SHOW_PLACEHOLDER = True
+
+# Log edge mismatch diagnostics for a nearby unmeshed sector.
+LOG_SEAM_DIAGNOSTICS = True
+LOG_SEAM_DIAGNOSTICS_EVERY_N_FRAMES = 60
+
+# When True, only emit strict/seam logs (and warnings/errors).
+LOG_STRICT_ONLY = False
+LOG_STRICT_TRACE = True
+LOG_STRICT_TRACE_EVERY_N_FRAMES = 1
 
 # Logging for mesh activity.
 MESH_LOG = True

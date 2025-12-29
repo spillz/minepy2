@@ -119,8 +119,9 @@ class WorldLoader(object):
                 if getattr(config, 'LOADER_SEND_MESH', True):
                     self._calc_vertex_data(self.pos)
                 else:
+                    if getattr(config, 'LOADER_SEND_LIGHT', False):
+                        self._calc_exposed_faces()
                     self.vt_data = None
-                    self.light = None
                 t0 = time.perf_counter()
                 payload = pickle.dumps(['sector_blocks',[self.pos, self.blocks, self.vt_data, self.light]],-1)
                 t_dump = (time.perf_counter() - t0) * 1000.0
@@ -142,8 +143,9 @@ class WorldLoader(object):
                     if getattr(config, 'LOADER_SEND_MESH', True):
                         self._calc_vertex_data(spos)
                     else:
+                        if getattr(config, 'LOADER_SEND_LIGHT', False):
+                            self._calc_exposed_faces()
                         self.vt_data = None
-                        self.light = None
                     sector_result.append((spos, self.blocks, self.vt_data, self.light))
                 t0 = time.perf_counter()
                 payload = pickle.dumps(['sector_blocks2',sector_result, token],-1)
@@ -171,8 +173,9 @@ class WorldLoader(object):
                     if getattr(config, 'LOADER_SEND_MESH', True):
                         self._calc_vertex_data(spos)
                     else:
+                        if getattr(config, 'LOADER_SEND_LIGHT', False):
+                            self._calc_exposed_faces()
                         self.vt_data = None
-                        self.light = None
                     sector_result.append((spos, self.blocks, self.vt_data, self.light))
                 t0 = time.perf_counter()
                 payload = pickle.dumps(['sector_blocks2', sector_result, token], -1)

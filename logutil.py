@@ -12,6 +12,9 @@ def set_frame(frame_id):
 
 
 def log(scope, msg, level="INFO"):
+    if getattr(config, "LOG_STRICT_ONLY", False):
+        if level not in ("WARN", "ERROR") and scope not in ("PIPE", "SEAM", "STRICT"):
+            return
     if scope in ("FRAME", "MAINLOOP") and not getattr(config, "LOG_MAIN_LOOP", True):
         return
     pid = os.getpid()

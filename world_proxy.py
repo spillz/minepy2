@@ -109,6 +109,14 @@ class SectorProxy(object):
         self.pending_vt_water = []
         self.vt_data = None
         self.vt_upload_prepared = False
+        self.vt_upload_token = 0
+        self.vt_upload_active_token = None
+        self.vt_upload_use_pending = False
+        self.vt_upload_target = None
+        self.vt_uploaded_ranges = {
+            "current": {"solid": [], "water": []},
+            "pending": {"solid": [], "water": []},
+        }
         self.vt_clear_pending = False
         self.vt_upload_solid = 0
         self.vt_upload_water = 0
@@ -125,9 +133,24 @@ class SectorProxy(object):
         self.mesh_gen = 0
         self.pending_batch = None
         self.pending_batch_water = None
+        self.seam_synced = False
+        self.light_combined = False
         self.patch_vt = []
         self.edit_token = 0
         self.edit_inflight = False
+        self.placeholder_built = False
+
+    def _note_new_vt_data(self):
+        """Advance the upload token for new mesh data."""
+        self.vt_upload_token += 1
+        self.vt_upload_active_token = None
+        self.vt_upload_use_pending = False
+        self.vt_upload_target = None
+        self.vt_uploaded_ranges["current"]["solid"] = []
+        self.vt_uploaded_ranges["current"]["water"] = []
+        self.vt_uploaded_ranges["pending"]["solid"] = []
+        self.vt_uploaded_ranges["pending"]["water"] = []
+        self.vt_upload_prepared = False
 
     def draw(self, draw_invalid = True, allow_upload = True):
         if self.batch is None or self.batch_water is None:
@@ -161,6 +184,8 @@ class SectorProxy(object):
         self.vt = []
         self.vt_water = []
         self.vt_clear_pending = False
+        self.vt_uploaded_ranges["current"]["solid"] = []
+        self.vt_uploaded_ranges["current"]["water"] = []
         if reset_upload_state:
             self.vt_upload_prepared = False
             self.vt_upload_solid = 0
@@ -175,6 +200,8 @@ class SectorProxy(object):
             vt.delete()
         self.pending_vt = []
         self.pending_vt_water = []
+        self.vt_uploaded_ranges["pending"]["solid"] = []
+        self.vt_uploaded_ranges["pending"]["water"] = []
         if recycle_batches and self.pending_batch is not None:
             self.model.unused_batches.append((self.pending_batch, self.pending_batch_water))
         self.pending_batch = None
@@ -197,10 +224,21 @@ class SectorProxy(object):
 
     def check_show(self,add_to_batch = True):
         if add_to_batch and self.vt_data is not None:
-            use_pending = self.vt_clear_pending and (self.vt or self.vt_water)
-            if use_pending and self.pending_vt and not self.vt_upload_prepared:
-                # Discard partially built pending geometry for a newer mesh.
-                self._clear_pending_vt()
+            if self.vt_upload_active_token != self.vt_upload_token:
+                use_pending = self.vt_clear_pending and (self.vt or self.vt_water)
+                self.vt_upload_use_pending = use_pending
+                target = "pending" if use_pending else "current"
+                if self.vt_upload_target != target:
+                    self.vt_uploaded_ranges[target]["solid"] = []
+                    self.vt_uploaded_ranges[target]["water"] = []
+                    self.vt_upload_target = target
+                if use_pending and self.pending_vt and not self.vt_upload_prepared:
+                    # Discard pending geometry only when a newer mesh arrives.
+                    self._clear_pending_vt()
+                self.vt_upload_active_token = self.vt_upload_token
+            else:
+                use_pending = self.vt_upload_use_pending
+                target = self.vt_upload_target or ("pending" if use_pending else "current")
             if use_pending and self.pending_batch is None:
                 self.pending_batch, self.pending_batch_water = self.model.get_batches()
             if not self.vt_upload_prepared:
@@ -260,6 +298,10 @@ class SectorProxy(object):
                 )
                 if vt is not None:
                     solid_list.append(vt)
+                if uploaded:
+                    self.vt_uploaded_ranges[target]["solid"].append(
+                        (self.vt_upload_solid, self.vt_upload_solid + uploaded)
+                    )
                 self.vt_upload_solid += uploaded
                 total_tris += uploaded * 2
                 vt, uploaded, _ = _build_list_chunk(
@@ -267,6 +309,10 @@ class SectorProxy(object):
                 )
                 if vt is not None:
                     water_list.append(vt)
+                if uploaded:
+                    self.vt_uploaded_ranges[target]["water"].append(
+                        (self.vt_upload_water, self.vt_upload_water + uploaded)
+                    )
                 self.vt_upload_water += uploaded
                 total_tris += uploaded * 2
             else:
@@ -277,6 +323,10 @@ class SectorProxy(object):
                     )
                     if vt is not None:
                         water_list.append(vt)
+                    if uploaded:
+                        self.vt_uploaded_ranges[target]["water"].append(
+                            (self.vt_upload_water, self.vt_upload_water + uploaded)
+                        )
                     self.vt_upload_water += uploaded
                     total_tris += uploaded * 2
                     budget = max(0, budget - uploaded)
@@ -286,6 +336,10 @@ class SectorProxy(object):
                     )
                     if vt is not None:
                         solid_list.append(vt)
+                    if uploaded:
+                        self.vt_uploaded_ranges[target]["solid"].append(
+                            (self.vt_upload_solid, self.vt_upload_solid + uploaded)
+                        )
                     self.vt_upload_solid += uploaded
                     total_tris += uploaded * 2
 
@@ -308,6 +362,46 @@ class SectorProxy(object):
                     pass
 
             if self.vt_upload_solid >= self.vt_solid_quads and self.vt_upload_water >= self.vt_water_quads:
+                def _ranges_cover(total_quads, ranges):
+                    if total_quads <= 0:
+                        return True
+                    if not ranges:
+                        return False
+                    ranges = sorted(ranges, key=lambda r: r[0])
+                    cur = 0
+                    for start, end in ranges:
+                        if start > cur:
+                            return False
+                        if end > cur:
+                            cur = end
+                        if cur >= total_quads:
+                            return True
+                    return cur >= total_quads
+
+                solid_ok = _ranges_cover(self.vt_solid_quads, self.vt_uploaded_ranges[target]["solid"])
+                water_ok = _ranges_cover(self.vt_water_quads, self.vt_uploaded_ranges[target]["water"])
+                target_vt = self.pending_vt if target == "pending" else self.vt
+                target_vt_water = self.pending_vt_water if target == "pending" else self.vt_water
+                expected_solid_verts = self.vt_solid_quads * 6
+                expected_water_verts = self.vt_water_quads * 6
+                actual_solid_verts = sum(getattr(vt, 'count', 0) for vt in target_vt)
+                actual_water_verts = sum(getattr(vt, 'count', 0) for vt in target_vt_water)
+                verts_ok = True
+                if expected_solid_verts and actual_solid_verts < expected_solid_verts:
+                    verts_ok = False
+                if expected_water_verts and actual_water_verts < expected_water_verts:
+                    verts_ok = False
+                if not (solid_ok and water_ok and verts_ok):
+                    if self.pending_vt or self.pending_vt_water:
+                        self._clear_pending_vt()
+                    self.force_full_upload = True
+                    self.vt_upload_prepared = False
+                    self.vt_upload_active_token = None
+                    self.vt_upload_use_pending = False
+                    self.vt_upload_target = None
+                    self.vt_clear_pending = True
+                    self.model._queue_upload(self, priority=self.edit_inflight)
+                    return
                 if use_pending:
                     if self.pending_batch is not None and self.pending_batch_water is not None:
                         old_vt = self.vt
@@ -335,6 +429,13 @@ class SectorProxy(object):
                 self.patch_vt.clear()
                 self.vt_data = None
                 self.vt_upload_prepared = False
+                self.vt_upload_active_token = None
+                self.vt_upload_use_pending = False
+                self.vt_upload_target = None
+                self.vt_uploaded_ranges["current"]["solid"] = []
+                self.vt_uploaded_ranges["current"]["water"] = []
+                self.vt_uploaded_ranges["pending"]["solid"] = []
+                self.vt_uploaded_ranges["pending"]["water"] = []
                 self.vt_clear_pending = False
                 self.force_full_upload = False
                 self.edit_inflight = False
@@ -345,6 +446,10 @@ class SectorProxy(object):
             self.invalidate_vt = False
             self.model._submit_mesh_job(self)
             return False
+        elif add_to_batch and self.vt_data is None and self.shown and self.mesh_built:
+            if getattr(config, 'STRICT_SHOW_PLACEHOLDER', False) and not self.placeholder_built:
+                self.model._build_placeholder_mesh(self)
+                self.placeholder_built = True
 
 
 class ModelProxy(object):
@@ -398,6 +503,7 @@ class ModelProxy(object):
         self.player_look = None
         self._last_queue_log_frame = -1
         self._last_missing_log_frame = -1
+        self.strict_stage = None
         self.loader_messages = queue.SimpleQueue()
         self._loader_stop = threading.Event()
         self._loader_thread = None
@@ -428,6 +534,7 @@ class ModelProxy(object):
             s.blocks[cx+1, cy, cz+1] = block_id
             vt_data = self._build_block_vt(block_id, numpy.array([cx, cy, cz], dtype=numpy.float32))
             s.vt_data = vt_data
+            s._note_new_vt_data()
             s.check_show()
             self.sectors[s.position] = s
             self.loader = None
@@ -562,6 +669,114 @@ class ModelProxy(object):
             f"pending_mesh={pending_mesh} pending_uploads={len(self.pending_uploads)}",
         )
 
+    def _maybe_log_strict_pipeline(self, frustum_circle, counts):
+        if not getattr(config, 'LOG_STRICT_PIPELINE', False):
+            return
+        every = getattr(config, 'LOG_STRICT_PIPELINE_EVERY_N_FRAMES', 30)
+        if self.frame_id % max(1, every):
+            return
+        missing = None
+        missing_flags = None
+        if self.player_sector is not None:
+            px, _, pz = self.player_sector
+            for dx, dz in itertools.product((-1, 0, 1), repeat=2):
+                pos = (px + dx * SECTOR_SIZE, 0, pz + dz * SECTOR_SIZE)
+                if pos not in self.sectors:
+                    missing = pos
+                    break
+            if missing is None:
+                for s in self.sectors.values():
+                    if not s.shown:
+                        continue
+                    if not s.mesh_built and not s.mesh_job_pending:
+                        missing = s.position
+                        missing_flags = (
+                            f"seam={s.seam_synced} light_combined={s.light_combined} "
+                            f"light={'Y' if s.light is not None else 'N'} pending={s.mesh_job_pending}"
+                        )
+                        break
+        logutil.log(
+            "PIPE",
+            f"stage={self.strict_stage} mesh={counts['mesh']} light={counts['light']} "
+            f"seam={counts['seam']} adj={counts['adjacent']} local_light={counts['local_light']} "
+            f"load={counts['load']} inflight={self.n_requests - self.n_responses} "
+            f"missing={missing} flags={missing_flags}",
+        )
+
+    def _maybe_log_seam_diagnostics(self):
+        if not getattr(config, 'LOG_SEAM_DIAGNOSTICS', False):
+            return
+        every = getattr(config, 'LOG_SEAM_DIAGNOSTICS_EVERY_N_FRAMES', 60)
+        if self.frame_id % max(1, every):
+            return
+        if self.player_sector is None:
+            return
+        target = None
+        for s in self.sectors.values():
+            if not s.shown:
+                continue
+            if s.mesh_built or s.mesh_job_pending:
+                continue
+            target = s
+            break
+        if target is None:
+            return
+        mismatches = []
+        for dx, dz, n in self.neighbor_sectors(target.position):
+            if dx == 1:
+                self_edge = target.blocks[SECTOR_SIZE + 1, :, :]
+                neigh_edge = n.blocks[1, :, :]
+                light_self = target.light[SECTOR_SIZE + 1, :, :] if target.light is not None else None
+                light_neigh = n.light[1, :, :] if n.light is not None else None
+            elif dx == -1:
+                self_edge = target.blocks[0, :, :]
+                neigh_edge = n.blocks[SECTOR_SIZE, :, :]
+                light_self = target.light[0, :, :] if target.light is not None else None
+                light_neigh = n.light[SECTOR_SIZE, :, :] if n.light is not None else None
+            elif dz == 1:
+                self_edge = target.blocks[:, :, SECTOR_SIZE + 1]
+                neigh_edge = n.blocks[:, :, 1]
+                light_self = target.light[:, :, SECTOR_SIZE + 1] if target.light is not None else None
+                light_neigh = n.light[:, :, 1] if n.light is not None else None
+            else:
+                self_edge = target.blocks[:, :, 0]
+                neigh_edge = n.blocks[:, :, SECTOR_SIZE]
+                light_self = target.light[:, :, 0] if target.light is not None else None
+                light_neigh = n.light[:, :, SECTOR_SIZE] if n.light is not None else None
+
+            block_mismatch = int((self_edge != neigh_edge).sum())
+            if light_self is None or light_neigh is None:
+                light_mismatch = -1
+            else:
+                light_mismatch = int((light_self != light_neigh).sum())
+            mismatches.append(f"{dx},{dz} b={block_mismatch} l={light_mismatch}")
+
+        logutil.log(
+            "SEAM",
+            f"sector={target.position} seam={target.seam_synced} light_combined={target.light_combined} "
+            f"light={'Y' if target.light is not None else 'N'} pending={target.mesh_job_pending} "
+            f"mismatch={mismatches}",
+        )
+
+    def _maybe_log_strict_trace(self, stage, sector):
+        if not getattr(config, 'LOG_STRICT_TRACE', False):
+            return
+        every = getattr(config, 'LOG_STRICT_TRACE_EVERY_N_FRAMES', 30)
+        if self.frame_id % max(1, every):
+            return
+        if sector is None:
+            logutil.log("STRICT", f"stage={stage} sector=None")
+            return
+        logutil.log(
+            "STRICT",
+            f"stage={stage} sector={sector.position} shown={sector.shown} "
+            f"seam={sector.seam_synced} light_combined={sector.light_combined} "
+            f"light={'Y' if sector.light is not None else 'N'} "
+            f"mesh_ready={self._mesh_ready(sector)} "
+            f"neighbors_missing={self._neighbors_missing(sector)} "
+            f"mesh_pending={sector.mesh_job_pending} mesh_built={sector.mesh_built} "
+            f"vt_data={'Y' if sector.vt_data is not None else 'N'}",
+        )
     def _maybe_log_missing_sectors(self, center):
         if not getattr(config, 'LOG_MISSING_SECTORS', False):
             return
@@ -620,6 +835,10 @@ class ModelProxy(object):
         return sector.light_iters_done < 64
 
     def _mesh_ready(self, sector):
+        wait_neighbors = getattr(config, 'MESH_WAIT_FOR_NEIGHBORS', False)
+        if wait_neighbors:
+            require_diagonals = getattr(config, 'MESH_WAIT_REQUIRE_DIAGONALS', False)
+            return self._neighbors_ready(sector, require_diagonals=require_diagonals)
         require_neighbors = getattr(config, 'MESH_READY_REQUIRE_NEIGHBORS', True)
         if not require_neighbors:
             return True
@@ -628,6 +847,96 @@ class ModelProxy(object):
 
     def _lighting_ready(self, sector):
         return self._neighbors_ready(sector, require_diagonals=True)
+
+    def _merge_neighbor_lighting(self, sector):
+        if sector.light is None:
+            return
+        require_diagonals = getattr(config, 'MESH_WAIT_REQUIRE_DIAGONALS', False)
+        for dx, dz, n in self.neighbor_sectors(sector.position):
+            if n.light is None:
+                continue
+            if dx == 1:
+                sector.light[SECTOR_SIZE + 1, :, :] = n.light[1, :, :]
+            elif dx == -1:
+                sector.light[0, :, :] = n.light[SECTOR_SIZE, :, :]
+            if dz == 1:
+                sector.light[:, :, SECTOR_SIZE + 1] = n.light[:, :, 1]
+            elif dz == -1:
+                sector.light[:, :, 0] = n.light[:, :, SECTOR_SIZE]
+        if not require_diagonals:
+            return
+        diag_offsets = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        for dx, dz in diag_offsets:
+            dpos = (sector.position[0] + dx * SECTOR_SIZE, 0, sector.position[2] + dz * SECTOR_SIZE)
+            d = self.sectors.get(dpos)
+            if d is None or d.light is None:
+                continue
+            sx = 0 if dx == -1 else SECTOR_SIZE + 1
+            sz = 0 if dz == -1 else SECTOR_SIZE + 1
+            dx_src = SECTOR_SIZE if dx == -1 else 1
+            dz_src = SECTOR_SIZE if dz == -1 else 1
+            sector.light[sx, :, sz] = d.light[dx_src, :, dz_src]
+
+    def _sync_edges_only(self, sector):
+        """Update padding edges/corners without queuing mesh work."""
+        require_diag = getattr(config, 'SEAM_REQUIRE_DIAGONALS', False)
+        if not self._neighbors_ready(sector, require_diag):
+            return False
+        neighbors = list(self.neighbor_sectors(sector.position))
+        for dx, dz, n in neighbors:
+            changed_neighbor = False
+            if dx == 1:
+                if not numpy.array_equal(n.blocks[0, :, :], sector.blocks[SECTOR_SIZE, :, :]):
+                    n.blocks[0, :, :] = sector.blocks[SECTOR_SIZE, :, :]
+                    changed_neighbor = True
+                if not numpy.array_equal(sector.blocks[SECTOR_SIZE + 1, :, :], n.blocks[1, :, :]):
+                    sector.blocks[SECTOR_SIZE + 1, :, :] = n.blocks[1, :, :]
+            elif dx == -1:
+                if not numpy.array_equal(n.blocks[SECTOR_SIZE + 1, :, :], sector.blocks[1, :, :]):
+                    n.blocks[SECTOR_SIZE + 1, :, :] = sector.blocks[1, :, :]
+                    changed_neighbor = True
+                if not numpy.array_equal(sector.blocks[0, :, :], n.blocks[SECTOR_SIZE, :, :]):
+                    sector.blocks[0, :, :] = n.blocks[SECTOR_SIZE, :, :]
+            if dz == 1:
+                if not numpy.array_equal(n.blocks[:, :, 0], sector.blocks[:, :, SECTOR_SIZE]):
+                    n.blocks[:, :, 0] = sector.blocks[:, :, SECTOR_SIZE]
+                    changed_neighbor = True
+                if not numpy.array_equal(sector.blocks[:, :, SECTOR_SIZE + 1], n.blocks[:, :, 1]):
+                    sector.blocks[:, :, SECTOR_SIZE + 1] = n.blocks[:, :, 1]
+            elif dz == -1:
+                if not numpy.array_equal(n.blocks[:, :, SECTOR_SIZE + 1], sector.blocks[:, :, 1]):
+                    n.blocks[:, :, SECTOR_SIZE + 1] = sector.blocks[:, :, 1]
+                    changed_neighbor = True
+                if not numpy.array_equal(sector.blocks[:, :, 0], n.blocks[:, :, SECTOR_SIZE]):
+                    sector.blocks[:, :, 0] = n.blocks[:, :, SECTOR_SIZE]
+            if changed_neighbor:
+                n.light_combined = False
+        if getattr(config, 'MESH_WAIT_REQUIRE_DIAGONALS', False):
+            diag_offsets = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+            for dx, dz in diag_offsets:
+                dpos = (sector.position[0] + dx * SECTOR_SIZE, 0, sector.position[2] + dz * SECTOR_SIZE)
+                d = self.sectors.get(dpos)
+                if d is None:
+                    continue
+                changed_diag = False
+                sx = 0 if dx == -1 else SECTOR_SIZE + 1
+                sz = 0 if dz == -1 else SECTOR_SIZE + 1
+                dx_src = SECTOR_SIZE if dx == -1 else 1
+                dz_src = SECTOR_SIZE if dz == -1 else 1
+                if not numpy.array_equal(sector.blocks[sx, :, sz], d.blocks[dx_src, :, dz_src]):
+                    sector.blocks[sx, :, sz] = d.blocks[dx_src, :, dz_src]
+                dx_dst = SECTOR_SIZE + 1 if dx == -1 else 0
+                dz_dst = SECTOR_SIZE + 1 if dz == -1 else 0
+                sx_src = 1 if dx == -1 else SECTOR_SIZE
+                sz_src = 1 if dz == -1 else SECTOR_SIZE
+                if not numpy.array_equal(d.blocks[dx_dst, :, dz_dst], sector.blocks[sx_src, :, sz_src]):
+                    d.blocks[dx_dst, :, dz_dst] = sector.blocks[sx_src, :, sz_src]
+                    changed_diag = True
+                if changed_diag:
+                    d.light_combined = False
+        sector.seam_synced = True
+        sector.light_combined = False
+        return True
 
     def _has_mesh_backlog(self):
         """Return True when there is mesh work ready to run on loaded sectors."""
@@ -643,6 +952,70 @@ class ModelProxy(object):
                 return True
         return False
 
+    def _neighbors_have_light(self, sector):
+        require_diagonals = getattr(config, 'MESH_WAIT_REQUIRE_DIAGONALS', False)
+        return self._neighbors_ready(sector, require_diagonals=require_diagonals)
+
+    def _neighbors_missing(self, sector):
+        require_diagonals = getattr(config, 'MESH_WAIT_REQUIRE_DIAGONALS', False)
+        return not self._neighbors_ready(sector, require_diagonals=require_diagonals)
+
+    def _seam_block_mismatch(self, sector):
+        for dx, dz, n in self.neighbor_sectors(sector.position):
+            if dx == 1:
+                if not numpy.array_equal(sector.blocks[SECTOR_SIZE + 1, :, :], n.blocks[1, :, :]):
+                    return True
+            elif dx == -1:
+                if not numpy.array_equal(sector.blocks[0, :, :], n.blocks[SECTOR_SIZE, :, :]):
+                    return True
+            elif dz == 1:
+                if not numpy.array_equal(sector.blocks[:, :, SECTOR_SIZE + 1], n.blocks[:, :, 1]):
+                    return True
+            elif dz == -1:
+                if not numpy.array_equal(sector.blocks[:, :, 0], n.blocks[:, :, SECTOR_SIZE]):
+                    return True
+        return False
+
+    def _seam_light_mismatch(self, sector):
+        if sector.light is None:
+            return False
+        for dx, dz, n in self.neighbor_sectors(sector.position):
+            if n.light is None:
+                continue
+            if dx == 1:
+                if not numpy.array_equal(sector.light[SECTOR_SIZE + 1, :, :], n.light[1, :, :]):
+                    return True
+            elif dx == -1:
+                if not numpy.array_equal(sector.light[0, :, :], n.light[SECTOR_SIZE, :, :]):
+                    return True
+            elif dz == 1:
+                if not numpy.array_equal(sector.light[:, :, SECTOR_SIZE + 1], n.light[:, :, 1]):
+                    return True
+            elif dz == -1:
+                if not numpy.array_equal(sector.light[:, :, 0], n.light[:, :, SECTOR_SIZE]):
+                    return True
+        return False
+
+    def _pick_strict_candidate(self, frustum_circle, predicate):
+        if self.player_sector is None:
+            return None
+        best = None
+        best_prio = None
+        for sector in self.sectors.values():
+            if not predicate(sector):
+                continue
+            prio = self._sector_priority(
+                self.player_sector,
+                sector.position,
+                self.player_pos,
+                self.player_look,
+                frustum_circle,
+            )
+            if best is None or prio < best_prio:
+                best = sector
+                best_prio = prio
+        return best
+
     def _in_priority_neighborhood(self, sector_pos, radius=1):
         if self.player_sector is None:
             return False
@@ -656,6 +1029,9 @@ class ModelProxy(object):
             return
         if self.player_sector is None:
             return
+        if getattr(config, 'STRICT_TERRAIN_PIPELINE', False):
+            if self.strict_stage not in (None, "mesh"):
+                return
 
         candidates = []
         for sector in self.sectors.values():
@@ -667,6 +1043,9 @@ class ModelProxy(object):
                     continue
                 reason = "unmeshed"
             else:
+                if getattr(config, 'STRICT_TERRAIN_PIPELINE', False) and getattr(config, 'STRICT_SHOW_PLACEHOLDER', False):
+                    if sector.vt and sector.light is None:
+                        continue
                 if not (self._needs_light(sector) and self._lighting_ready(sector)):
                     continue
                 reason = "unlit"
@@ -684,6 +1063,13 @@ class ModelProxy(object):
 
         candidates.sort(key=lambda item: item[0])
         _, sector, reason = candidates[0]
+        if getattr(config, 'MESH_WAIT_FOR_NEIGHBORS', False):
+            if getattr(config, 'STRICT_TERRAIN_PIPELINE', False):
+                if not sector.seam_synced or not sector.light_combined:
+                    return
+            elif not sector.light_combined:
+                self._merge_neighbor_lighting(sector)
+                sector.light_combined = True
         is_priority = self._in_priority_neighborhood(sector.position)
         self._mesh_log(f"queue sector={sector.position} reason={reason}")
         self._submit_mesh_job(sector, priority=is_priority)
@@ -1134,7 +1520,7 @@ class ModelProxy(object):
                 # stale result
                 continue
             sector.vt_data = vt_data
-            sector.vt_upload_prepared = False
+            sector._note_new_vt_data()
             sector.vt_clear_pending = True
             sector.mesh_built = True
             sector.invalidate()
@@ -1152,7 +1538,8 @@ class ModelProxy(object):
                         )
                 except Exception:
                     pass
-            self._sync_light_to_neighbors(sector)
+            if not getattr(config, 'MESH_WAIT_FOR_NEIGHBORS', False):
+                self._sync_light_to_neighbors(sector)
             if sector.shown:
                 self._queue_upload(sector, priority=sector.edit_inflight)
             if elapsed_ms is not None:
@@ -1482,6 +1869,7 @@ class ModelProxy(object):
             water_data = None
         solid_data = (count, v, t, n, c)
         sector.vt_data = {'solid': solid_data, 'water': water_data}
+        sector._note_new_vt_data()
         sector.vt_clear_pending = True
         sector.invalidate()
 
@@ -1491,6 +1879,13 @@ class ModelProxy(object):
         if not self._mesh_ready(sector):
             sector.needs_seam_refresh = True
             return
+        if getattr(config, 'MESH_WAIT_FOR_NEIGHBORS', False):
+            if getattr(config, 'STRICT_TERRAIN_PIPELINE', False) and not sector.seam_synced:
+                sector.needs_seam_refresh = True
+                return
+            if not sector.light_combined:
+                self._merge_neighbor_lighting(sector)
+                sector.light_combined = True
         force_no_light = False
         if getattr(config, 'DEFER_LIGHTING_UNTIL_NEIGHBORS', False):
             require_diag = getattr(config, 'DEFER_LIGHTING_REQUIRE_DIAGONALS', False)
@@ -1563,8 +1958,11 @@ class ModelProxy(object):
                 if not numpy.array_equal(sector.blocks[:, :, 0], n.blocks[:, :, SECTOR_SIZE]):
                     sector.blocks[:, :, 0] = n.blocks[:, :, SECTOR_SIZE]
                     changed_self = True
-            if changed_neighbor and invalidate_light:
-                n.light_invalidated = True
+        if changed_neighbor and invalidate_light:
+            n.light_invalidated = True
+        if changed_neighbor:
+            n.seam_synced = False
+            n.light_combined = False
             self._mesh_log(f"seam_invalidate sector={n.position} source={sector.position}")
             if sync:
                 if changed_neighbor:
@@ -1601,6 +1999,8 @@ class ModelProxy(object):
                 d.light_invalidated = True
             if changed_diag:
                 self._mesh_log(f"seam_invalidate sector={d.position} source=diag")
+                d.seam_synced = False
+                d.light_combined = False
                 d.invalidate()
                 if sync:
                     self._rebuild_sector_now(d, priority=priority)
@@ -1622,6 +2022,9 @@ class ModelProxy(object):
             else:
                 sector.needs_seam_refresh = True
         sector.needs_seam_refresh = False
+        if changed_self:
+            sector.seam_synced = False
+            sector.light_combined = False
 
     def set_matrices(self, projection, view, camera_pos):
         # Convert pyglet Mat4 to column-major numpy arrays
@@ -1884,8 +2287,11 @@ class ModelProxy(object):
             visible = self._sector_overlaps_frustum(s.position, frustum_circle)
             s.shown = visible
             if visible and s.needs_seam_refresh:
-                s.needs_seam_refresh = False
-                self._sync_edges_and_rebuild(s)
+                if getattr(config, 'STRICT_TERRAIN_PIPELINE', False):
+                    pass
+                else:
+                    s.needs_seam_refresh = False
+                    self._sync_edges_and_rebuild(s)
             if not visible:
                 continue
 
@@ -2166,7 +2572,9 @@ class ModelProxy(object):
         self.player_sector = new
         self.player_pos = player_pos
         self.player_look = look_vec
+        self.strict_stage = None
         self._maybe_log_queue_state()
+        self._maybe_log_seam_diagnostics()
         self._maybe_log_missing_sectors(new)
         inflight = self.n_requests - self.n_responses
         max_inflight = getattr(config, 'LOADER_MAX_INFLIGHT', 1)
@@ -2208,6 +2616,10 @@ class ModelProxy(object):
                 self.active_loader_request = [None, None]
                 logutil.log("CLIENT", f"loader response ms={(time.time()-self.loader_time)*1000.0:.1f}")
                 self._update_sector(spos1, b1, v1, light1)
+                s = self.sectors.get(spos1)
+                if s is not None:
+                    s.seam_synced = False
+                    s.light_combined = False
             if msg == 'sector_blocks2':
                 self.n_responses += 1
                 self.active_loader_request = [None, None]
@@ -2228,6 +2640,10 @@ class ModelProxy(object):
                             if self.sector_edit_tokens.get(spos, 0) != token:
                                 continue
                     self._update_sector(spos, b, v, light)
+                    s = self.sectors.get(spos)
+                    if s is not None:
+                        s.seam_synced = False
+                        s.light_combined = False
             # After processing loader message, drain a limited number of pending seam rebuilds to avoid bursts.
             max_seams = getattr(config, 'MAX_SEAM_REBUILDS_PER_TICK', None)
             self._process_pending_seams(max_seams)
@@ -2252,6 +2668,80 @@ class ModelProxy(object):
             if pos not in self.sectors:
                 missing_any = True
                 break
+
+        strict = getattr(config, 'STRICT_TERRAIN_PIPELINE', False)
+        if strict:
+            def _next_stage(s):
+                if s.mesh_job_pending:
+                    return None
+                if s.light is None:
+                    return "local_light"
+                if self._neighbors_missing(s):
+                    return "adjacent_loads"
+                if not s.seam_synced:
+                    return "seam" if self._mesh_ready(s) else None
+                if not s.light_combined:
+                    if self._neighbors_have_light(s):
+                        return "light"
+                    return None
+                needs_mesh = (s.vt_data is None and not s.mesh_built)
+                if needs_mesh:
+                    return "mesh"
+                if self._needs_light(s) and self._lighting_ready(s):
+                    return "mesh"
+                return None
+
+            counts = {
+                "mesh": 0,
+                "light": 0,
+                "seam": 0,
+                "adjacent": 0,
+                "local_light": 0,
+                "load": len(self.update_sectors_pos),
+            }
+
+            def _select_best(sectors):
+                best = None
+                best_prio = None
+                best_stage = None
+                for s in sectors:
+                    stage = _next_stage(s)
+                    if stage is None:
+                        continue
+                    counts_key = "adjacent" if stage == "adjacent_loads" else stage
+                    counts[counts_key] += 1
+                    prio = self._sector_priority(
+                        self.player_sector,
+                        s.position,
+                        self.player_pos,
+                        self.player_look,
+                        frustum_circle,
+                    )
+                    if best is None or prio < best_prio:
+                        best = s
+                        best_prio = prio
+                        best_stage = stage
+                return best, best_stage
+
+            shown_candidates = [s for s in self.sectors.values() if s.shown]
+            best, best_stage = _select_best(shown_candidates)
+            if best is None:
+                best, best_stage = _select_best(self.sectors.values())
+
+            self.strict_stage = best_stage or "sector_load"
+            if best is not None:
+                if best_stage == "light":
+                    self._merge_neighbor_lighting(best)
+                    best.light_combined = True
+                elif best_stage == "seam":
+                    if self._sync_edges_only(best):
+                        best.needs_seam_refresh = False
+                elif best_stage == "mesh":
+                    is_priority = self._in_priority_neighborhood(best.position)
+                    self._submit_mesh_job(best, priority=is_priority)
+
+            self._maybe_log_strict_pipeline(frustum_circle, counts)
+            self._maybe_log_strict_trace(self.strict_stage, best)
 
         if not missing_any and inflight == 0 and not self.loader_requests and processed_msgs == 0:
             if _ipc_ok() and self.server and self.server.poll():
@@ -2291,8 +2781,11 @@ class ModelProxy(object):
                 sector_reqs.append(['sector_blocks', [pos]])
             self.loader_requests = non_sector + sector_reqs
 
+        if strict and self.strict_stage in ("mesh", "light"):
+            allow_send = False
+
         block_on_mesh = getattr(config, 'LOADER_BLOCK_ON_MESH_BACKLOG', False)
-        if block_on_mesh and allow_send and self._has_mesh_backlog():
+        if block_on_mesh and allow_send and not (strict and self.strict_stage in (None, "seam", "adjacent_loads", "local_light", "sector_load")) and self._has_mesh_backlog():
             allow_send = False
 
         if allow_send and len(self.loader_requests) > 0:
@@ -2339,6 +2832,22 @@ class ModelProxy(object):
         solid = (count, v, t, n, c)
         return {'solid': solid, 'water': None}
 
+    def _build_placeholder_mesh(self, sector):
+        """Build a lightweight placeholder mesh while strict pipeline waits."""
+        if sector.mesh_job_pending:
+            return
+        if not self._mesh_ready(sector):
+            return
+        force_no_light = True
+        reuse_light = False
+        self._recompute_vt(sector, force_no_light=force_no_light, reuse_light=reuse_light)
+        sector.vt_upload_prepared = False
+        sector.vt_clear_pending = True
+        sector.force_full_upload = False
+        sector.mesh_built = True
+        if sector.shown:
+            self._queue_upload(sector, priority=False)
+
     def _triangulate_vt(self, vt_data, key=None):
         """Convert quad vt_data to triangle arrays."""
         vt_tuple = self._get_vt_entry(vt_data, key)
@@ -2371,9 +2880,19 @@ class ModelProxy(object):
                 s.light_invalidated = False
                 s.vt_data = v
                 s.mesh_built = v is not None
-                s.vt_upload_prepared = False
+                if v is not None:
+                    s._note_new_vt_data()
+                else:
+                    s.vt_upload_active_token = None
+                    s.vt_upload_prepared = False
                 s.vt_clear_pending = True
-                self._sync_edges_and_rebuild(s)
+                s.seam_synced = False
+                s.light_combined = False
+                s.placeholder_built = False
+                if getattr(config, 'STRICT_TERRAIN_PIPELINE', False):
+                    s.needs_seam_refresh = True
+                else:
+                    self._sync_edges_and_rebuild(s)
             else:
                 logutil.log("WORLD", f"setting new sector data {spos}")
                 batch_solid, batch_water = self.get_batches()
@@ -2384,10 +2903,20 @@ class ModelProxy(object):
                 s.light_invalidated = False
                 s.vt_data = v
                 s.mesh_built = v is not None
-                s.vt_upload_prepared = False
+                if v is not None:
+                    s._note_new_vt_data()
+                else:
+                    s.vt_upload_active_token = None
+                    s.vt_upload_prepared = False
                 s.vt_clear_pending = True
+                s.seam_synced = False
+                s.light_combined = False
+                s.placeholder_built = False
                 self.sectors[sectorize(spos)] = s
-                self._sync_edges_and_rebuild(s)
+                if getattr(config, 'STRICT_TERRAIN_PIPELINE', False):
+                    s.needs_seam_refresh = True
+                else:
+                    self._sync_edges_and_rebuild(s)
         # A new/updated sector may unblock pending seam rebuilds.
         max_seams = getattr(config, 'MAX_SEAM_REBUILDS_PER_TICK', None)
         self._process_pending_seams(max_seams)

@@ -225,12 +225,20 @@ class Window(pyglet.window.Window):
         self.label = pyglet.text.Label('', font_name='Arial', font_size=18,
             x=10, y=self.height - 10, anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
-        self.entity_label = pyglet.text.Label('', font_name='Arial', font_size=14,
+        self.sector_label = pyglet.text.Label('', font_name='Arial', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - 4,
             anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
+        self.sector_debug_label = pyglet.text.Label('', font_name='Arial', font_size=14,
+            x=10, y=self.height - 10 - self.label.content_height - self.sector_label.content_height - 8,
+            anchor_x='left', anchor_y='top',
+            color=(0, 0, 0, 255))
+        self.entity_label = pyglet.text.Label('', font_name='Arial', font_size=14,
+            x=10, y=self.height - 10 - self.label.content_height - self.sector_label.content_height - self.sector_debug_label.content_height - 12,
+            anchor_x='left', anchor_y='top',
+            color=(0, 0, 0, 255))
         self.keybind_label = pyglet.text.Label('', font_name='Arial', font_size=14,
-            x=10, y=self.height - 10 - self.label.content_height - self.entity_label.content_height - 8,
+            x=10, y=self.height - 10 - self.label.content_height - self.sector_label.content_height - self.sector_debug_label.content_height - self.entity_label.content_height - 16,
             anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
         self._label_bg = shapes.Rectangle(0, 0, 1, 1, color=(255, 255, 255))
@@ -285,6 +293,31 @@ class Window(pyglet.window.Window):
         dx = math.cos(math.radians(x - 90)) * m
         dz = math.sin(math.radians(x - 90)) * m
         return (dx, dy, dz)
+
+    def _hud_text_for_clipboard(self):
+        lines = [
+            self.label.text,
+            self.sector_label.text,
+            self.sector_debug_label.text,
+        ]
+        return "\n".join(line for line in lines if line)
+
+    def _copy_hud_to_clipboard(self):
+        """Copy HUD text without external dependencies."""
+        text = self._hud_text_for_clipboard()
+        if not text:
+            return False
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.withdraw()
+            root.clipboard_clear()
+            root.clipboard_append(text)
+            root.update()
+            root.destroy()
+            return True
+        except Exception:
+            return False
 
     def _player_back_orient(self):
         """Return orientation for wall-attached blocks based on player facing."""
@@ -673,6 +706,10 @@ class Window(pyglet.window.Window):
             self._toggle_snake()
         elif symbol == key.V:
             self._toggle_dog()
+        elif symbol == key.F8:
+            copied = self._copy_hud_to_clipboard()
+            if not copied:
+                logutil.log("MAIN", "HUD clipboard copy failed", level="WARN")
 
     def _toggle_snake(self):
         self.snake_enabled = not self.snake_enabled
@@ -725,7 +762,9 @@ class Window(pyglet.window.Window):
         """
         # label
         self.label.y = height - 10
-        self.entity_label.y = self.label.y - self.label.content_height - 4
+        self.sector_label.y = self.label.y - self.label.content_height - 4
+        self.sector_debug_label.y = self.sector_label.y - self.sector_label.content_height - 4
+        self.entity_label.y = self.sector_debug_label.y - self.sector_debug_label.content_height - 4
         self.keybind_label.y = self.entity_label.y - self.entity_label.content_height - 4
         # reticle uses shader-based shapes instead of deprecated vertex_list
         self.reticle_batch = None
@@ -962,7 +1001,104 @@ class Window(pyglet.window.Window):
         else:
             void_text = 'N/A'
             mush_text = 'NA'
-        self.label.text = 'FPS(%.1f), pos(%.2f, %.2f, %.2f) rot(%.1f, %.1f) void %s mush %s' % (fps, x, y, z, rx, ry, void_text, mush_text)
+        self.label.text = 'FPS(%.1f), pos(%.2f, %.2f, %.2f) sector(%d, 0, %d) rot(%.1f, %.1f) void %s mush %s' % (
+            fps, x, y, z, sector[0], sector[2], rx, ry, void_text, mush_text
+        )
+        sector_state = []
+        sector_state.append(f"Sector({sector[0]}, 0, {sector[2]})")
+        sector_debug = []
+        s = self.model.sectors.get(sector)
+        if s is None:
+            sector_state.append("state=missing")
+            sector_debug.append("state=missing")
+        else:
+            light = 'Y' if s.light is not None else 'N'
+            mesh_ready = self.model._mesh_ready(s)
+            neighbors_missing = self.model._neighbors_missing(s)
+            needs_mesh = (s.vt_data is None and not s.mesh_built)
+            needs_light = self.model._needs_light(s)
+            if s.mesh_job_pending:
+                waiting = "mesh_job"
+            elif neighbors_missing:
+                waiting = "neighbors"
+            elif not s.seam_synced:
+                waiting = "seam"
+            elif not s.light_combined:
+                waiting = "light"
+            elif needs_mesh:
+                waiting = "mesh"
+            elif needs_light:
+                waiting = "light_recalc"
+            else:
+                waiting = "idle"
+
+            def _quad_count(entry):
+                if not entry or entry[0] <= 0:
+                    return 0
+                return int(entry[0] // 4)
+
+            def _float_count(entry):
+                if not entry or entry[0] <= 0:
+                    return 0
+                _, v, t, n, c = entry
+                return len(v) + len(t) + len(n) + len(c)
+
+            vt_info = "vt=N"
+            if s.vt_data is not None:
+                if isinstance(s.vt_data, dict):
+                    solid_entry = s.vt_data.get('solid')
+                    water_entry = s.vt_data.get('water')
+                else:
+                    solid_entry = s.vt_data
+                    water_entry = None
+                solid_quads = _quad_count(solid_entry)
+                water_quads = _quad_count(water_entry)
+                total_floats = _float_count(solid_entry) + _float_count(water_entry)
+                kb = (total_floats * 4) / 1024.0 if total_floats else 0.0
+                vt_info = f"vt=Y q={solid_quads}/{water_quads} kb={kb:.1f}"
+            else:
+                solid_quads = int(getattr(s, "vt_solid_quads", 0) or 0)
+                water_quads = int(getattr(s, "vt_water_quads", 0) or 0)
+                if solid_quads or water_quads:
+                    vt_info = f"vt=N q={solid_quads}/{water_quads}"
+
+            uploaded = "Y" if (s.vt or s.vt_water) else "N"
+            solid_verts = sum(getattr(vt, "count", 0) for vt in s.vt)
+            water_verts = sum(getattr(vt, "count", 0) for vt in s.vt_water)
+            upload_solid = f"{s.vt_upload_solid}/{s.vt_solid_quads}"
+            upload_water = f"{s.vt_upload_water}/{s.vt_water_quads}"
+            solid_tris_expected = int(s.vt_solid_quads * 2)
+            water_tris_expected = int(s.vt_water_quads * 2)
+            pending_vt = len(getattr(s, "pending_vt", []))
+            pending_vt_water = len(getattr(s, "pending_vt_water", []))
+            use_pending = "Y" if getattr(s, "vt_upload_use_pending", False) else "N"
+            upload_prepared = "Y" if s.vt_upload_prepared else "N"
+            clear_pending = "Y" if s.vt_clear_pending else "N"
+            token = getattr(s, "vt_upload_token", 0)
+            active_token = getattr(s, "vt_upload_active_token", None)
+            active_token_text = "None" if active_token is None else str(active_token)
+            dirty = "Y" if s.mesh_job_dirty else "N"
+            inflight = "Y" if s.edit_inflight else "N"
+
+            sector_state.append(
+                f"seam={'Y' if s.seam_synced else 'N'} light={light} "
+                f"combined={'Y' if s.light_combined else 'N'} "
+                f"mesh_ready={'Y' if mesh_ready else 'N'} "
+                f"pending={'Y' if s.mesh_job_pending else 'N'} "
+                f"built={'Y' if s.mesh_built else 'N'} "
+                f"uploaded={uploaded} vt_lists={len(s.vt)}/{len(s.vt_water)} "
+                f"verts={solid_verts}/{water_verts} "
+                f"upload={upload_solid}/{upload_water} "
+                f"{vt_info} wait={waiting}"
+            )
+            sector_debug.append(
+                f"tris={solid_verts}/{solid_tris_expected} water={water_verts}/{water_tris_expected} "
+                f"pending_vt={pending_vt}/{pending_vt_water} use_pending={use_pending} "
+                f"prep={upload_prepared} clear_pending={clear_pending} token={token}/{active_token_text} "
+                f"gen={s.mesh_gen} dirty={dirty} inflight={inflight}"
+            )
+        self.sector_label.text = " | ".join(sector_state)
+        self.sector_debug_label.text = " | ".join(sector_debug)
         entity_lines = []
         for entity_state in self.entities.values():
             if entity_state['type'] == 'player':
@@ -977,11 +1113,13 @@ class Window(pyglet.window.Window):
         else:
             entity_text = "Ent: none"
         
-        keybind_text = "Toggle: (N)ake, (B)Snail, (M)Seagull, (V)Dog"
+        keybind_text = "Toggle: (N)ake, (B)Snail, (M)Seagull, (V)Dog | (F8)Copy HUD"
 
         line_spacing = 4
+        self.sector_label.y = self.label.y - self.label.content_height - line_spacing
+        self.sector_debug_label.y = self.sector_label.y - self.sector_label.content_height - line_spacing
         self.entity_label.text = entity_text
-        self.entity_label.y = self.label.y - self.label.content_height - line_spacing
+        self.entity_label.y = self.sector_debug_label.y - self.sector_debug_label.content_height - line_spacing
         
         self.keybind_label.text = keybind_text
         self.keybind_label.y = self.entity_label.y - self.entity_label.content_height - line_spacing
@@ -991,7 +1129,13 @@ class Window(pyglet.window.Window):
         pad_y = 3
         top = self.label.y
         bottom = self.keybind_label.y - self.keybind_label.content_height
-        entity_width = max(self.label.content_width, self.entity_label.content_width, self.keybind_label.content_width)
+        entity_width = max(
+            self.label.content_width,
+            self.sector_label.content_width,
+            self.sector_debug_label.content_width,
+            self.entity_label.content_width,
+            self.keybind_label.content_width,
+        )
         bg_width = entity_width + pad_x * 2
         bg_height = (top - bottom) + pad_y * 2
         bg_x = self.label.x - pad_x
@@ -1002,6 +1146,8 @@ class Window(pyglet.window.Window):
         self._label_bg.height = bg_height
         self._label_bg.draw()
         self.label.draw()
+        self.sector_label.draw()
+        self.sector_debug_label.draw()
         self.entity_label.draw()
         self.keybind_label.draw()
 
