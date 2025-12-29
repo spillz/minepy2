@@ -229,56 +229,86 @@ class SnakeRenderer:
             ((0.28, 0.20, 0.30), (180, 40, 30)),
         ]
         self.segment_capacity = SnakeEntity.SEGMENT_COUNT
-        self._variant_buffers = []
-        self._active_meshes = []
-        for size, color in configs:
-            buffer = self._prepare_variant_buffer(size, color)
-            self._variant_buffers.append(buffer)
-            mesh = self.program.vertex_list(
-                buffer["vertex_count"],
-                gl.GL_TRIANGLES,
-                position=('f', buffer["base_positions"].ravel()),
-                tex_coords=('f', buffer["tex"].ravel()),
-                normal=('f', buffer["normals"].ravel()),
-                color=('f', buffer["colors"].ravel()),
-            )
-            self._active_meshes.append(mesh)
+        self._segment_sizes, self._segment_colors = self._build_segment_styles(configs)
+        self._buffer = self._prepare_segment_buffer(self._segment_sizes, self._segment_colors)
+        self._mesh = self.program.vertex_list(
+            self._buffer["vertex_count"],
+            gl.GL_TRIANGLES,
+            position=('f', self._buffer["positions"].ravel()),
+            tex_coords=('f', self._buffer["tex"].ravel()),
+            normal=('f', self._buffer["normals"].ravel()),
+            color=('f', self._buffer["colors"].ravel()),
+        )
 
-    def _build_mesh(self, size, color):
+    def _build_mesh(self, size):
         verts, normals, indices = get_cube_vertices(size)
         tri_verts = verts.reshape(-1, 3)[indices]
         tri_norms = normals.reshape(-1, 3)[indices]
         tri_tex = np.zeros((tri_verts.shape[0], 2), dtype='f4')
-        base_rgba = np.array([color[0], color[1], color[2], 1.0], dtype='f4')
-        tri_col = np.broadcast_to(base_rgba, (tri_verts.shape[0], 4))
-        return tri_verts, tri_norms, tri_tex, tri_col
+        return tri_verts, tri_norms, tri_tex
 
-    def _prepare_variant_buffer(self, size, color):
-        tri_verts, tri_norms, tri_tex, tri_col = self._build_mesh(size, color)
-        tri_count = tri_verts.shape[0]
-        repeats = self.segment_capacity
-        vertex_count = tri_count * repeats
-        base_positions = np.tile(tri_verts, (repeats, 1)).astype('f4')
-        normals = np.tile(tri_norms, (repeats, 1)).astype('f4')
-        tex = np.tile(tri_tex, (repeats, 1)).astype('f4')
-        colors = np.tile(tri_col, (repeats, 1)).astype('f4')
+    def _build_segment_styles(self, configs):
+        variant_count = len(configs)
+        sizes = np.zeros((self.segment_capacity, 3), dtype='f4')
+        colors = np.zeros((self.segment_capacity, 3), dtype='f4')
+        head_len = max(0, self.segment_capacity - self.tail_length)
+        for idx in range(self.segment_capacity):
+            if variant_count <= 1:
+                variant_idx = 0
+            elif idx < head_len:
+                variant_idx = idx % (variant_count - 1)
+            else:
+                variant_idx = variant_count - 1
+            size, color = configs[variant_idx]
+            sizes[idx] = size
+            colors[idx] = color
+        return sizes, colors
+
+    def _prepare_segment_buffer(self, sizes, colors):
+        mesh_cache = {}
+        base_positions = []
+        normals = []
+        tex = []
+        vertex_colors = []
+        for idx in range(self.segment_capacity):
+            size = tuple(sizes[idx].tolist())
+            color = colors[idx]
+            if size not in mesh_cache:
+                mesh_cache[size] = self._build_mesh(size)
+            tri_verts, tri_norms, tri_tex = mesh_cache[size]
+            verts = tri_verts.copy()
+            verts[:, 1] += size[1] / 2.0
+            base_positions.append(verts)
+            normals.append(tri_norms)
+            tex.append(tri_tex)
+            base_rgba = np.array([color[0], color[1], color[2], 1.0], dtype='f4')
+            tri_col = np.broadcast_to(base_rgba, (tri_verts.shape[0], 4))
+            vertex_colors.append(tri_col)
+
+        base_positions = np.vstack(base_positions).astype('f4')
+        normals = np.vstack(normals).astype('f4')
+        tex = np.vstack(tex).astype('f4')
+        colors = np.vstack(vertex_colors).astype('f4')
+        tri_count = base_positions.shape[0] // self.segment_capacity
+        segment_index = np.repeat(np.arange(self.segment_capacity), tri_count).astype(np.int32)
+        positions = base_positions.copy()
+        target_trans = np.full((self.segment_capacity, 3), 1e6, dtype='f4')
         return {
             "tri_count": tri_count,
-            "vertex_count": vertex_count,
+            "vertex_count": base_positions.shape[0],
             "base_positions": base_positions,
+            "positions": positions,
             "normals": normals,
             "tex": tex,
             "colors": colors,
-            "size": size, # Add size here
+            "segment_index": segment_index,
+            "target_trans": target_trans,
         }
 
-    def _update_variant_mesh(self, idx, translations):
-        mesh = self._active_meshes[idx]
-        buffer = self._variant_buffers[idx]
-        tri_count = buffer["tri_count"]
-        vertex_count = buffer["vertex_count"]
-        target_trans = np.full((self.segment_capacity, 3), 1e6, dtype='f4')
-
+    def _update_mesh(self, translations):
+        buffer = self._buffer
+        target_trans = buffer["target_trans"]
+        target_trans[:] = 1e6
         if translations is not None and len(translations):
             usable = min(len(translations), self.segment_capacity)
             target_trans[:usable] = translations[:usable]
@@ -288,14 +318,8 @@ class SnakeRenderer:
                 else:
                     target_trans[usable:] = np.array([1e6, 1e6, 1e6], dtype='f4')
 
-        positions = buffer["base_positions"].copy()
-        initial_segment_y_offset = self._variant_buffers[idx]["size"][1] / 2.0 # Get segment height from buffer data
-
-        offsets = np.repeat(target_trans, tri_count, axis=0)
-        offsets[:, 1] += initial_segment_y_offset # Add the vertical offset to the y-component
-
-        positions += offsets[:vertex_count]
-        mesh.position[:] = positions.ravel()
+        buffer["positions"][:] = buffer["base_positions"] + target_trans[buffer["segment_index"]]
+        self._mesh.position[:] = buffer["positions"].ravel()
 
     def draw(self, entity_state):
         positions = entity_state.get("segment_positions") or []
@@ -312,35 +336,9 @@ class SnakeRenderer:
         self.head_renderer.draw(head_state)
 
         body_positions = np.array(positions[1:], dtype='f4')
-        variant_count = len(self._variant_buffers)
-        if variant_count == 0:
-            return
-        partitions = []
-        if body_positions.size > 0:
-            total = len(body_positions)
-            tail_start = max(0, total - self.tail_length)
-            if variant_count == 1:
-                partitions = [body_positions]
-            else:
-                variant_indices = np.full(total, variant_count - 1, dtype=int)
-                if tail_start > 0:
-                    pattern_len = variant_count - 1
-                    variant_indices[:tail_start] = np.arange(tail_start) % pattern_len
-                partitions = [
-                    body_positions[variant_indices == idx]
-                    for idx in range(variant_count)
-                ]
-        else:
-            partitions = [[] for _ in range(variant_count)]
-
         self.program["u_model"] = Mat4()
-        for idx, translations in enumerate(partitions):
-            if idx >= len(self._active_meshes):
-                continue
-            self._update_variant_mesh(idx, translations if isinstance(translations, np.ndarray) else np.array(translations, dtype='f4'))
-            mesh = self._active_meshes[idx]
-            if mesh:
-                mesh.draw(gl.GL_TRIANGLES)
+        self._update_mesh(body_positions)
+        self._mesh.draw(gl.GL_TRIANGLES)
 
     def update(self, dt):
         pass

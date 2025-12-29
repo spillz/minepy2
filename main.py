@@ -225,20 +225,24 @@ class Window(pyglet.window.Window):
         self.label = pyglet.text.Label('', font_name='Arial', font_size=18,
             x=10, y=self.height - 10, anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
-        self.sector_label = pyglet.text.Label('', font_name='Arial', font_size=14,
+        self.hud_info_label = pyglet.text.Label('', font_name='Arial', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - 4,
             anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
+        self.sector_label = pyglet.text.Label('', font_name='Arial', font_size=14,
+            x=10, y=self.height - 10 - self.label.content_height - self.hud_info_label.content_height - 8,
+            anchor_x='left', anchor_y='top',
+            color=(0, 0, 0, 255))
         self.sector_debug_label = pyglet.text.Label('', font_name='Arial', font_size=14,
-            x=10, y=self.height - 10 - self.label.content_height - self.sector_label.content_height - 8,
+            x=10, y=self.height - 10 - self.label.content_height - self.hud_info_label.content_height - self.sector_label.content_height - 12,
             anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
         self.entity_label = pyglet.text.Label('', font_name='Arial', font_size=14,
-            x=10, y=self.height - 10 - self.label.content_height - self.sector_label.content_height - self.sector_debug_label.content_height - 12,
+            x=10, y=self.height - 10 - self.label.content_height - self.hud_info_label.content_height - self.sector_label.content_height - self.sector_debug_label.content_height - 16,
             anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
         self.keybind_label = pyglet.text.Label('', font_name='Arial', font_size=14,
-            x=10, y=self.height - 10 - self.label.content_height - self.sector_label.content_height - self.sector_debug_label.content_height - self.entity_label.content_height - 16,
+            x=10, y=self.height - 10 - self.label.content_height - self.hud_info_label.content_height - self.sector_label.content_height - self.sector_debug_label.content_height - self.entity_label.content_height - 20,
             anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
         self._label_bg = shapes.Rectangle(0, 0, 1, 1, color=(255, 255, 255))
@@ -250,6 +254,44 @@ class Window(pyglet.window.Window):
         self._hud_probe_sector = None
         self._hud_probe_void = 'N/A'
         self._hud_probe_mush = 'NA'
+        self.hud_visible = True
+        self.vsync_enabled = True
+        self._hud_stats_start = time.perf_counter()
+        self._hud_stats_frames = 0
+        self._hud_stats_dt_sum = 0.0
+        self._hud_stats_dt_min = None
+        self._hud_stats_dt_max = None
+        self._hud_stats_draw_sum = 0.0
+        self._hud_stats_draw_min = None
+        self._hud_stats_draw_max = None
+        self._hud_stats_update_sum = 0.0
+        self._hud_stats_update_min = None
+        self._hud_stats_update_max = None
+        self._hud_stats_sector_sum = 0.0
+        self._hud_stats_sector_min = None
+        self._hud_stats_sector_max = None
+        self._hud_stats_update_sectors_sum = 0.0
+        self._hud_stats_update_sectors_min = None
+        self._hud_stats_update_sectors_max = None
+        self._hud_stats_mesh_jobs_sum = 0.0
+        self._hud_stats_mesh_jobs_min = None
+        self._hud_stats_mesh_jobs_max = None
+        self._hud_stats_physics_sum = 0.0
+        self._hud_stats_physics_min = None
+        self._hud_stats_physics_max = None
+        self._hud_stats_anim_sum = 0.0
+        self._hud_stats_anim_min = None
+        self._hud_stats_anim_max = None
+        self._hud_stats_slow_count = 0
+        self._hud_stats_slow_max = 0.0
+        self._hud_stats_detail_text = ""
+        self._last_sector_ms = 0.0
+        self._last_update_sectors_ms = 0.0
+        self._last_mesh_jobs_ms = 0.0
+        self._last_physics_ms = 0.0
+        self._last_anim_ms = 0.0
+        self._last_update_total_ms = 0.0
+        self._hud_stats_text = ""
 
         # Target frame pacing and local FPS tracking (not dependent on pyglet internals).
         desired_fps = getattr(config, 'TARGET_FPS', None)
@@ -297,6 +339,7 @@ class Window(pyglet.window.Window):
     def _hud_text_for_clipboard(self):
         lines = [
             self.label.text,
+            self.hud_info_label.text,
             self.sector_label.text,
             self.sector_debug_label.text,
         ]
@@ -417,7 +460,8 @@ class Window(pyglet.window.Window):
         self.model.process_pending_mesh_jobs(frustum_circle=frustum_circle, allow_submit=True)
         mesh_jobs_ms = (time.perf_counter() - t2) * 1000.0
         sector_ms = (time.perf_counter() - t0) * 1000.0
-        m = 20
+        m = getattr(config, 'PHYSICS_SUBSTEPS_MAX', 2)
+        m = max(1, int(m))
         dt = min(dt, 0.2)
         entity_ms_total = 0.0
         entity_updates_total = 0
@@ -439,12 +483,30 @@ class Window(pyglet.window.Window):
             entity_renderer.update(dt)
         anim_ms = (time.perf_counter() - t0) * 1000.0
         total_ms = (time.perf_counter() - update_start) * 1000.0
+        self._last_sector_ms = sector_ms
+        self._last_update_sectors_ms = update_sectors_ms
+        self._last_mesh_jobs_ms = mesh_jobs_ms
+        self._last_physics_ms = physics_ms
+        self._last_anim_ms = anim_ms
+        self._last_update_total_ms = total_ms
         logutil.log(
             "MAINLOOP",
             f"update sector_ms={sector_ms:.2f} update_sectors_ms={update_sectors_ms:.2f} "
             f"mesh_jobs_ms={mesh_jobs_ms:.2f} physics_ms={physics_ms:.2f} anim_ms={anim_ms:.2f} "
             f"total_ms={total_ms:.2f}",
         )
+        slow_thresh = getattr(config, "UPDATE_SLOW_LOG_MS", None)
+        if slow_thresh is not None and total_ms >= slow_thresh:
+            self._hud_stats_slow_count += 1
+            if total_ms > self._hud_stats_slow_max:
+                self._hud_stats_slow_max = total_ms
+            logutil.log(
+                "MAINLOOP",
+                f"update_slow total_ms={total_ms:.2f} sector_ms={sector_ms:.2f} "
+                f"update_sectors_ms={update_sectors_ms:.2f} mesh_jobs_ms={mesh_jobs_ms:.2f} "
+                f"physics_ms={physics_ms:.2f} anim_ms={anim_ms:.2f} "
+                f"entities={enabled_entities} updates={entity_updates_total} substeps={substeps}",
+            )
         logutil.log(
             "MAINLOOP",
             f"entities enabled={enabled_entities} updates={entity_updates_total} substeps={substeps} ms={entity_ms_total:.2f}",
@@ -686,6 +748,14 @@ class Window(pyglet.window.Window):
                 self.camera_mode = 'third_person'
             else:
                 self.camera_mode = 'first_person'
+        elif symbol == key.F1:
+            self.hud_visible = not self.hud_visible
+        elif symbol == key.F2:
+            self.vsync_enabled = not self.vsync_enabled
+            try:
+                self.set_vsync(self.vsync_enabled)
+            except Exception:
+                pass
         elif symbol == key.B:
             self._toggle_snail()
         elif symbol == key.M:
@@ -762,7 +832,8 @@ class Window(pyglet.window.Window):
         """
         # label
         self.label.y = height - 10
-        self.sector_label.y = self.label.y - self.label.content_height - 4
+        self.hud_info_label.y = self.label.y - self.label.content_height - 4
+        self.sector_label.y = self.hud_info_label.y - self.hud_info_label.content_height - 4
         self.sector_debug_label.y = self.sector_label.y - self.sector_label.content_height - 4
         self.entity_label.y = self.sector_debug_label.y - self.sector_debug_label.content_height - 4
         self.keybind_label.y = self.entity_label.y - self.entity_label.content_height - 4
@@ -963,12 +1034,114 @@ class Window(pyglet.window.Window):
             f"water_ms={water_ms:.2f} overlay_ms={overlay_ms:.2f} upload_ms={upload_ms:.2f}",
         )
         self.last_draw_ms = (time.perf_counter()-frame_start)*1000.0
+        dt_ms = dt * 1000.0
+        self._hud_stats_frames += 1
+        self._hud_stats_dt_sum += dt_ms
+        self._hud_stats_draw_sum += self.last_draw_ms
+        self._hud_stats_update_sum += self.last_update_ms
+        sector_ms = getattr(self, "_last_sector_ms", 0.0)
+        update_sectors_ms = getattr(self, "_last_update_sectors_ms", 0.0)
+        mesh_jobs_ms = getattr(self, "_last_mesh_jobs_ms", 0.0)
+        physics_ms = getattr(self, "_last_physics_ms", 0.0)
+        anim_ms = getattr(self, "_last_anim_ms", 0.0)
+        update_total_ms = getattr(self, "_last_update_total_ms", 0.0)
+        self._hud_stats_sector_sum += sector_ms
+        self._hud_stats_update_sectors_sum += update_sectors_ms
+        self._hud_stats_mesh_jobs_sum += mesh_jobs_ms
+        self._hud_stats_physics_sum += physics_ms
+        self._hud_stats_anim_sum += anim_ms
+        if self._hud_stats_sector_min is None or sector_ms < self._hud_stats_sector_min:
+            self._hud_stats_sector_min = sector_ms
+        if self._hud_stats_sector_max is None or sector_ms > self._hud_stats_sector_max:
+            self._hud_stats_sector_max = sector_ms
+        if self._hud_stats_update_sectors_min is None or update_sectors_ms < self._hud_stats_update_sectors_min:
+            self._hud_stats_update_sectors_min = update_sectors_ms
+        if self._hud_stats_update_sectors_max is None or update_sectors_ms > self._hud_stats_update_sectors_max:
+            self._hud_stats_update_sectors_max = update_sectors_ms
+        if self._hud_stats_mesh_jobs_min is None or mesh_jobs_ms < self._hud_stats_mesh_jobs_min:
+            self._hud_stats_mesh_jobs_min = mesh_jobs_ms
+        if self._hud_stats_mesh_jobs_max is None or mesh_jobs_ms > self._hud_stats_mesh_jobs_max:
+            self._hud_stats_mesh_jobs_max = mesh_jobs_ms
+        if self._hud_stats_physics_min is None or physics_ms < self._hud_stats_physics_min:
+            self._hud_stats_physics_min = physics_ms
+        if self._hud_stats_physics_max is None or physics_ms > self._hud_stats_physics_max:
+            self._hud_stats_physics_max = physics_ms
+        if self._hud_stats_anim_min is None or anim_ms < self._hud_stats_anim_min:
+            self._hud_stats_anim_min = anim_ms
+        if self._hud_stats_anim_max is None or anim_ms > self._hud_stats_anim_max:
+            self._hud_stats_anim_max = anim_ms
+        if self._hud_stats_dt_min is None or dt_ms < self._hud_stats_dt_min:
+            self._hud_stats_dt_min = dt_ms
+        if self._hud_stats_dt_max is None or dt_ms > self._hud_stats_dt_max:
+            self._hud_stats_dt_max = dt_ms
+        if self._hud_stats_draw_min is None or self.last_draw_ms < self._hud_stats_draw_min:
+            self._hud_stats_draw_min = self.last_draw_ms
+        if self._hud_stats_draw_max is None or self.last_draw_ms > self._hud_stats_draw_max:
+            self._hud_stats_draw_max = self.last_draw_ms
+        if self._hud_stats_update_min is None or self.last_update_ms < self._hud_stats_update_min:
+            self._hud_stats_update_min = self.last_update_ms
+        if self._hud_stats_update_max is None or self.last_update_ms > self._hud_stats_update_max:
+            self._hud_stats_update_max = self.last_update_ms
+        elapsed = time.perf_counter() - self._hud_stats_start
+        if elapsed >= 1.0:
+            frames = max(1, self._hud_stats_frames)
+            avg_dt = self._hud_stats_dt_sum / frames
+            avg_draw = self._hud_stats_draw_sum / frames
+            avg_update = self._hud_stats_update_sum / frames
+            self._hud_stats_text = (
+                f"dt avg={avg_dt:.2f} min={self._hud_stats_dt_min:.2f} max={self._hud_stats_dt_max:.2f} | "
+                f"draw avg={avg_draw:.2f} min={self._hud_stats_draw_min:.2f} max={self._hud_stats_draw_max:.2f} | "
+                f"update avg={avg_update:.2f} min={self._hud_stats_update_min:.2f} max={self._hud_stats_update_max:.2f} | "
+                f"slow={self._hud_stats_slow_count} max={self._hud_stats_slow_max:.2f}"
+            )
+            avg_sector = self._hud_stats_sector_sum / frames
+            avg_update_sectors = self._hud_stats_update_sectors_sum / frames
+            avg_mesh_jobs = self._hud_stats_mesh_jobs_sum / frames
+            avg_physics = self._hud_stats_physics_sum / frames
+            avg_anim = self._hud_stats_anim_sum / frames
+            self._hud_stats_detail_text = (
+                f"sector avg={avg_sector:.2f} min={self._hud_stats_sector_min:.2f} max={self._hud_stats_sector_max:.2f} | "
+                f"update_sectors avg={avg_update_sectors:.2f} min={self._hud_stats_update_sectors_min:.2f} max={self._hud_stats_update_sectors_max:.2f} | "
+                f"mesh_jobs avg={avg_mesh_jobs:.2f} min={self._hud_stats_mesh_jobs_min:.2f} max={self._hud_stats_mesh_jobs_max:.2f} | "
+                f"physics avg={avg_physics:.2f} min={self._hud_stats_physics_min:.2f} max={self._hud_stats_physics_max:.2f} | "
+                f"anim avg={avg_anim:.2f} min={self._hud_stats_anim_min:.2f} max={self._hud_stats_anim_max:.2f}"
+            )
+            self._hud_stats_start = time.perf_counter()
+            self._hud_stats_frames = 0
+            self._hud_stats_dt_sum = 0.0
+            self._hud_stats_dt_min = None
+            self._hud_stats_dt_max = None
+            self._hud_stats_draw_sum = 0.0
+            self._hud_stats_draw_min = None
+            self._hud_stats_draw_max = None
+            self._hud_stats_update_sum = 0.0
+            self._hud_stats_update_min = None
+            self._hud_stats_update_max = None
+            self._hud_stats_sector_sum = 0.0
+            self._hud_stats_sector_min = None
+            self._hud_stats_sector_max = None
+            self._hud_stats_update_sectors_sum = 0.0
+            self._hud_stats_update_sectors_min = None
+            self._hud_stats_update_sectors_max = None
+            self._hud_stats_mesh_jobs_sum = 0.0
+            self._hud_stats_mesh_jobs_min = None
+            self._hud_stats_mesh_jobs_max = None
+            self._hud_stats_physics_sum = 0.0
+            self._hud_stats_physics_min = None
+            self._hud_stats_physics_max = None
+            self._hud_stats_anim_sum = 0.0
+            self._hud_stats_anim_min = None
+            self._hud_stats_anim_max = None
+            self._hud_stats_slow_count = 0
+            self._hud_stats_slow_max = 0.0
         logutil.log("FRAME", f"end ms={self.last_draw_ms:.2f}")
 
     def draw_label(self):
         """ Draw the label in the top left of the screen.
 
         """
+        if not self.hud_visible:
+            return
         x, y, z = self.position
         rx, ry = self.rotation
         fps = self._current_fps()
@@ -1004,6 +1177,9 @@ class Window(pyglet.window.Window):
         self.label.text = 'FPS(%.1f), pos(%.2f, %.2f, %.2f) sector(%d, 0, %d) rot(%.1f, %.1f) void %s mush %s' % (
             fps, x, y, z, sector[0], sector[2], rx, ry, void_text, mush_text
         )
+        self.hud_info_label.text = self._hud_stats_text
+        if getattr(self, "_hud_stats_detail_text", ""):
+            self.hud_info_label.text = f"{self.hud_info_label.text}\n{self._hud_stats_detail_text}"
         sector_state = []
         sector_state.append(f"Sector({sector[0]}, 0, {sector[2]})")
         sector_debug = []
@@ -1113,10 +1289,14 @@ class Window(pyglet.window.Window):
         else:
             entity_text = "Ent: none"
         
-        keybind_text = "Toggle: (N)ake, (B)Snail, (M)Seagull, (V)Dog | (F8)Copy HUD"
+        keybind_text = (
+            "Toggles: (F1)HUD (F2)Vsync (F5)Camera (F8)Copy | "
+            "(N)ake (B)Snail (M)Seagull (V)Dog"
+        )
 
         line_spacing = 4
-        self.sector_label.y = self.label.y - self.label.content_height - line_spacing
+        self.hud_info_label.y = self.label.y - self.label.content_height - line_spacing
+        self.sector_label.y = self.hud_info_label.y - self.hud_info_label.content_height - line_spacing
         self.sector_debug_label.y = self.sector_label.y - self.sector_label.content_height - line_spacing
         self.entity_label.text = entity_text
         self.entity_label.y = self.sector_debug_label.y - self.sector_debug_label.content_height - line_spacing
@@ -1131,6 +1311,7 @@ class Window(pyglet.window.Window):
         bottom = self.keybind_label.y - self.keybind_label.content_height
         entity_width = max(
             self.label.content_width,
+            self.hud_info_label.content_width,
             self.sector_label.content_width,
             self.sector_debug_label.content_width,
             self.entity_label.content_width,
@@ -1146,6 +1327,7 @@ class Window(pyglet.window.Window):
         self._label_bg.height = bg_height
         self._label_bg.draw()
         self.label.draw()
+        self.hud_info_label.draw()
         self.sector_label.draw()
         self.sector_debug_label.draw()
         self.entity_label.draw()
