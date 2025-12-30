@@ -405,39 +405,6 @@ BLOCK_NORMALS = numpy.array(FACES)
 BLOCK_COLORS = numpy.array([white] + [x.colors for x in BLOCKS])
 BLOCK_TEXTURES = numpy.array([tex_coords((0,0),(0,0),(0,0))] + [tex_coords(*x.coords) for x in BLOCKS],dtype = numpy.float32)/4
 BLOCK_VERTICES = numpy.array([cb_v]+[x.vertices for x in BLOCKS])
-def _scale_partial_uvs(block_textures, block_vertices):
-    uv = block_textures.copy()
-    uv_view = uv.reshape(len(BLOCKS) + 1, 7, 4, 2)
-    verts = block_vertices.reshape(len(BLOCKS) + 1, 6, 4, 3)
-    edge_u = numpy.linalg.norm(verts[:, :, 1, :] - verts[:, :, 0, :], axis=2)
-    edge_v = numpy.linalg.norm(verts[:, :, 3, :] - verts[:, :, 0, :], axis=2)
-    frac_u = numpy.clip(edge_u / 2.0, 0.0, 1.0)
-    frac_v = numpy.clip(edge_v / 2.0, 0.0, 1.0)
-
-    u0 = uv_view[:, :6, 0, 0]
-    u1 = uv_view[:, :6, 1, 0]
-    v0 = uv_view[:, :6, 0, 1]
-    v2 = uv_view[:, :6, 2, 1]
-    center_u = (u0 + u1) * 0.5
-    center_v = (v0 + v2) * 0.5
-    half_u = (u1 - u0) * 0.5 * frac_u
-    half_v = (v2 - v0) * 0.5 * frac_v
-
-    u_min = center_u - half_u
-    u_max = center_u + half_u
-    v_min = center_v - half_v
-    v_max = center_v + half_v
-    uv_view[:, :6, 0, 0] = u_min
-    uv_view[:, :6, 3, 0] = u_min
-    uv_view[:, :6, 1, 0] = u_max
-    uv_view[:, :6, 2, 0] = u_max
-    uv_view[:, :6, 0, 1] = v_min
-    uv_view[:, :6, 1, 1] = v_min
-    uv_view[:, :6, 2, 1] = v_max
-    uv_view[:, :6, 3, 1] = v_max
-    return uv
-
-BLOCK_TEXTURES = _scale_partial_uvs(BLOCK_TEXTURES, BLOCK_VERTICES)
 BLOCK_SOLID = numpy.array([False]+[x.solid for x in BLOCKS], dtype = numpy.uint8)
 BLOCK_OCCLUDES = numpy.array([False]+[getattr(x,'occludes', True) for x in BLOCKS], dtype = numpy.uint8)
 BLOCK_OCCLUDES_SAME = numpy.array([False]+[getattr(x,'occludes_same', False) for x in BLOCKS], dtype = numpy.uint8)

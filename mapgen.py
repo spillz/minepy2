@@ -13,11 +13,13 @@ import logutil
 STONE = BLOCK_ID['Stone']
 SAND = BLOCK_ID['Sand']
 GRASS = BLOCK_ID['Grass']
+DIRT = BLOCK_ID['Dirt']
 WOOD = BLOCK_ID['Wood']
 LEAVES = BLOCK_ID['Leaves']
 PLANK = BLOCK_ID['Plank']
 BRICK = BLOCK_ID['Brick']
 COBBLE = BLOCK_ID['Cobblestone']
+BETTERSTONE = BLOCK_ID['BetterStone']
 IRON_ORE = BLOCK_ID['Iron Ore']
 GOLD_ORE = BLOCK_ID['Gold Ore']
 COAL_ORE = BLOCK_ID['Coal Ore']
@@ -135,6 +137,18 @@ def generate_sector(position, sector, world):
         b[y] = b[y]*(1 - thresh) + SAND * thresh
     return b.swapaxes(0,1).swapaxes(0,2)
 
+# -------- Experimental road generation helpers -----------
+
+import numpy as np
+import math
+
+ROAD_BLOCK = COBBLE
+HIWAY_BLOCK = BETTERSTONE
+TRAIL_BLOCK = DIRT
+TRAIL_SUPPORT_BLOCK = PLANK
+
+
+
 
 # -------- Experimental biome-based generator (keeps the legacy generator intact) --------
 
@@ -186,7 +200,7 @@ class BiomeGenerator:
             scale=1.0, offset=0.0)
         # Macro feature controls.
         self.enable_rivers = getattr(config, 'ENABLE_RIVER_NETWORKS', False)
-        self.enable_roads = getattr(config, 'ENABLE_ROAD_NETWORKS', False)
+        self.enable_roads = getattr(config, 'ENABLE_ROAD_NETWORKS', True)
         self.river_spacing = float(getattr(config, 'RIVER_NETWORK_SPACING', 320))
         self.road_spacing = float(getattr(config, 'ROAD_NETWORK_SPACING', 220))
         self.road_grade_limit = float(getattr(config, 'ROAD_MAX_GRADE', 1.25))
@@ -446,7 +460,7 @@ class BiomeGenerator:
             return None
         sub_xs = xs[ix0:ix1 + 1]
         sub_zs = zs[iz0:iz1 + 1]
-        grid_x, grid_z = numpy.meshgrid(sub_xs, sub_zs, indexing='ij')
+        grid_x, grid_z = numpy.meshgrid(sub_xs, sub_zs, indexing='xy')
         dx = grid_x - ax
         dz = grid_z - az
         t = ((dx * seg_dx) + (dz * seg_dz)) / seg_len2
@@ -482,63 +496,568 @@ class BiomeGenerator:
                     paths.append(trimmed)
         return paths
 
-    def _road_cell_seed(self, gx, gz):
-        """
-        Deterministic jittered site position for Voronoi-style roads.
-        gx, gz are integer grid cell coordinates in 'road space'.
 
-        We use ROAD_NETWORK_SPACING as the base cell size, and jitter the
-        site inside each cell using simplex noise so it is globally consistent.
+    def _transport_plans_vectorized(self, position, elevation):
         """
-        spacing = self.road_spacing  # ROAD_NETWORK_SPACING from config
-        base_x = gx * spacing + 0.5 * spacing
-        base_z = gz * spacing + 0.5 * spacing
+        Returns:
+        rural_plan: dict or None
+        trail_plan: dict or None
+        """
+        rural = self._compute_rural_road_plan_vec(position, elevation)
+        trail = self._compute_trail_plan_vec(position, elevation, rural_mask=(None if rural is None else rural["mask"]))
 
-        # Use the existing road_vec_u / road_vec_v as deterministic jitter.
-        # Scale the noise by ~40% of spacing so sites don't leave their cell.
+        # DEBUG: plan presence + density
+        sx, sz = elevation.shape
+        if rural is None:
+            rural_n = 0
+        else:
+            rural_n = int(np.count_nonzero(rural["mask"]))
+        if trail is None:
+            trail_n = 0
+        else:
+            trail_n = int(np.count_nonzero(trail["mask"]))
+
+        logutil.log(
+            "MAPGEN_TRANSPORT",
+            f"transport plans sector={position} rural={rural is not None} rural_cells={rural_n}/{sx*sz} "
+            f"trail={trail is not None} trail_cells={trail_n}/{sx*sz}",
+            level="DEBUG",
+        )
+
+        return rural, trail
+
+    # ---------------------------------------------------------------------
+    # 1) Vectorized Voronoi query (two nearest distances + the two nearest site positions)
+    # ---------------------------------------------------------------------
+    def _hash2_u32(self, x: np.ndarray, z: np.ndarray, seed: int) -> np.ndarray:
+        # x,z int32 arrays -> uint32 hash
+        h = (x.astype(np.uint32) * np.uint32(0x8da6b343)) ^ (z.astype(np.uint32) * np.uint32(0xd8163841)) ^ np.uint32(seed)
+        h ^= (h >> np.uint32(16))
+        h *= np.uint32(0x7feb352d)
+        h ^= (h >> np.uint32(15))
+        h *= np.uint32(0x846ca68b)
+        h ^= (h >> np.uint32(16))
+        return h
+
+    def _hash_to_unit_float(self, h: np.ndarray) -> np.ndarray:
+        # uint32 -> float64 in [0,1)
+        return (h.astype(np.float64) / 4294967296.0)
+
+    def _road_voronoi_two_sites_vec(self, wx_grid, wz_grid, spacing):
+        sx, sz = wx_grid.shape
+
+        cx = np.floor(wx_grid / spacing).astype(np.int32)
+        cz = np.floor(wz_grid / spacing).astype(np.int32)
+
+        off = np.array([-1, 0, 1], dtype=np.int32)
+        ox, oz = np.meshgrid(off, off, indexing="xy")  # (3,3)
+
+        gx = cx[None, None, :, :] + ox[:, :, None, None]  # (3,3,sx,sz)
+        gz = cz[None, None, :, :] + oz[:, :, None, None]
+
+        gx_flat = gx.reshape(-1).astype(np.int32)
+        gz_flat = gz.reshape(-1).astype(np.int32)
+
+        base_x = gx_flat.astype(np.float64) * spacing + 0.5 * spacing
+        base_z = gz_flat.astype(np.float64) * spacing + 0.5 * spacing
+
         jitter_scale = 0.4 * spacing
-        # Low-frequency coordinates so jitter is stable across the world.
-        jx = self.road_vec_u.noise(
-            numpy.array([[gx * 0.37, gz * 0.41]], dtype=float)
-        )[0] * jitter_scale
-        jz = self.road_vec_v.noise(
-            numpy.array([[gx * 0.29, gz * 0.53]], dtype=float)
-        )[0] * jitter_scale
+        h1 = self._hash2_u32(gx_flat, gz_flat, seed=12345)
+        h2 = self._hash2_u32(gx_flat, gz_flat, seed=67890)
 
-        return base_x + jx, base_z + jz
+        u = self._hash_to_unit_float(h1) - 0.5
+        v = self._hash_to_unit_float(h2) - 0.5
 
-    def _road_voronoi_distances(self, wx, wz):
+        sx_flat = base_x + u * jitter_scale
+        sz_flat = base_z + v * jitter_scale
+
+        sx_33 = sx_flat.reshape(3, 3, sx, sz)
+        sz_33 = sz_flat.reshape(3, 3, sx, sz)
+        sx9 = sx_33.reshape(9, sx, sz)
+        sz9 = sz_33.reshape(9, sx, sz)
+
+        # ALSO reshape gx/gz to match the 9-candidate layout
+        gx9 = gx.reshape(3, 3, sx, sz).reshape(9, sx, sz)
+        gz9 = gz.reshape(3, 3, sx, sz).reshape(9, sx, sz)
+
+        dx = wx_grid[None, :, :] - sx9
+        dz = wz_grid[None, :, :] - sz9
+        dist2 = dx * dx + dz * dz
+
+        idx = np.argsort(dist2, axis=0)
+        i0 = idx[0]
+        i1 = idx[1]
+
+        d0 = np.take_along_axis(dist2, i0[None, :, :], axis=0)[0]
+        d1 = np.take_along_axis(dist2, i1[None, :, :], axis=0)[0]
+
+        s1x = np.take_along_axis(sx9, i0[None, :, :], axis=0)[0]
+        s1z = np.take_along_axis(sz9, i0[None, :, :], axis=0)[0]
+        s2x = np.take_along_axis(sx9, i1[None, :, :], axis=0)[0]
+        s2z = np.take_along_axis(sz9, i1[None, :, :], axis=0)[0]
+
+        # NEW: pick the nearest site's integer cell coords (stable globally)
+        g1x = np.take_along_axis(gx9, i0[None, :, :], axis=0)[0]
+        g1z = np.take_along_axis(gz9, i0[None, :, :], axis=0)[0]
+
+        # NEW: stable site id (uint32) to compare across neighbors/chunks
+        site_id0 = self._hash2_u32(g1x.astype(np.int32), g1z.astype(np.int32), seed=424242)
+
+        return np.sqrt(d0), np.sqrt(d1), s1x, s1z, s2x, s2z, site_id0
+
+    # ---------------------------------------------------------------------
+    # 2) Rural road planning (vectorized)
+    #    - sparse network
+    #    - low grade (local slope check)
+    #    - prefers stable elevation along tangent (direction-quantized smoothing)
+    #    - shallow bridging and tunneling classification
+    # ---------------------------------------------------------------------
+
+    def _compute_rural_road_plan_vec(self, position, elevation):
         """
-        Compute the distances to the two nearest Voronoi sites in the
-        jittered road grid near world position (wx, wz).
-
-        Returns (d1, d2) with d1 <= d2.
+        Returns dict or None:
+        {
+            "mask": bool[sx,sz],
+            "y": int16[sx,sz]   target road deck height,
+            "clearance": int,
+            "pillar_cap": int,
+        }
         """
-        spacing = self.road_spacing
-        # Which cell are we in?
-        cx = int(math.floor(wx / spacing))
-        cz = int(math.floor(wz / spacing))
+        xs, zs = self._world_axes(position)
+        sx = len(xs)
+        sz = len(zs)
 
-        best1 = 1e30  # nearest squared distance
-        best2 = 1e30  # second-nearest squared distance
+        # World coord grids (sx,sz)
+        wx, wz = np.meshgrid(np.array(xs, dtype=np.float64),
+                            np.array(zs, dtype=np.float64), indexing="xy")
 
-        # Only need a 3x3 neighborhood of cells to find nearest 2 sites.
-        for gx in range(cx - 1, cx + 2):
-            for gz in range(cz - 1, cz + 2):
-                sx, sz = self._road_cell_seed(gx, gz)
-                dx = wx - sx
-                dz = wz - sz
-                d2 = dx * dx + dz * dz
-                if d2 < best1:
-                    best2 = best1
-                    best1 = d2
-                elif d2 < best2:
-                    best2 = d2
+        # Tunables (start values; iterate)
+        spacing = float(getattr(self, "rural_road_spacing", max(700.0, float(self.road_spacing) * 3.0)))
+        edge_width = float(getattr(self, "rural_road_edge_width", 3.25))
+        max_grade = float(getattr(self, "rural_road_max_grade", 0.15))     # blocks per block
+        span = int(getattr(self, "rural_road_smooth_span", 5))             # samples along tangent
+        max_cut = int(getattr(self, "rural_road_max_cut", 5))              # if terrain above target by >max_cut, drop road here
+        clearance = int(getattr(self, "rural_road_clearance", 4))
+        pillar_cap = int(getattr(self, "rural_road_pillar_cap", 32))
+        max_bridge_depth = int(getattr(self, "rural_road_max_bridge_depth", 12))
+        allow_water = bool(getattr(config, "RURAL_ROAD_ALLOW_WATER", True))
 
-        d1 = math.sqrt(best1)
-        d2 = math.sqrt(best2)
-        return d1, d2
+        d1, d2, s1x, s1z, s2x, s2z, site_id0 = self._road_voronoi_two_sites_vec(wx, wz, spacing)
+        right_diff = np.zeros_like(site_id0, dtype=bool)
+        up_diff = np.zeros_like(site_id0, dtype=bool)
+        right_diff[:-1, :] = (site_id0[:-1, :] != site_id0[1:, :])
+        up_diff[:, :-1] = (site_id0[:, :-1] != site_id0[:, 1:])
+        mask = (right_diff | up_diff) & (d1 < spacing * 0.8)
 
+        if not mask.any():
+            return None
+
+        elev = elevation.astype(np.float32)
+        gx, gz = np.gradient(elev)
+        cliff_grad = float(getattr(config, "RURAL_ROAD_CLIFF_GRAD", 0.85))
+        cliff_mask = np.hypot(gx, gz) > cliff_grad
+        ground = elev
+        shallow_water = ground <= WATER_LEVEL
+
+        coords_coarse = np.stack([wx / 2600.0, wz / 2600.0], axis=-1).reshape(-1, 2)
+        coarse = self.river_height_field.noise(coords_coarse).reshape(sx, sz) * 55.0
+        coords_detail = np.stack([wx / 650.0, wz / 650.0], axis=-1).reshape(-1, 2)
+        detail = self.road_height_noise.noise(coords_detail).reshape(sx, sz) * 12.0
+        macro = np.clip(
+            68.0 + coarse + detail,
+            6.0,
+            float(SECTOR_HEIGHT - 6),
+        ).astype(np.float32)
+
+        priority = getattr(config, "RURAL_ROAD_HEIGHT_PRIORITY", "terrain")
+        if priority not in ("continuity", "terrain"):
+            priority = "continuity"
+        default_blend = 0.35 if priority == "continuity" else 0.8
+        blend = float(getattr(config, "RURAL_ROAD_HEIGHT_BLEND", default_blend))
+        blend = float(np.clip(blend, 0.0, 1.0))
+        local_blend = np.where(cliff_mask, macro, elev)
+        base_target = macro * (1.0 - blend) + local_blend * blend
+        if allow_water:
+            base_target = np.where(shallow_water, float(WATER_LEVEL + 1), base_target)
+
+        # Tangent direction from the two sites:
+        # boundary normal ~ (s2-s1), tangent = perp(normal).
+        vx = (s2x - s1x).astype(np.float32)
+        vz = (s2z - s1z).astype(np.float32)
+        norm = np.sqrt(vx * vx + vz * vz) + 1e-6
+        nx = vx / norm
+        nz = vz / norm
+        tx = -nz  # perp
+        tz = nx
+
+        # Quantize tangent to 8-connected integer step (dx,dz) in {-1,0,1}.
+        # This makes sampling and smoothing fully array-index based.
+        ang = np.arctan2(tz, tx)  # [-pi,pi]
+        # 8 bins: E,NE,N,NW,W,SW,S,SE
+        bin8 = np.round((ang / (np.pi / 4.0))).astype(np.int32) % 8
+        dir_dx = np.array([1, 1, 0, -1, -1, -1, 0, 1], dtype=np.int32)[bin8]
+        dir_dz = np.array([0, 1, 1, 1, 0, -1, -1, -1], dtype=np.int32)[bin8]
+
+        # Sample elevation along +/- tangent for smoothing (median)
+        xi, zi = np.meshgrid(np.arange(sx, dtype=np.int32),
+                            np.arange(sz, dtype=np.int32), indexing="xy")
+
+        samples = [base_target]
+        for k in range(1, span + 1):
+            x1 = np.clip(xi + dir_dx * k, 0, sx - 1)
+            z1 = np.clip(zi + dir_dz * k, 0, sz - 1)
+            x2 = np.clip(xi - dir_dx * k, 0, sx - 1)
+            z2 = np.clip(zi - dir_dz * k, 0, sz - 1)
+            samples.append(base_target[x1, z1])
+            samples.append(base_target[x2, z2])
+
+        smoothed = np.median(np.stack(samples, axis=0), axis=0).astype(np.float32)
+
+        # Do not go below water; allow shallow bridging by lifting to WATER_LEVEL+1
+        shallow_water = ground <= WATER_LEVEL
+        depth = (WATER_LEVEL - ground).astype(np.float32)
+        ok_bridge = shallow_water & (depth <= float(max_bridge_depth))
+        if allow_water:
+            mask &= (~shallow_water) | ok_bridge
+        else:
+            mask &= ~shallow_water
+
+        # Target height prefers smoothed, but never under water
+        target = smoothed.copy()
+        if allow_water:
+            target = np.where(shallow_water, float(WATER_LEVEL + 1), target)
+        target = np.where(target <= WATER_LEVEL, float(WATER_LEVEL + 1), target)
+        target = np.clip(target, 2.0, float(SECTOR_HEIGHT - 5)).astype(np.float32)
+        solid_ground = ground > WATER_LEVEL
+        target = np.where(solid_ground, np.minimum(target, ground), target)
+
+        grade_iters = int(getattr(config, "RURAL_ROAD_GRADE_RELAX_ITERS", 3))
+        if grade_iters > 0:
+            xp = np.clip(xi + dir_dx, 0, sx - 1)
+            zp = np.clip(zi + dir_dz, 0, sz - 1)
+            xm = np.clip(xi - dir_dx, 0, sx - 1)
+            zm = np.clip(zi - dir_dz, 0, sz - 1)
+            for _ in range(grade_iters):
+                t_p = target[xp, zp]
+                t_m = target[xm, zm]
+                lower = np.maximum(t_p - max_grade, t_m - max_grade)
+                upper = np.minimum(t_p + max_grade, t_m + max_grade)
+                target = np.where(mask, np.minimum(np.maximum(target, lower), upper), target)
+
+        # If terrain is far above target (big cut), rural road gives up (trail will handle)
+        cut = (ground - target)
+        cliff_mode = getattr(config, "RURAL_ROAD_CLIFF_MODE", "tunnel")
+        if cliff_mode == "dead_end":
+            mask &= ~cliff_mask
+        else:
+            max_cut_cliff = int(getattr(config, "RURAL_ROAD_MAX_CUT_CLIFF", max_cut * 4))
+            mask &= (cut <= float(max_cut)) | (cliff_mask & (cut <= float(max_cut_cliff)))
+
+        if not mask.any():
+            return None
+
+        y = np.clip(target, 2.0, float(SECTOR_HEIGHT - 5)).astype(np.int16)
+        ground_i16 = np.clip(ground, 0, SECTOR_HEIGHT - 1).astype(np.int16)
+
+        return {
+            "mask": mask,
+            "y": y,
+            "ground": ground_i16,
+            "clearance": clearance,
+            "pillar_cap": pillar_cap,
+        }
+
+    # ---------------------------------------------------------------------
+    # 4) Fully vectorized road stamping: decks, headroom carve, capped pillars
+    # ---------------------------------------------------------------------
+
+    def _apply_rural_roads_vec(self, blocks, plan):
+        if plan is None:
+            return
+        def _binary_dilate_4(mask):
+            # diamond-shaped width: center + NSEW
+            up = np.zeros_like(mask);   up[:, 1:] = mask[:, :-1]
+            dn = np.zeros_like(mask);   dn[:, :-1] = mask[:, 1:]
+            lt = np.zeros_like(mask);   lt[1:, :] = mask[:-1, :]
+            rt = np.zeros_like(mask);   rt[:-1, :] = mask[1:, :]
+            return mask | up | dn | lt | rt
+        def _shift_bool(mask, dx, dz):
+            out = np.zeros_like(mask, dtype=bool)
+            sx_, sz_ = mask.shape
+            xs0 = slice(max(0, dx),  min(sx_, sx_ + dx))
+            zs0 = slice(max(0, dz),  min(sz_, sz_ + dz))
+            xs1 = slice(max(0, -dx), min(sx_, sx_ - dx))
+            zs1 = slice(max(0, -dz), min(sz_, sz_ - dz))
+            out[xs1, zs1] = mask[xs0, zs0]
+            return out
+
+        base_mask = plan["mask"]
+        mask = _binary_dilate_4(base_mask)
+        n = _shift_bool(base_mask, 0, 1)
+        s = _shift_bool(base_mask, 0, -1)
+        e = _shift_bool(base_mask, 1, 0)
+        w = _shift_bool(base_mask, -1, 0)
+        turn_mask = base_mask & ((n | s) & (e | w))
+        mask |= _binary_dilate_4(turn_mask)
+
+        y = plan["y"].astype(np.int32)
+        clearance = int(plan["clearance"])
+        tunnel_clearance = max(clearance, 4)
+        pillar_cap = int(plan["pillar_cap"])
+        allow_water = bool(getattr(config, "RURAL_ROAD_ALLOW_WATER", True))
+        water_pillar_extra = int(getattr(config, "RURAL_ROAD_WATER_PILLAR_CAP", 16))
+        ground = plan.get("ground")
+        if ground is not None:
+            ground = np.array(ground, dtype=np.int32)
+        if np.any(mask):
+            y = np.where(mask, np.minimum(y, np.min(y[mask])), y)
+
+        sx, sz = mask.shape
+        H = blocks.shape[0]  # SECTOR_HEIGHT
+
+        yy = np.arange(H, dtype=np.int32)[:, None, None]
+        y0 = y[None, :, :]
+        # --- Carve only where terrain blocks the road; keep a 4-block tunnel clearance.
+        solid = blocks != 0
+        carve = mask[None, :, :] & solid & (yy >= y0) & (yy <= (y0 + tunnel_clearance))
+        blocks[carve] = 0
+
+        # --- Deck placement (advanced indexing)
+        xs, zs = np.nonzero(mask)
+        ys = y[mask]
+        blocks[ys, xs, zs] = COBBLE
+
+        # --- Capped pillar supports down through air/water (bridging shallow gaps)
+        # This will not overwrite solid terrain; it only fills air/water in [y-pillar_cap, y).
+        # It is vectorized and “self-stops” on solid because we do not overwrite solids.
+        if allow_water and water_pillar_extra > 0:
+            water_under = mask & (y <= WATER_LEVEL + 1)
+            if ground is not None:
+                water_depth = np.clip((WATER_LEVEL - ground), 0, water_pillar_extra).astype(np.int32)
+                cap_map = np.where(
+                    water_under,
+                    pillar_cap + water_depth + 1,
+                    pillar_cap,
+                ).astype(np.int32)
+            else:
+                cap_map = np.where(water_under, pillar_cap + water_pillar_extra, pillar_cap).astype(np.int32)
+            fill = mask[None, :, :] & (yy < y0) & (yy >= (y0 - cap_map[None, :, :]))
+        else:
+            fill = mask[None, :, :] & (yy < y0) & (yy >= (y0 - pillar_cap))
+        air_or_water = (blocks == 0) | (blocks == WATER)
+        blocks[fill & air_or_water] = COBBLE
+
+        mask = plan["mask"]
+        n_deck = int(np.count_nonzero(mask))
+        if n_deck == 0:
+            logutil.log("MAPGEN", f"rural stamp skipped (mask empty)", level="DEBUG")
+            return
+
+        y = plan["y"].astype(np.int32)
+        clearance = int(plan["clearance"])
+        tunnel_clearance = max(clearance, 4)
+        pillar_cap = int(plan["pillar_cap"])
+        allow_water = bool(getattr(config, "RURAL_ROAD_ALLOW_WATER", True))
+        water_pillar_extra = int(getattr(config, "RURAL_ROAD_WATER_PILLAR_CAP", 16))
+        ground = plan.get("ground")
+        if ground is not None:
+            ground = np.array(ground, dtype=np.int32)
+        H = blocks.shape[0]
+
+        yy = np.arange(H, dtype=np.int32)[:, None, None]
+        y0 = y[None, :, :]
+
+        clear = mask[None, :, :] & (yy > y0) & (yy <= (y0 + tunnel_clearance))
+        if allow_water and water_pillar_extra > 0:
+            water_under = mask & (y <= WATER_LEVEL + 1)
+            if ground is not None:
+                water_depth = np.clip((WATER_LEVEL - ground), 0, water_pillar_extra).astype(np.int32)
+                cap_map = np.where(
+                    water_under,
+                    pillar_cap + water_depth + 1,
+                    pillar_cap,
+                ).astype(np.int32)
+            else:
+                cap_map = np.where(water_under, pillar_cap + water_pillar_extra, pillar_cap).astype(np.int32)
+            fill = mask[None, :, :] & (yy < y0) & (yy >= (y0 - cap_map[None, :, :]))
+        else:
+            fill = mask[None, :, :] & (yy < y0) & (yy >= (y0 - pillar_cap))
+        air_or_water = (blocks == 0) | (blocks == WATER)
+
+        n_clear = int(np.count_nonzero(clear))
+        n_fill = int(np.count_nonzero(fill & air_or_water))
+
+        logutil.log(
+            "MAPGEN",
+            f"rural stamp deck_cols={n_deck} clear_voxels={n_clear} pillar_voxels={n_fill} "
+            f"clearance={clearance} pillar_cap={pillar_cap}",
+            level="DEBUG",
+        )
+
+
+    def _compute_trail_plan_vec(self, position, elevation, rural_mask=None):
+        import numpy as np
+
+        def _binary_dilate_4(m: np.ndarray) -> np.ndarray:
+            up = np.zeros_like(m);   up[:, 1:]  = m[:, :-1]
+            dn = np.zeros_like(m);   dn[:, :-1] = m[:, 1:]
+            lt = np.zeros_like(m);   lt[1:, :]  = m[:-1, :]
+            rt = np.zeros_like(m);   rt[:-1, :] = m[1:, :]
+            return m | up | dn | lt | rt
+
+        def _shift_bool(m: np.ndarray, dx: int, dz: int) -> np.ndarray:
+            out = np.zeros_like(m, dtype=bool)
+            sx_, sz_ = m.shape
+            xs0 = slice(max(0, dx),  min(sx_, sx_ + dx))
+            zs0 = slice(max(0, dz),  min(sz_, sz_ + dz))
+            xs1 = slice(max(0, -dx), min(sx_, sx_ - dx))
+            zs1 = slice(max(0, -dz), min(sz_, sz_ - dz))
+            out[xs1, zs1] = m[xs0, zs0]
+            return out
+
+        def _bridge_diagonals(m: np.ndarray) -> np.ndarray:
+            # Add orthogonal bridge tiles only when diagonals touch.
+            ne = m & _shift_bool(m, 1, 1)
+            nw = m & _shift_bool(m, -1, 1)
+            se = m & _shift_bool(m, 1, -1)
+            sw = m & _shift_bool(m, -1, -1)
+
+            bridge = (
+                _shift_bool(ne, -1, 0) | _shift_bool(ne, 0, -1) |
+                _shift_bool(nw, 1, 0) | _shift_bool(nw, 0, -1) |
+                _shift_bool(se, -1, 0) | _shift_bool(se, 0, 1) |
+                _shift_bool(sw, 1, 0) | _shift_bool(sw, 0, 1)
+            )
+            return m | bridge
+
+        def _shift_i32(a: np.ndarray, dx: int, dz: int, fill: int) -> np.ndarray:
+            out = np.full(a.shape, fill, dtype=np.int32)
+            sx_, sz_ = a.shape
+            xs0 = slice(max(0, dx),  min(sx_, sx_ + dx))
+            zs0 = slice(max(0, dz),  min(sz_, sz_ + dz))
+            xs1 = slice(max(0, -dx), min(sx_, sx_ - dx))
+            zs1 = slice(max(0, -dz), min(sz_, sz_ - dz))
+            out[xs1, zs1] = a[xs0, zs0].astype(np.int32)
+            return out
+
+        xs, zs = self._world_axes(position)
+        sx = len(xs); sz = len(zs)
+
+        wx, wz = np.meshgrid(
+            np.asarray(xs, dtype=np.float64),
+            np.asarray(zs, dtype=np.float64),
+            indexing="xy",
+        )
+
+        spacing     = float(getattr(self, "trail_spacing", max(180.0, float(self.road_spacing) * 0.9)))
+        clearance   = int(getattr(self, "trail_clearance", 2))
+        pillar_cap  = int(getattr(self, "trail_pillar_cap", 4))
+        relax_iters = int(getattr(self, "trail_relax_iters", 4))
+
+        # width control for trails (in blocks): 1 => 1-wide, 2 => a bit thicker, etc.
+        width = int(getattr(self, "trail_width_blocks", 1))
+        width = max(1, min(4, width))
+
+        # get nearest-site id per cell
+        d1, d2, s1x, s1z, s2x, s2z, site_id0 = self._road_voronoi_two_sites_vec(wx, wz, spacing)
+
+        # i0 is int indices 0..8 per cell (or whatever mapping you use)
+
+        # Edge detection: mark cells where nearest-site id differs from neighbor
+        # This rasterizes Voronoi boundaries and eliminates "rail ties" aliasing.
+        right_diff = np.zeros_like(site_id0, dtype=bool)
+        up_diff    = np.zeros_like(site_id0, dtype=bool)
+
+        right_diff[:-1, :] = (site_id0[:-1, :] != site_id0[1:, :])
+        up_diff[:, :-1]    = (site_id0[:, :-1] != site_id0[:, 1:])
+        mask = right_diff | up_diff
+
+        # Avoid overwriting rural roads
+        if rural_mask is not None:
+            mask &= ~rural_mask
+
+        # Bridge diagonal runs to keep continuity without widening axis-aligned paths.
+        mask = _bridge_diagonals(mask)
+
+        # Optional extra thickness (kept separate from diagonal bridging).
+        for _ in range(max(0, width - 1)):
+            mask = _binary_dilate_4(mask)
+
+        if not mask.any():
+            return None
+
+        allow_water = bool(getattr(config, "TRAIL_ALLOW_WATER", False))
+
+        # Elevation base
+        y = elevation.astype(np.int16).copy()
+        if not allow_water:
+            mask &= (y > WATER_LEVEL)
+        y = np.where(y <= WATER_LEVEL, WATER_LEVEL + 1, y).astype(np.int16)
+        y = np.clip(y, 2, SECTOR_HEIGHT - 4).astype(np.int16)
+
+        # Stair-step relaxation within mask
+        INF = 32767
+        for _ in range(relax_iters):
+            y_i32 = y.astype(np.int32)
+
+            yN = _shift_i32(y_i32, 0,  1, fill=INF)
+            yS = _shift_i32(y_i32, 0, -1, fill=INF)
+            yE = _shift_i32(y_i32, 1,  0, fill=INF)
+            yW = _shift_i32(y_i32, -1, 0, fill=INF)
+
+            mN = _shift_bool(mask, 0,  1)
+            mS = _shift_bool(mask, 0, -1)
+            mE = _shift_bool(mask, 1,  0)
+            mW = _shift_bool(mask, -1, 0)
+
+            upper = np.full((sx, sz), INF, dtype=np.int32)
+            lower = np.full((sx, sz), -INF, dtype=np.int32)
+
+            for yn, mn in ((yN, mN), (yS, mS), (yE, mE), (yW, mW)):
+                upper = np.minimum(upper, np.where(mn, yn + 1, INF))
+                lower = np.maximum(lower, np.where(mn, yn - 1, -INF))
+
+            y_new = y_i32
+            y_new = np.where(mask, np.maximum(y_new, lower), y_new)
+            y_new = np.where(mask, np.minimum(y_new, upper), y_new)
+            y = np.clip(y_new, 2, SECTOR_HEIGHT - 4).astype(np.int16)
+
+        return {
+            "mask": mask,
+            "y": y,
+            "clearance": clearance,
+            "pillar_cap": pillar_cap,
+        }
+
+    def _apply_trails_vec(self, blocks, plan):
+        if plan is None:
+            return
+
+        mask = plan["mask"]
+        if not np.any(mask):
+            return
+
+        y = plan["y"].astype(np.int32)
+        clearance = int(plan["clearance"])
+        pillar_cap = int(plan["pillar_cap"])
+
+        H = blocks.shape[0]
+
+        # Deck (path) placement
+        xs, zs = np.nonzero(mask)
+        ys = y[mask]
+        blocks[ys, xs, zs] = TRAIL_BLOCK
+
+        # Clear minimal headroom
+        yy = np.arange(H, dtype=np.int32)[:, None, None]
+        y0 = y[None, :, :]
+        clear = mask[None, :, :] & (yy > y0) & (yy <= (y0 + clearance))
+        blocks[clear] = 0
+
+        # Small capped support fill (prevents floating steps in sharp drops)
+        fill = mask[None, :, :] & (yy < y0) & (yy >= (y0 - pillar_cap))
+        air_or_water = (blocks == 0) | (blocks == WATER)
+        blocks[fill & air_or_water] = TRAIL_SUPPORT_BLOCK
 
     def _compute_river_plan(self, position, elevation):
         """
@@ -1274,10 +1793,8 @@ class BiomeGenerator:
             if river_plan:
                 biome[river_plan['mask']] = 5
 
-        road_plan = None
         if self.enable_roads:
-            ground_before_roads = elevation.copy()
-            road_plan = self._compute_road_plan(position, elevation, ground_before_roads)
+            rural_plan, trail_plan = self._transport_plans_vectorized(position, elevation)
 
         # Identify cliffy regions (steep gradients).
         gx, gz = numpy.gradient(elevation)
@@ -1360,13 +1877,26 @@ class BiomeGenerator:
             # Treat river tiles as water for later decoration / cave logic (even if above sea level).
             water_mask = water_mask | river_plan['mask']
 
-        if road_plan:
+        if rural_plan:
             # Lay cobblestone roads, embankments and simple bridges/tunnels.
-            self._apply_roads(blocks, road_plan, position)
+            self._apply_rural_roads_vec(blocks, rural_plan)
+        road_mask = None
+        trail_mask = None
+        if rural_plan:
+            road_mask = rural_plan["mask"]
+            self._apply_rural_roads_vec(blocks, rural_plan)
+        if trail_plan:
+            trail_mask = trail_plan["mask"]
+            # Lay dirt trails
+            self._apply_trails_vec(blocks, trail_plan)
 
         # Per-column decorations that need decisions.
         for x in range(sx):
             for z in range(sz):
+                if road_mask is not None and road_mask[x, z]:
+                    continue
+                if trail_mask is not None and trail_mask[x, z]:
+                    continue
                 ground = ground_h[x, z]
                 if water_mask[x, z]:
                     continue
@@ -1459,3 +1989,183 @@ def generate_biome_sector(position, sector, world):
     if biome_generator is None:
         initialize_biome_map_generator()
     return biome_generator.generate(position)
+
+if __name__ == "__main__":
+    import numpy as np
+
+    # --- Instantiate generator in the same way your module intends ---
+    gen = initialize_biome_map_generator(seed=12345)
+    if gen is None:
+        # If initializer stores a global instead of returning
+        try:
+            gen = biome_generator
+        except NameError as e:
+            raise RuntimeError("initialize_biome_map_generator() returned None and biome_generator not found") from e
+
+    # --- Helpers ---
+    def compute_mask_for_sector(ox: int, oz: int):
+        """
+        Builds a simple elevation plane and runs _compute_trail_plan_vec, returning the mask.
+        Uses a 3-length 'position' tuple so _sector_origin reads x/z correctly.
+        """
+        sx = SECTOR_SIZE + 2
+        sz = SECTOR_SIZE + 2
+
+        # Flat-ish elevation well above WATER_LEVEL, within SECTOR_HEIGHT range
+        # (the relaxer/clipping won't matter for the mask checks, but avoid water logic surprises)
+        elev = np.full((sx, sz), max(WATER_LEVEL + 5, 10), dtype=np.int16)
+
+        # IMPORTANT: position must be length>=3 so _sector_origin uses [0] and [2]
+        pos = (ox, 0, oz)
+
+        plan = gen._compute_trail_plan_vec(pos, elev, rural_mask=None)
+        if plan is None:
+            return np.zeros((sx, sz), dtype=bool)
+        return plan["mask"].astype(bool)
+
+    def seam_indices_core_x():
+        """
+        For a sector with padded axes xs = [ox-1 .. ox+16]:
+          core world-x = [ox .. ox+15] => local ix = [1 .. 16]
+        The seam between sector O (ox) and X (ox+16) is between world-x=ox+15 and world-x=ox+16.
+
+        So compare:
+          O core right edge: world-x = ox+15 => ix = 16
+          X core left edge:  world-x = ox+16 => ix = 1
+        """
+        ix_O = 16
+        ix_X = 1
+        inward_O = 15   # one cell inward from O seam edge
+        inward_X = 2    # one cell inward from X seam edge
+        return ix_O, ix_X, inward_O, inward_X
+
+    def seam_indices_core_z():
+        """
+        For z axis with padded zs = [oz-1 .. oz+16]:
+          core world-z = [oz .. oz+15] => local iz = [1 .. 16]
+        Seam between sector O (oz) and Z (oz+16) is between world-z=oz+15 and world-z=oz+16.
+
+        Compare:
+          O core top edge:  world-z = oz+15 => iz = 16
+          Z core bottom:    world-z = oz+16 => iz = 1
+        """
+        iz_O = 16
+        iz_Z = 1
+        inward_O = 15
+        inward_Z = 2
+        return iz_O, iz_Z, inward_O, inward_Z
+
+    def classify_dir(mask: np.ndarray, x: int, z: int):
+        """
+        Classify local direction at a mask cell by checking neighbors.
+        Returns one of: 'x', 'z', 'both', 'iso', or 'off' (if mask is False).
+        """
+        if not mask[x, z]:
+            return "off"
+        sx, sz = mask.shape
+
+        x_conn = False
+        z_conn = False
+
+        if x > 0 and mask[x - 1, z]:
+            x_conn = True
+        if x + 1 < sx and mask[x + 1, z]:
+            x_conn = True
+
+        if z > 0 and mask[x, z - 1]:
+            z_conn = True
+        if z + 1 < sz and mask[x, z + 1]:
+            z_conn = True
+
+        if x_conn and z_conn:
+            return "both"
+        if x_conn:
+            return "x"
+        if z_conn:
+            return "z"
+        return "iso"
+
+    def compare_seam_core_x(maskO: np.ndarray, maskX: np.ndarray, label="O vs +X"):
+        ixO, ixX, inO, inX = seam_indices_core_x()
+        sz = maskO.shape[1]
+
+        # (1) Direct seam continuation: do we have trail on both sides at same z?
+        seamO = maskO[ixO, :]
+        seamX = maskX[ixX, :]
+        mism = seamO != seamX
+        n_mism = int(np.count_nonzero(mism))
+        total = seamO.size
+
+        # (2) Direction consistency: compare local direction one-step inward on each side
+        # Only evaluate where BOTH sides have seam trail (continuation exists).
+        dir_mism = 0
+        dir_total = 0
+        examples = []
+
+        for z in range(sz):
+            if seamO[z] and seamX[z]:
+                dir_total += 1
+                dO = classify_dir(maskO, inO, z)  # inward cell in O
+                dX = classify_dir(maskX, inX, z)  # inward cell in X
+                # For a cross-seam segment, you'd expect both sides to be 'x' or 'both'
+                # (i.e., have x-connectivity). If one side is 'z' only, it is "misoriented".
+                okO = (dO in ("x", "both"))
+                okX = (dX in ("x", "both"))
+                if (okO != okX) or (not okO) or (not okX):
+                    dir_mism += 1
+                    if len(examples) < 5:
+                        examples.append((z, dO, dX))
+
+        print(f"\n[{label}] core seam x-check")
+        print(f"  seam mask mismatches: {n_mism} / {total}")
+        print(f"  seam direction issues (inward cells): {dir_mism} / {max(dir_total,1)}")
+        if examples:
+            print("  examples (z, dir_in_O, dir_in_X):")
+            for ex in examples:
+                print("   ", ex)
+
+    def compare_seam_core_z(maskO: np.ndarray, maskZ: np.ndarray, label="O vs +Z"):
+        izO, izZ, inO, inZ = seam_indices_core_z()
+        sx = maskO.shape[0]
+
+        seamO = maskO[:, izO]
+        seamZ = maskZ[:, izZ]
+        mism = seamO != seamZ
+        n_mism = int(np.count_nonzero(mism))
+        total = seamO.size
+
+        dir_mism = 0
+        dir_total = 0
+        examples = []
+
+        for x in range(sx):
+            if seamO[x] and seamZ[x]:
+                dir_total += 1
+                dO = classify_dir(maskO, x, inO)  # inward cell in O
+                dZ = classify_dir(maskZ, x, inZ)  # inward cell in Z
+                # For a cross-seam segment, you'd expect both sides to be 'z' or 'both'
+                okO = (dO in ("z", "both"))
+                okZ = (dZ in ("z", "both"))
+                if (okO != okZ) or (not okO) or (not okZ):
+                    dir_mism += 1
+                    if len(examples) < 5:
+                        examples.append((x, dO, dZ))
+
+        print(f"\n[{label}] core seam z-check")
+        print(f"  seam mask mismatches: {n_mism} / {total}")
+        print(f"  seam direction issues (inward cells): {dir_mism} / {max(dir_total,1)}")
+        if examples:
+            print("  examples (x, dir_in_O, dir_in_Z):")
+            for ex in examples:
+                print("   ", ex)
+
+    # --- Run the 3-sector test ---
+    print("Computing masks for 3 sectors: O=(0,0), X=(+16,0), Z=(0,+16) ...")
+    maskO = compute_mask_for_sector(0, 0)
+    maskX = compute_mask_for_sector(SECTOR_SIZE, 0)
+    maskZ = compute_mask_for_sector(0, SECTOR_SIZE)
+
+    compare_seam_core_x(maskO, maskX, label="Origin vs +X sector")
+    compare_seam_core_z(maskO, maskZ, label="Origin vs +Z sector")
+
+    print("\nDone.")

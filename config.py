@@ -166,3 +166,11 @@ ENABLE_ROAD_NETWORKS = True
 RIVER_NETWORK_SPACING = 320
 ROAD_NETWORK_SPACING = 220
 ROAD_MAX_GRADE = 1.25
+RURAL_ROAD_ALLOW_WATER = True
+RURAL_ROAD_WATER_PILLAR_CAP = 16
+TRAIL_ALLOW_WATER = False
+RURAL_ROAD_HEIGHT_PRIORITY = "terrain"     # "continuity" or "terrain"
+RURAL_ROAD_HEIGHT_BLEND = 0.8              # 0=macro only, 1=local only
+RURAL_ROAD_CLIFF_MODE = "tunnel"           # "tunnel" or "dead_end"
+RURAL_ROAD_MAX_CUT_CLIFF = 18              # max cut when tunneling through cliffs
+RURAL_ROAD_CLIFF_GRAD = 0.85               # gradient threshold for cliff masking

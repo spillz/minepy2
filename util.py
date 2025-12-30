@@ -94,31 +94,40 @@ def deco_v2(pos,n):
 
 
 def tex_coord(x, y, n=4):
-    """ Return the bounding vertices of the texture square.
-
-    """
+    """Return the bounding vertices of the texture tile at (x, y)."""
     m = 1.0 / n
     dx = x * m
     dy = y * m
     return [dx, dy, dx + m, dy, dx + m, dy + m, dx, dy + m]
 
 
-def tex_coords(*sides): #top, bottom, 
-    """ Return a list of the texture squares for the top, bottom and side.
+def tex_rect(x, y, w, h, n=4):
+    """Return the bounding vertices of a texture rect at (x, y) with size (w, h)."""
+    m = 1.0 / n
+    dx = x * m
+    dy = y * m
+    dw = w * m
+    dh = h * m
+    return [dx, dy, dx + dw, dy, dx + dw, dy + dh, dx, dy + dh]
 
-    """
-#    top = tex_coord(*top)
-#    bottom = tex_coord(*bottom)
+
+def tex_coords(*sides): #top, bottom,
+    """Return a list of per-face texture coords from 2- or 4-tuples."""
+    def _tex_from_spec(spec):
+        if len(spec) == 2:
+            return tex_coord(*spec)
+        if len(spec) == 4:
+            return tex_rect(*spec)
+        raise ValueError('Texture coord spec must be 2 or 4 items')
+
     result = []
-#    result.append(top)
-#    result.append(bottom)
-    i=6
+    i = 6
     for s in sides:
-        result.append(tex_coord(*s))
-        i-=1
-    while i>=0:
-        result.append(tex_coord(*sides[-1]))
-        i-=1
+        result.append(_tex_from_spec(s))
+        i -= 1
+    while i >= 0:
+        result.append(_tex_from_spec(sides[-1]))
+        i -= 1
     return result
 
 FACES = [
