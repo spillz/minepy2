@@ -19,6 +19,22 @@ from blocks import (
 
 # Later, this could be loaded from a JSON file.
 
+BASE_PLAYER_HEIGHT = 1.8
+PLAYER_SCALE = float(PLAYER_HEIGHT) / BASE_PLAYER_HEIGHT
+
+def _scale_part(part, scale):
+    part = dict(part)
+    part['pivot'] = [v * scale for v in part['pivot']]
+    part['position'] = [v * scale for v in part['position']]
+    part['size'] = [v * scale for v in part['size']]
+    return part
+
+def _scale_model(model, scale):
+    model = dict(model)
+    parts = model.get('parts', {})
+    model['parts'] = {name: _scale_part(part, scale) for name, part in parts.items()}
+    return model
+
 HUMANOID_MODEL = {
     # 'parts' defines the "bones" and their shapes.
     # Each part is a block, positioned relative to its parent.
@@ -28,51 +44,51 @@ HUMANOID_MODEL = {
     'parts': {
         'torso': {
             'parent': None,
-            'pivot': [0, 0.9, 0],   # The model's origin is at its feet. The torso pivot is 0.9 units up -- matching the leg height
-            'position': [0, 0.0, 0], 
-            'size': [0.6, 0.8, 0.3],
+            'pivot': [0, 0.8, 0],   # The model's origin is at its feet. The torso pivot matches the leg height.
+            'position': [0, 0.0, 0],
+            'size': [0.5, 0.7, 0.25],
             'material': {'color': (58, 110, 165)}
         },
         'head': {
             'parent': 'torso',
-            'pivot': [0, 0.4, 0],   # Pivot is at the top-center of the torso (the "neck").
-            'position': [0, 0.2, 0], # Head mesh is shifted up from the neck pivot.
-            'size': [0.4, 0.4, 0.4],
+            'pivot': [0, 0.5, 0],   # Pivot tuned so camera sits around 1.7 units above feet.
+            'position': [0, 0.0, 0], # Seat the head on the torso top.
+            'size': [0.3, 0.3, 0.3],
             'material': {'color': (224, 172, 125)}
         },
         'hair': {
             'parent': 'torso',
-            'pivot': [0, 0.4, 0],   # Pivot is at the top-center of the torso (the "neck").
-            'position': [0, 0.3, 0.1], # Head mesh is shifted up from the neck pivot.
-            'size': [0.5, 0.5, 0.5],
+            'pivot': [0, 0.5, 0],   # Pivot matches the head pivot for eye-level camera.
+            'position': [0, 0.1, 0.08], # Hair sits on top of the head.
+            'size': [0.34, 0.34, 0.34],
             'material': {'color': (148, 121, 95)}
         },
         'left_arm': {
             'parent': 'torso',
-            'pivot': [-0.4, 0.3, 0], # Left shoulder pivot is on the side of the torso.
-            'position': [0, -0.4, 0],# Arm mesh is shifted down from the shoulder pivot.
-            'size': [0.2, 0.9, 0.2],
+            'pivot': [-0.3, 0.3, 0], # Left shoulder pivot is on the side of the torso.
+            'position': [0, -0.3, 0],# Arm mesh is shifted down from the shoulder pivot.
+            'size': [0.18, 0.7, 0.18],
             'material': {'color': (224, 172, 125)}
         },
         'right_arm': {
             'parent': 'torso',
-            'pivot': [0.4, 0.3, 0],
-            'position': [0, -0.4, 0],
-            'size': [0.2, 0.9, 0.2],
+            'pivot': [0.3, 0.3, 0],
+            'position': [0, -0.3, 0],
+            'size': [0.18, 0.7, 0.18],
             'material': {'color': (224, 172, 125)}
         },
         'left_leg': {
             'parent': 'torso',
-            'pivot': [-0.15, -0.4, 0], # Left hip pivot.
-            'position': [0, -0.45, 0], # Leg mesh is shifted down from the hip pivot.
-            'size': [0.3, 0.9, 0.3],
+            'pivot': [-0.12, -0.35, 0], # Left hip pivot.
+            'position': [0, -0.4, 0], # Leg mesh is shifted down from the hip pivot.
+            'size': [0.22, 0.8, 0.22],
             'material': {'color': (40, 50, 100)}
         },
         'right_leg': {
             'parent': 'torso',
-            'pivot': [0.15, -0.4, 0],
-            'position': [0, -0.45, 0],
-            'size': [0.3, 0.9, 0.3],
+            'pivot': [0.12, -0.35, 0],
+            'position': [0, -0.4, 0],
+            'size': [0.22, 0.8, 0.22],
             'material': {'color': (40, 50, 100)}
         },
     },
@@ -141,6 +157,9 @@ HUMANOID_MODEL = {
         }
     }
 }
+
+if abs(PLAYER_SCALE - 1.0) > 1e-6:
+    HUMANOID_MODEL = _scale_model(HUMANOID_MODEL, PLAYER_SCALE)
 
 
 
@@ -524,7 +543,7 @@ class Player(BaseEntity):
             if self.ladder_align_enabled:
                 target = None
                 if reason == "up":
-                    target = self._ladder_target_yaw(orient)
+                    target = self._ladder_target_yaw(orient) + 180.0
                 elif forward_input < -1e-3 and pitch >= self.ladder_pitch_reverse_deg:
                     target = self._ladder_target_yaw(orient)
                 elif forward_input > 1e-3 and pitch <= self.ladder_pitch_reverse_deg:
