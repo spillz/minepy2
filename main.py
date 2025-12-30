@@ -362,6 +362,10 @@ class Window(pyglet.window.Window):
         except Exception:
             return False
 
+    def _yaw_lerp(self, start, end, t):
+        delta = ((end - start + 180.0) % 360.0) - 180.0
+        return start + delta * t
+
     def _player_back_orient(self):
         """Return orientation for wall-attached blocks based on player facing."""
         dx, _, dz = self.get_sight_vector()
@@ -541,6 +545,8 @@ class Window(pyglet.window.Window):
             "camera_rotation": camera_rot,
             "apply_camera_rotation": is_moving,
             "player_position": self.player_entity.position.copy(),
+            "strafe": tuple(self.strafe),
+            "jump": bool(self.keys[key.SPACE]),
         }
         t0 = time.perf_counter()
         update_count = 0
@@ -571,6 +577,12 @@ class Window(pyglet.window.Window):
         self.entities = updated_entities
         entity_ms = (time.perf_counter() - t0) * 1000.0
         self.position = tuple(self.player_entity.position)
+        if getattr(self.player_entity, "camera_yaw_follow", False):
+            target = getattr(self.player_entity, "camera_yaw_target", None)
+            duration = getattr(self.player_entity, "camera_yaw_duration", 0.0)
+            if target is not None and duration > 1e-6:
+                t = min(1.0, dt / duration)
+                self.rotation = (self._yaw_lerp(self.rotation[0], target, t), self.rotation[1])
         self._entity_persist_timer -= dt
         if self._entity_persist_timer <= 0:
             self._persist_entity_states()

@@ -3184,9 +3184,10 @@ class ModelProxy(object):
         # Resolve Y with X/Z resolved.
         resolve_axis(1, (p[0], prev[1], p[2]))
 
-        # Snap to ground when falling to prevent jitter below surface.
-        if p[1] <= prev[1] + 1e-6 and not horizontal_collision:
+        # Snap to ground when settling to prevent jitter below surface.
+        if p[1] <= prev[1] + 1e-6 and (velocity is None or velocity[1] <= 0):
             min_x, max_x, min_y, max_y, min_z, max_z = axis_bounds(p)
+            prev_min_y = axis_bounds(prev)[2]
             eps = 1e-4
             snap_pad = 1e-4
             for bx in block_range(min_x, max_x, centered=True):
@@ -3205,6 +3206,8 @@ class ModelProxy(object):
                     if overlap_x <= snap_pad or overlap_z <= snap_pad:
                         continue
                     if min_y >= block_max_y - eps and min_y <= block_max_y + eps:
+                        if horizontal_collision and prev_min_y < block_max_y - eps:
+                            continue
                         p[1] = block_max_y
                         vertical_collision = True
                         break

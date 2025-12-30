@@ -39,8 +39,11 @@ water_blue = numpy.tile(numpy.array(WATER_COLOR),6*4).reshape(6,3*4)
 
 
 class Block(object):
+    #String name of the block
     name = None
+    #tuple of texture coordinates
     coords = None
+    #Solid blocks are collision sites
     solid = True
     colors = white
     texture_fn = tex_coords
@@ -352,7 +355,9 @@ class Ladder(Block):
     vertices = ladder_south
     solid = False
     occludes = False
-    collision = 'mesh'
+    collision = None
+    picker_face = 2
+    render_all_faces = True
 
 class LadderSouth(Ladder):
     name = 'Ladder South'
@@ -493,6 +498,13 @@ ORIENT_SOUTH = 0  # +Z
 ORIENT_WEST = 1   # -X
 ORIENT_NORTH = 2  # -Z
 ORIENT_EAST = 3   # +X
+
+LADDER_ORIENT = {
+    BLOCK_ID['Ladder South']: ORIENT_SOUTH,
+    BLOCK_ID['Ladder West']: ORIENT_WEST,
+    BLOCK_ID['Ladder North']: ORIENT_NORTH,
+    BLOCK_ID['Ladder East']: ORIENT_EAST,
+}
 
 ORIENTED_BLOCK_IDS = {}
 WALL_MOUNTED_BLOCK_IDS = set()

@@ -53,7 +53,8 @@ class BaseEntity:
         likely require some refactoring to move collision logic to a shared location.
         """
         # 1. Apply gravity
-        if not self.on_ground and not self.flying:
+        on_ladder = getattr(self, "on_ladder", False)
+        if not self.on_ground and not self.flying and not on_ladder:
             self.velocity[1] -= 20.0 * dt # Gravity constant
 
         # 2. Apply velocity to position
