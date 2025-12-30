@@ -23,6 +23,10 @@ from util import (
     torch_west,
     torch_north,
     torch_east,
+    ladder_south,
+    ladder_west,
+    ladder_north,
+    ladder_east,
 )
 
 TEXTURE_PATH = 'texture_fv.png'
@@ -342,6 +346,34 @@ class WallTorchEast(WallTorch):
     vertices = torch_east
     show_in_inventory = False
 
+class Ladder(Block):
+    name = 'Ladder'
+    coords = ((4, 4), (4, 4), (3, 10))
+    vertices = ladder_south
+    solid = False
+    occludes = False
+    collision = 'mesh'
+
+class LadderSouth(Ladder):
+    name = 'Ladder South'
+    vertices = ladder_south
+    show_in_inventory = False
+
+class LadderWest(Ladder):
+    name = 'Ladder West'
+    vertices = ladder_west
+    show_in_inventory = False
+
+class LadderNorth(Ladder):
+    name = 'Ladder North'
+    vertices = ladder_north
+    show_in_inventory = False
+
+class LadderEast(Ladder):
+    name = 'Ladder East'
+    vertices = ladder_east
+    show_in_inventory = False
+
 # Explicit ordering keeps block IDs stable and ensures the initial inventory
 # starts with grass instead of whichever subclass happens to register first.
 BLOCKS = [
@@ -395,6 +427,11 @@ BLOCKS = [
     WallTorchWest,
     WallTorchNorth,
     WallTorchEast,
+    Ladder,
+    LadderSouth,
+    LadderWest,
+    LadderNorth,
+    LadderEast,
 ]
 i = 1
 BLOCK_ID = {}
@@ -443,6 +480,13 @@ BLOCK_PICKER_FACE = numpy.array([0] + [getattr(x, 'picker_face', 0) for x in BLO
 # Per-block face glow (0-1) applied after lighting; lets emissive blocks look bright even with low emission.
 BLOCK_GLOW = numpy.array([0.0] + [getattr(x, 'glow', 0.0) for x in BLOCKS], dtype=numpy.float32)
 BLOCK_INVENTORY = [x.name for x in BLOCKS if getattr(x, 'show_in_inventory', True)]
+LADDER_IDS = {
+    BLOCK_ID['Ladder'],
+    BLOCK_ID['Ladder South'],
+    BLOCK_ID['Ladder West'],
+    BLOCK_ID['Ladder North'],
+    BLOCK_ID['Ladder East'],
+}
 
 # Orientation indices (XZ around Y).
 ORIENT_SOUTH = 0  # +Z
@@ -468,6 +512,7 @@ _register_oriented('Plank', 'Plank South', 'Plank West', 'Plank North', 'Plank E
 _register_oriented('Door', 'Door Lower South', 'Door Lower West', 'Door Lower North', 'Door Lower East')
 _register_oriented('Window Pane', 'Window Pane South', 'Window Pane West', 'Window Pane North', 'Window Pane East')
 _register_oriented('Wall Torch', 'Wall Torch South', 'Wall Torch West', 'Wall Torch North', 'Wall Torch East', wall_mounted=True)
+_register_oriented('Ladder', 'Ladder South', 'Ladder West', 'Ladder North', 'Ladder East', wall_mounted=True)
 
 DOOR_BASE_IDS = {BLOCK_ID['Door']}
 DOOR_LOWER_IDS = {

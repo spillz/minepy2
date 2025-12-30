@@ -60,6 +60,7 @@ WALL_PLANK_T = 0.2
 WINDOW_PANE_T = 0.16
 DOOR_T = 0.2
 TORCH_T = 0.4
+LADDER_T = 0.1
 
 wall_plank_south = box_vertices(-1.0, 1.0, -1.0, 1.0, 1.0 - WALL_PLANK_T, 1.0)
 wall_plank_north = box_vertices(-1.0, 1.0, -1.0, 1.0, -1.0, -1.0 + WALL_PLANK_T)
@@ -81,6 +82,11 @@ torch_south = box_vertices(-0.2, 0.2, -0.2, 0.8, 1.0 - TORCH_T, 1.0)
 torch_north = box_vertices(-0.2, 0.2, -0.2, 0.8, -1.0, -1.0 + TORCH_T)
 torch_east = box_vertices(1.0 - TORCH_T, 1.0, -0.2, 0.8, -0.2, 0.2)
 torch_west = box_vertices(-1.0, -1.0 + TORCH_T, -0.2, 0.8, -0.2, 0.2)
+
+ladder_south = box_vertices(-1.0, 1.0, -1.0, 1.0, 1.0 - LADDER_T, 1.0)
+ladder_north = box_vertices(-1.0, 1.0, -1.0, 1.0, -1.0, -1.0 + LADDER_T)
+ladder_east = box_vertices(1.0 - LADDER_T, 1.0, -1.0, 1.0, -1.0, 1.0)
+ladder_west = box_vertices(-1.0, -1.0 + LADDER_T, -1.0, 1.0, -1.0, 1.0)
 
 def cube_v(pos,n):
     return n*cb_v+np.tile(pos,4)
