@@ -95,6 +95,12 @@ MESH_LOG = False
 HUD_PROBE_ENABLED = False
 HUD_PROBE_EVERY_N_FRAMES = 15
 
+# HUD profiling (break down draw_label timings).
+HUD_PROFILE = True
+HUD_PROFILE_LOG_S = 1.0
+HUD_PROFILE_SPIKE_MS = 20.0
+HUD_DETAIL_REFRESH_S = 1.0
+
 # Loader inflight requests (sector loads).
 LOADER_MAX_INFLIGHT = 1
 
@@ -126,7 +132,7 @@ MAX_LIGHT = 15  # integer light level range (0..MAX_LIGHT)
 SKY_INTENSITY = 1.0  # global sky light multiplier (0..1)
 SKY_SIDEFILL_ENABLED = True  # indirect sky light from sides/seams
 TORCH_FILL_ENABLED = True # torch light propagation to nearby blocks
-LIGHT_PROPAGATION_BFS = False  # use numpy frontier BFS instead of dense relaxation
+LIGHT_PROPAGATION_BFS = True  # use numpy frontier BFS instead of dense relaxation
 # Ambient occlusion settings (darken inner edges/corners of exposed faces).
 AO_ENABLED = True
 AO_STRENGTH = 0.6
