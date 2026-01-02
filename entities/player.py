@@ -196,7 +196,7 @@ class Player(BaseEntity):
         self._ladder_align_start = 0.0
         self._ladder_align_target = 0.0
         self._ladder_last_orient = None
-        self.ladder_pitch_reverse_deg = -25.0
+        self.ladder_pitch_reverse_deg = -60.0
         self.ladder_jump_push = WALKING_SPEED * 0.6
         self._jump_was_down = False
         self.ladder_mount_duration = 0.25
@@ -220,9 +220,17 @@ class Player(BaseEntity):
         self._ladder_requires_clear = False
         self._ladder_dismount_nudge_timer = 0.0
         self._ladder_dismount_nudge_vec = np.zeros(3, dtype=float)
+        self._ladder_mount_from = None
+        self._ladder_dismount_requires_release = False
+        self.ladder_mount_pitch_bottom = 70.0
+        self.ladder_mount_pitch_top = -70.0
+        self.ladder_mount_pitch_neutral = 0.0
         self.camera_yaw_follow = False
         self.camera_yaw_target = 0.0
         self.camera_yaw_duration = self.ladder_align_duration
+        self.camera_pitch_follow = False
+        self.camera_pitch_target = 0.0
+        self.camera_pitch_duration = self.ladder_align_duration
 
     def serialize_state(self):
         return {
@@ -273,6 +281,7 @@ class Player(BaseEntity):
         flying = context.get("flying", False)
         camera_rotation = context.get("camera_rotation")
         apply_rotation = context.get("apply_camera_rotation", False)
+        camera_mode = context.get("camera_mode", "first_person")
 
         if camera_rotation is not None:
             if apply_rotation:
@@ -291,13 +300,21 @@ class Player(BaseEntity):
         ladder_contact = None if self.flying else self._ladder_contact()
         forward = -float(strafe[0])
         right_input = float(strafe[1])
-        wants_ladder = abs(forward) > 1e-3 or self.on_ladder
+        if (
+            self._ladder_dismount_requires_release
+            and abs(forward) <= 1e-3
+            and self._ladder_mount_timer <= 1e-6
+            and self._ladder_dismount_yaw_timer <= 1e-6
+        ):
+            self._ladder_dismount_requires_release = False
+        wants_ladder = (abs(forward) > 1e-3 or self.on_ladder) and not self._ladder_dismount_requires_release
         if (
             not self.on_ladder
             and ladder_contact
             and self._ladder_mount_timer <= 1e-6
             and self._ladder_remount_timer <= 1e-6
             and not self._ladder_requires_clear
+            and not self._ladder_dismount_requires_release
         ):
             self._start_ladder_mount(ladder_contact)
         if self._ladder_mount_timer > 1e-6:
@@ -372,15 +389,41 @@ class Player(BaseEntity):
         if self._ladder_dismount_yaw_timer > 0.0:
             self._update_ladder_dismount_yaw(dt)
         if self.ladder_align_enabled and (self._ladder_mount_timer > 1e-6 or self._ladder_dismount_yaw_timer > 1e-6):
+            target_yaw = None
+            if self._ladder_dismount_yaw_timer > 1e-6:
+                target_yaw = self._ladder_dismount_yaw_target
+            elif self._ladder_mount_timer > 1e-6 and self._ladder_mount_orient is not None:
+                target_yaw = self._ladder_target_yaw(self._ladder_mount_orient)
+            elif self._ladder_last_orient is not None:
+                target_yaw = self._ladder_target_yaw(self._ladder_last_orient)
+            else:
+                target_yaw = float(self.rotation[0])
             self.camera_yaw_follow = True
-            self.camera_yaw_target = -float(self.rotation[0])
+            self.camera_yaw_target = -float(target_yaw)
             self.camera_yaw_duration = (
                 self.ladder_dismount_yaw_duration
                 if self._ladder_dismount_yaw_timer > 1e-6
                 else self.ladder_align_duration
             )
+            self.camera_pitch_follow = True
+            if self._ladder_dismount_yaw_timer > 1e-6:
+                pitch_target = 0.0
+            elif camera_mode == "third_person":
+                pitch_target = 0.0
+            elif self._ladder_mount_timer > 1e-6:
+                if self._ladder_mount_from == "bottom":
+                    pitch_target = self.ladder_mount_pitch_bottom
+                elif self._ladder_mount_from == "top":
+                    pitch_target = self.ladder_mount_pitch_top
+                else:
+                    pitch_target = self.ladder_mount_pitch_neutral
+            else:
+                pitch_target = 0.0
+            self.camera_pitch_target = pitch_target
+            self.camera_pitch_duration = self.camera_yaw_duration
         else:
             self.camera_yaw_follow = False
+            self.camera_pitch_follow = False
         self._jump_was_down = jump_down
         
         super().update(dt)
@@ -470,15 +513,6 @@ class Player(BaseEntity):
                         best_d2 = d2
         return best
 
-    def _ladder_right_vector(self, orient):
-        if orient == ORIENT_SOUTH:
-            return np.array([1.0, 0.0, 0.0], dtype=float)
-        if orient == ORIENT_NORTH:
-            return np.array([-1.0, 0.0, 0.0], dtype=float)
-        if orient == ORIENT_EAST:
-            return np.array([0.0, 0.0, -1.0], dtype=float)
-        return np.array([0.0, 0.0, 1.0], dtype=float)
-
     def _yaw_right_vector(self, yaw_deg):
         rad = math.radians(yaw_deg)
         return np.array([math.cos(rad), 0.0, math.sin(rad)], dtype=float)
@@ -499,6 +533,13 @@ class Player(BaseEntity):
         self._ladder_mount_orient = orient
         self._ladder_mount_start_pos = self.position.copy()
         self._ladder_mount_target_pos = target
+        self._ladder_dismount_requires_release = False
+        if self.position[1] <= by + 0.1:
+            self._ladder_mount_from = "bottom"
+        elif self.position[1] >= by + 0.9:
+            self._ladder_mount_from = "top"
+        else:
+            self._ladder_mount_from = None
 
     def _update_ladder_mount(self, dt):
         if self._ladder_mount_timer <= 0.0:
@@ -543,7 +584,12 @@ class Player(BaseEntity):
             if self.ladder_align_enabled:
                 target = None
                 if reason == "up":
-                    target = self._ladder_target_yaw(orient) + 180.0
+                    target = self._ladder_target_yaw(orient)
+                elif reason == "down":
+                    if forward_input > 1e-3:
+                        target = self._ladder_target_yaw(orient) + 180.0
+                    elif forward_input < -1e-3:
+                        target = self._ladder_target_yaw(orient)
                 elif forward_input < -1e-3 and pitch >= self.ladder_pitch_reverse_deg:
                     target = self._ladder_target_yaw(orient)
                 elif forward_input > 1e-3 and pitch <= self.ladder_pitch_reverse_deg:
@@ -558,6 +604,8 @@ class Player(BaseEntity):
         self._ladder_exit_timer = 0.0
         self._ladder_contact_cache = None
         self._ladder_requires_clear = True
+        self._ladder_mount_from = None
+        self._ladder_dismount_requires_release = reason in ("down", "up")
         if remount_cooldown is None:
             remount_cooldown = self.ladder_remount_cooldown
         self._ladder_remount_timer = max(self._ladder_remount_timer, remount_cooldown)
@@ -606,9 +654,10 @@ class Player(BaseEntity):
         if orient == ORIENT_NORTH:
             return 0.0
         if orient == ORIENT_EAST:
-            return 90.0
-        return 270.0
+            return 270.0
+        return 90.0
 
     def _yaw_lerp(self, start, end, t):
         delta = ((end - start + 180.0) % 360.0) - 180.0
+        print('YAW LERP', start, end, t, delta)
         return start + delta * t

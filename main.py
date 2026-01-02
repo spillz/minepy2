@@ -61,6 +61,13 @@ from blocks import (
 WATER = BLOCK_ID['Water']
 
 
+def pad_header(title, width=40):
+    title = title.strip()
+    pad = (width-len(title)-2)//2
+    if pad <= 0:
+        return title
+    return '='*pad + ' ' + title + ' ' + '='*pad
+
 class Window(pyglet.window.Window):
 
     def __init__(self, *args, **kwargs):
@@ -108,6 +115,12 @@ class Window(pyglet.window.Window):
 
         self.camera_mode = 'first_person'
         self.third_person_distance = 5
+        self._camera_yaw_elapsed = 0.0
+        self._camera_yaw_start = float(self.rotation[0])
+        self._camera_yaw_active_target = None
+        self._camera_pitch_elapsed = 0.0
+        self._camera_pitch_start = float(self.rotation[1])
+        self._camera_pitch_active_target = None
 
 
         self.inventory_item = None
@@ -135,6 +148,8 @@ class Window(pyglet.window.Window):
         self.block_program['u_fog_color'] = (0.5, 0.69, 1.0)
         self.block_program['u_water_pass'] = False
         self.block_program['u_water_alpha'] = getattr(config, 'WATER_ALPHA', 0.8)
+        self.block_program['u_ambient_light'] = getattr(config, 'AMBIENT_LIGHT', 0.0)
+        self.block_program['u_sky_intensity'] = getattr(config, 'SKY_INTENSITY', 1.0)
         if config.DEBUG_SINGLE_BLOCK:
             self.block_program['u_fog_start'] = 1e6
             self.block_program['u_fog_end'] = 2e6
@@ -222,31 +237,31 @@ class Window(pyglet.window.Window):
         self.texture_atlas = image.load(TEXTURE_PATH)
 
         # The label that is displayed in the top left of the canvas.
-        self.label = pyglet.text.Label('', font_name='Arial', font_size=18,
+        self.label = pyglet.text.Label('', font_name='Consolas', font_size=18,
             x=10, y=self.height - 10, anchor_x='left', anchor_y='top',
             color=(0, 0, 0, 255))
-        self.hud_info_label = pyglet.text.Label('', font_name='Arial', font_size=14,
+        self.hud_info_label = pyglet.text.Label('', font_name='Consolas', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - 4,
             anchor_x='left', anchor_y='top',
-            color=(0, 0, 0, 255))
-        self.sector_label = pyglet.text.Label('', font_name='Arial', font_size=14,
+            color=(0, 0, 0, 255), multiline=True, width=self.width - 20)
+        self.sector_label = pyglet.text.Label('', font_name='Consolas', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - self.hud_info_label.content_height - 8,
             anchor_x='left', anchor_y='top',
-            color=(0, 0, 0, 255))
-        self.sector_debug_label = pyglet.text.Label('', font_name='Arial', font_size=14,
+            color=(0, 0, 0, 255), multiline=True, width=self.width - 20)
+        self.sector_debug_label = pyglet.text.Label('', font_name='Consolas', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - self.hud_info_label.content_height - self.sector_label.content_height - 12,
             anchor_x='left', anchor_y='top',
-            color=(0, 0, 0, 255))
-        self.entity_label = pyglet.text.Label('', font_name='Arial', font_size=14,
+            color=(0, 0, 0, 255), multiline=True, width=self.width - 20)
+        self.entity_label = pyglet.text.Label('', font_name='Consolas', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - self.hud_info_label.content_height - self.sector_label.content_height - self.sector_debug_label.content_height - 16,
             anchor_x='left', anchor_y='top',
-            color=(0, 0, 0, 255))
-        self.keybind_label = pyglet.text.Label('', font_name='Arial', font_size=14,
+            color=(0, 0, 0, 255), multiline=True, width=self.width - 20)
+        self.keybind_label = pyglet.text.Label('', font_name='Consolas', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - self.hud_info_label.content_height - self.sector_label.content_height - self.sector_debug_label.content_height - self.entity_label.content_height - 20,
             anchor_x='left', anchor_y='top',
-            color=(0, 0, 0, 255))
+            color=(0, 0, 0, 255), multiline=True, width=self.width - 20)
         self._label_bg = shapes.Rectangle(0, 0, 1, 1, color=(255, 255, 255))
-        self._label_bg.opacity = 120  # semi-transparent
+        self._label_bg.opacity = 80  # more transparent
         self._underwater_overlay = shapes.Rectangle(0, 0, 1, 1, color=config.UNDERWATER_COLOR)
         self.last_draw_ms = 0.0
         self.last_update_ms = 0.0
@@ -255,6 +270,7 @@ class Window(pyglet.window.Window):
         self._hud_probe_void = 'N/A'
         self._hud_probe_mush = 'NA'
         self.hud_visible = True
+        self.hud_details_visible = False
         self.vsync_enabled = True
         self._hud_stats_start = time.perf_counter()
         self._hud_stats_frames = 0
@@ -282,9 +298,25 @@ class Window(pyglet.window.Window):
         self._hud_stats_anim_sum = 0.0
         self._hud_stats_anim_min = None
         self._hud_stats_anim_max = None
+        self._hud_stats_world_sum = 0.0
+        self._hud_stats_world_min = None
+        self._hud_stats_world_max = None
+        self._hud_stats_entities_sum = 0.0
+        self._hud_stats_entities_min = None
+        self._hud_stats_entities_max = None
+        self._hud_stats_water_sum = 0.0
+        self._hud_stats_water_min = None
+        self._hud_stats_water_max = None
+        self._hud_stats_overlay_sum = 0.0
+        self._hud_stats_overlay_min = None
+        self._hud_stats_overlay_max = None
+        self._hud_stats_upload_sum = 0.0
+        self._hud_stats_upload_min = None
+        self._hud_stats_upload_max = None
         self._hud_stats_slow_count = 0
         self._hud_stats_slow_max = 0.0
         self._hud_stats_detail_text = ""
+        self._hud_stats_draw_detail_text = ""
         self._last_sector_ms = 0.0
         self._last_update_sectors_ms = 0.0
         self._last_mesh_jobs_ms = 0.0
@@ -292,6 +324,21 @@ class Window(pyglet.window.Window):
         self._last_anim_ms = 0.0
         self._last_update_total_ms = 0.0
         self._hud_stats_text = ""
+        self._hud_block1_text = ""
+        self._hud_block2_text = ""
+        self._hud_block3_text = ""
+        self._hud_block4_text = ""
+        self._hud_block5_text = ""
+        self._hud_block_last_update = 0.0
+        self._hud_last_loader_count = 0
+        self._hud_last_mesh_done = 0
+        self._hud_upload_budget_ms = 0.0
+        self._hud_upload_skipped = 0
+        self._hud_last_upload_skipped = 0
+        self._hud_tri_budget = 0
+        self._hud_tri_uploaded = 0
+        self._hud_upload_pending = 0
+        self._hud_layout_dirty = True
 
         # Target frame pacing and local FPS tracking (not dependent on pyglet internals).
         desired_fps = getattr(config, 'TARGET_FPS', None)
@@ -342,6 +389,8 @@ class Window(pyglet.window.Window):
             self.hud_info_label.text,
             self.sector_label.text,
             self.sector_debug_label.text,
+            self.entity_label.text,
+            self.keybind_label.text,
         ]
         return "\n".join(line for line in lines if line)
 
@@ -529,6 +578,12 @@ class Window(pyglet.window.Window):
 
         """
         motion_vector = self.get_motion_vector()
+        ladder_aligning = (
+            getattr(self.player_entity, "_ladder_mount_timer", 0.0) > 1e-6
+            or getattr(self.player_entity, "_ladder_dismount_yaw_timer", 0.0) > 1e-6
+        )
+        if ladder_aligning:
+            motion_vector = (0.0, 0.0, 0.0)
         dx, _, dz = motion_vector
         is_moving = abs(dx) > 1e-6 or abs(dz) > 1e-6
         target_animation = 'walk' if is_moving else 'idle'
@@ -543,10 +598,11 @@ class Window(pyglet.window.Window):
             "flying": self.flying,
             "world_model": self.model,
             "camera_rotation": camera_rot,
-            "apply_camera_rotation": is_moving,
+            "apply_camera_rotation": is_moving and not ladder_aligning,
             "player_position": self.player_entity.position.copy(),
-            "strafe": tuple(self.strafe),
-            "jump": bool(self.keys[key.SPACE]),
+            "camera_mode": self.camera_mode,
+            "strafe": (0, 0) if ladder_aligning else tuple(self.strafe),
+            "jump": False if ladder_aligning else bool(self.keys[key.SPACE]),
         }
         t0 = time.perf_counter()
         update_count = 0
@@ -581,8 +637,31 @@ class Window(pyglet.window.Window):
             target = getattr(self.player_entity, "camera_yaw_target", None)
             duration = getattr(self.player_entity, "camera_yaw_duration", 0.0)
             if target is not None and duration > 1e-6:
-                t = min(1.0, dt / duration)
-                self.rotation = (self._yaw_lerp(self.rotation[0], target, t), self.rotation[1])
+                if self._camera_yaw_active_target is None or abs(target - self._camera_yaw_active_target) > 1e-6:
+                    self._camera_yaw_active_target = target
+                    self._camera_yaw_start = float(self.rotation[0])
+                    self._camera_yaw_elapsed = 0.0
+                self._camera_yaw_elapsed = min(duration, self._camera_yaw_elapsed + dt)
+                t = min(1.0, self._camera_yaw_elapsed / duration)
+                self.rotation = (self._yaw_lerp(self._camera_yaw_start, target, t), self.rotation[1])
+        else:
+            self._camera_yaw_active_target = None
+            self._camera_yaw_elapsed = 0.0
+        if getattr(self.player_entity, "camera_pitch_follow", False):
+            target = getattr(self.player_entity, "camera_pitch_target", None)
+            duration = getattr(self.player_entity, "camera_pitch_duration", 0.0)
+            if target is not None and duration > 1e-6:
+                if self._camera_pitch_active_target is None or abs(target - self._camera_pitch_active_target) > 1e-6:
+                    self._camera_pitch_active_target = target
+                    self._camera_pitch_start = float(self.rotation[1])
+                    self._camera_pitch_elapsed = 0.0
+                self._camera_pitch_elapsed = min(duration, self._camera_pitch_elapsed + dt)
+                t = min(1.0, self._camera_pitch_elapsed / duration)
+                pitch = self._camera_pitch_start + (target - self._camera_pitch_start) * t
+                self.rotation = (self.rotation[0], pitch)
+        else:
+            self._camera_pitch_active_target = None
+            self._camera_pitch_elapsed = 0.0
         self._entity_persist_timer -= dt
         if self._entity_persist_timer <= 0:
             self._persist_entity_states()
@@ -715,6 +794,11 @@ class Window(pyglet.window.Window):
 
         """
         if self.exclusive:
+            if (
+                getattr(self.player_entity, "_ladder_mount_timer", 0.0) > 1e-6
+                or getattr(self.player_entity, "_ladder_dismount_yaw_timer", 0.0) > 1e-6
+            ):
+                return
             m = 0.15
             x, y = self.rotation  # x = yaw (degrees), y = pitch (degrees)
             x = x + dx * m
@@ -768,6 +852,8 @@ class Window(pyglet.window.Window):
                 self.set_vsync(self.vsync_enabled)
             except Exception:
                 pass
+        elif symbol == key.F3:
+            self.hud_details_visible = not self.hud_details_visible
         elif symbol == key.B:
             self._toggle_snail()
         elif symbol == key.M:
@@ -844,11 +930,15 @@ class Window(pyglet.window.Window):
         """
         # label
         self.label.y = height - 10
-        self.hud_info_label.y = self.label.y - self.label.content_height - 4
-        self.sector_label.y = self.hud_info_label.y - self.hud_info_label.content_height - 4
-        self.sector_debug_label.y = self.sector_label.y - self.sector_label.content_height - 4
-        self.entity_label.y = self.sector_debug_label.y - self.sector_debug_label.content_height - 4
-        self.keybind_label.y = self.entity_label.y - self.entity_label.content_height - 4
+        for label in (
+            self.hud_info_label,
+            self.sector_label,
+            self.sector_debug_label,
+            self.entity_label,
+            self.keybind_label,
+        ):
+            label.width = width - 20
+        self._hud_layout_dirty = True
         # reticle uses shader-based shapes instead of deprecated vertex_list
         self.reticle_batch = None
         cx, cy = self.width / 2, self.height / 2
@@ -986,6 +1076,9 @@ class Window(pyglet.window.Window):
         upload_budget = max(0.5/self.target_fps, 0.5 * frame_budget)
         self.clear()
         self.set_3d()
+
+        self.block_program['u_ambient_light'] = getattr(config, 'AMBIENT_LIGHT', 0.0)
+        self.block_program['u_sky_intensity'] = getattr(config, 'SKY_INTENSITY', 1.0)
         
         t0 = time.perf_counter()
         # Draw world (opaque pass only so water can overlay entities).
@@ -994,8 +1087,6 @@ class Window(pyglet.window.Window):
             self.get_frustum_circle(),
             frame_start,
             upload_budget,
-            defer_uploads=True,
-            draw_water=False,
         )
         world_ms = (time.perf_counter() - t0) * 1000.0
         
@@ -1033,13 +1124,21 @@ class Window(pyglet.window.Window):
         
         # Use leftover budget to upload meshes at the end of the frame.
         elapsed = time.perf_counter() - frame_start
-        if elapsed < frame_budget:  # optional safety guard
-            upload_start = time.perf_counter()
-            # Decide how much *extra* time you’re willing to spend on uploads now.
-            extra_budget = min(upload_budget, frame_budget - (time.perf_counter() - frame_start))
-            if extra_budget > 0:
-                self.model.process_pending_uploads(upload_start, extra_budget)
-        upload_ms = (time.perf_counter() - upload_start) * 1000.0 if elapsed < frame_budget else 0.0
+        upload_start = time.perf_counter()
+        remaining = frame_budget - (time.perf_counter() - frame_start)
+        extra_budget = min(upload_budget, remaining) if remaining > 0.0 else 0.0
+        min_budget = getattr(config, 'UPLOAD_MIN_BUDGET_MS', 1.0) / 1000.0
+        budget = max(extra_budget, min_budget)
+        self._hud_upload_budget_ms = budget * 1000.0
+        before_pending = len(self.model.pending_uploads)
+        tri_budget = getattr(config, 'UPLOAD_TRIANGLE_BUDGET', None)
+        uploaded_tris = self.model.process_pending_uploads(upload_start, budget, 0, tri_budget)
+        if uploaded_tris == 0 and before_pending > 0:
+            self._hud_upload_skipped += 1
+        self._hud_tri_budget = tri_budget if tri_budget is not None else 0
+        self._hud_tri_uploaded = uploaded_tris
+        self._hud_upload_pending = len(self.model.pending_uploads)
+        upload_ms = (time.perf_counter() - upload_start) * 1000.0
         logutil.log(
             "MAINLOOP",
             f"draw world_ms={world_ms:.2f} entity_ms={entity_draw_ms:.2f} "
@@ -1062,6 +1161,11 @@ class Window(pyglet.window.Window):
         self._hud_stats_mesh_jobs_sum += mesh_jobs_ms
         self._hud_stats_physics_sum += physics_ms
         self._hud_stats_anim_sum += anim_ms
+        self._hud_stats_world_sum += world_ms
+        self._hud_stats_entities_sum += entity_draw_ms
+        self._hud_stats_water_sum += water_ms
+        self._hud_stats_overlay_sum += overlay_ms
+        self._hud_stats_upload_sum += upload_ms
         if self._hud_stats_sector_min is None or sector_ms < self._hud_stats_sector_min:
             self._hud_stats_sector_min = sector_ms
         if self._hud_stats_sector_max is None or sector_ms > self._hud_stats_sector_max:
@@ -1082,6 +1186,26 @@ class Window(pyglet.window.Window):
             self._hud_stats_anim_min = anim_ms
         if self._hud_stats_anim_max is None or anim_ms > self._hud_stats_anim_max:
             self._hud_stats_anim_max = anim_ms
+        if self._hud_stats_world_min is None or world_ms < self._hud_stats_world_min:
+            self._hud_stats_world_min = world_ms
+        if self._hud_stats_world_max is None or world_ms > self._hud_stats_world_max:
+            self._hud_stats_world_max = world_ms
+        if self._hud_stats_entities_min is None or entity_draw_ms < self._hud_stats_entities_min:
+            self._hud_stats_entities_min = entity_draw_ms
+        if self._hud_stats_entities_max is None or entity_draw_ms > self._hud_stats_entities_max:
+            self._hud_stats_entities_max = entity_draw_ms
+        if self._hud_stats_water_min is None or water_ms < self._hud_stats_water_min:
+            self._hud_stats_water_min = water_ms
+        if self._hud_stats_water_max is None or water_ms > self._hud_stats_water_max:
+            self._hud_stats_water_max = water_ms
+        if self._hud_stats_overlay_min is None or overlay_ms < self._hud_stats_overlay_min:
+            self._hud_stats_overlay_min = overlay_ms
+        if self._hud_stats_overlay_max is None or overlay_ms > self._hud_stats_overlay_max:
+            self._hud_stats_overlay_max = overlay_ms
+        if self._hud_stats_upload_min is None or upload_ms < self._hud_stats_upload_min:
+            self._hud_stats_upload_min = upload_ms
+        if self._hud_stats_upload_max is None or upload_ms > self._hud_stats_upload_max:
+            self._hud_stats_upload_max = upload_ms
         if self._hud_stats_dt_min is None or dt_ms < self._hud_stats_dt_min:
             self._hud_stats_dt_min = dt_ms
         if self._hud_stats_dt_max is None or dt_ms > self._hud_stats_dt_max:
@@ -1111,6 +1235,11 @@ class Window(pyglet.window.Window):
             avg_mesh_jobs = self._hud_stats_mesh_jobs_sum / frames
             avg_physics = self._hud_stats_physics_sum / frames
             avg_anim = self._hud_stats_anim_sum / frames
+            avg_world = self._hud_stats_world_sum / frames
+            avg_entities = self._hud_stats_entities_sum / frames
+            avg_water = self._hud_stats_water_sum / frames
+            avg_overlay = self._hud_stats_overlay_sum / frames
+            avg_upload = self._hud_stats_upload_sum / frames
             self._hud_stats_detail_text = (
                 f"sector avg={avg_sector:.2f} min={self._hud_stats_sector_min:.2f} max={self._hud_stats_sector_max:.2f} | "
                 f"update_sectors avg={avg_update_sectors:.2f} min={self._hud_stats_update_sectors_min:.2f} max={self._hud_stats_update_sectors_max:.2f} | "
@@ -1118,6 +1247,23 @@ class Window(pyglet.window.Window):
                 f"physics avg={avg_physics:.2f} min={self._hud_stats_physics_min:.2f} max={self._hud_stats_physics_max:.2f} | "
                 f"anim avg={avg_anim:.2f} min={self._hud_stats_anim_min:.2f} max={self._hud_stats_anim_max:.2f}"
             )
+            self._hud_stats_draw_detail_text = (
+                f"world avg={avg_world:.2f} min={self._hud_stats_world_min:.2f} max={self._hud_stats_world_max:.2f} | "
+                f"ent avg={avg_entities:.2f} min={self._hud_stats_entities_min:.2f} max={self._hud_stats_entities_max:.2f} | "
+                f"water avg={avg_water:.2f} min={self._hud_stats_water_min:.2f} max={self._hud_stats_water_max:.2f} | "
+                f"overlay avg={avg_overlay:.2f} min={self._hud_stats_overlay_min:.2f} max={self._hud_stats_overlay_max:.2f} | "
+                f"upload avg={avg_upload:.2f} min={self._hud_stats_upload_min:.2f} max={self._hud_stats_upload_max:.2f}"
+            )
+            title = pad_header("Frame update timing")
+            self._hud_block2_text = f"{title}\n{self._hud_stats_text}"
+            if self._hud_stats_detail_text:
+                self._hud_block2_text = (
+                    f"{title}\n{self._hud_stats_text}\n{self._hud_stats_detail_text}"
+                )
+            if self._hud_stats_draw_detail_text:
+                self._hud_block2_text = (
+                    f"{self._hud_block2_text}\n{self._hud_stats_draw_detail_text}"
+                )
             self._hud_stats_start = time.perf_counter()
             self._hud_stats_frames = 0
             self._hud_stats_dt_sum = 0.0
@@ -1144,9 +1290,31 @@ class Window(pyglet.window.Window):
             self._hud_stats_anim_sum = 0.0
             self._hud_stats_anim_min = None
             self._hud_stats_anim_max = None
+            self._hud_stats_world_sum = 0.0
+            self._hud_stats_world_min = None
+            self._hud_stats_world_max = None
+            self._hud_stats_entities_sum = 0.0
+            self._hud_stats_entities_min = None
+            self._hud_stats_entities_max = None
+            self._hud_stats_water_sum = 0.0
+            self._hud_stats_water_min = None
+            self._hud_stats_water_max = None
+            self._hud_stats_overlay_sum = 0.0
+            self._hud_stats_overlay_min = None
+            self._hud_stats_overlay_max = None
+            self._hud_stats_upload_sum = 0.0
+            self._hud_stats_upload_min = None
+            self._hud_stats_upload_max = None
             self._hud_stats_slow_count = 0
             self._hud_stats_slow_max = 0.0
+            self._hud_stats_draw_detail_text = ""
         logutil.log("FRAME", f"end ms={self.last_draw_ms:.2f}")
+
+    def _set_label_text(self, label, text):
+        if label.text == text:
+            return False
+        label.text = text
+        return True
 
     def draw_label(self):
         """ Draw the label in the top left of the screen.
@@ -1156,7 +1324,6 @@ class Window(pyglet.window.Window):
             return
         x, y, z = self.position
         rx, ry = self.rotation
-        fps = self._current_fps()
         sector = util.sectorize((x, y, z))
         if getattr(config, 'HUD_PROBE_ENABLED', False):
             self._hud_probe_frame += 1
@@ -1186,163 +1353,345 @@ class Window(pyglet.window.Window):
         else:
             void_text = 'N/A'
             mush_text = 'NA'
-        self.label.text = 'FPS(%.1f), pos(%.2f, %.2f, %.2f) sector(%d, 0, %d) rot(%.1f, %.1f) void %s mush %s' % (
-            fps, x, y, z, sector[0], sector[2], rx, ry, void_text, mush_text
-        )
-        self.hud_info_label.text = self._hud_stats_text
-        if getattr(self, "_hud_stats_detail_text", ""):
-            self.hud_info_label.text = f"{self.hud_info_label.text}\n{self._hud_stats_detail_text}"
-        sector_state = []
-        sector_state.append(f"Sector({sector[0]}, 0, {sector[2]})")
-        sector_debug = []
-        s = self.model.sectors.get(sector)
-        if s is None:
-            sector_state.append("state=missing")
-            sector_debug.append("state=missing")
-        else:
-            light = 'Y' if s.light is not None else 'N'
-            mesh_ready = self.model._mesh_ready(s)
-            neighbors_missing = self.model._neighbors_missing(s)
-            needs_mesh = (s.vt_data is None and not s.mesh_built)
-            needs_light = self.model._needs_light(s)
-            if s.mesh_job_pending:
-                waiting = "mesh_job"
-            elif neighbors_missing:
-                waiting = "neighbors"
-            elif not s.seam_synced:
-                waiting = "seam"
-            elif not s.light_combined:
-                waiting = "light"
-            elif needs_mesh:
-                waiting = "mesh"
-            elif needs_light:
-                waiting = "light_recalc"
+        now = time.perf_counter()
+        if now - self._hud_block_last_update >= 1.0:
+            self._hud_block_last_update = now
+            fps = self._current_fps()
+            seed_val = getattr(self.model, "world_seed", None)
+            seed_text = str(seed_val) if seed_val is not None else "NA"
+            self._hud_block1_text = (
+                'FPS(%.1f), pos(%.2f, %.2f, %.2f) sector(%d, 0, %d) rot(%.1f, %.1f) seed %s void %s mush %s' % (
+                    fps, x, y, z, sector[0], sector[2], rx, ry, seed_text, void_text, mush_text
+                )
+            )
+            if not self.hud_details_visible:
+                self._hud_block2_text = ""
+                self._hud_block3_text = ""
+                self._hud_block4_text = ""
+                self._hud_block5_text = ""
             else:
-                waiting = "idle"
+                sector_state = [f"Sector({sector[0]}, 0, {sector[2]})"]
+                sector_debug = []
+                s = self.model.sectors.get(sector)
+                def _refresh_stat_last(obj):
+                    obj.stat_load_count_last = obj.stat_load_count_total - obj.stat_load_count_prev
+                    obj.stat_load_ms_last = obj.stat_load_ms_total - obj.stat_load_ms_prev
+                    obj.stat_light_count_last = obj.stat_light_count_total - obj.stat_light_count_prev
+                    obj.stat_light_ms_last = obj.stat_light_ms_total - obj.stat_light_ms_prev
+                    obj.stat_mesh_count_last = obj.stat_mesh_count_total - obj.stat_mesh_count_prev
+                    obj.stat_mesh_ms_last = obj.stat_mesh_ms_total - obj.stat_mesh_ms_prev
+                    obj.stat_upload_count_last = obj.stat_upload_count_total - obj.stat_upload_count_prev
+                    obj.stat_upload_ms_last = obj.stat_upload_ms_total - obj.stat_upload_ms_prev
+                    obj.stat_load_count_prev = obj.stat_load_count_total
+                    obj.stat_load_ms_prev = obj.stat_load_ms_total
+                    obj.stat_light_count_prev = obj.stat_light_count_total
+                    obj.stat_light_ms_prev = obj.stat_light_ms_total
+                    obj.stat_mesh_count_prev = obj.stat_mesh_count_total
+                    obj.stat_mesh_ms_prev = obj.stat_mesh_ms_total
+                    obj.stat_upload_count_prev = obj.stat_upload_count_total
+                    obj.stat_upload_ms_prev = obj.stat_upload_ms_total
+                    if hasattr(obj, "stat_loader_block_defer_total"):
+                        obj.stat_loader_block_defer_last = obj.stat_loader_block_defer_total - obj.stat_loader_block_defer_prev
+                        obj.stat_loader_block_mesh_last = obj.stat_loader_block_mesh_total - obj.stat_loader_block_mesh_prev
+                        obj.stat_loader_block_inflight_last = obj.stat_loader_block_inflight_total - obj.stat_loader_block_inflight_prev
+                        obj.stat_loader_sent_last = obj.stat_loader_sent_total - obj.stat_loader_sent_prev
+                        obj.stat_load_refresh_last = obj.stat_load_refresh_total - obj.stat_load_refresh_prev
+                        obj.stat_load_candidates_last = obj.stat_load_candidates_total - obj.stat_load_candidates_prev
+                        obj.stat_loader_block_defer_prev = obj.stat_loader_block_defer_total
+                        obj.stat_loader_block_mesh_prev = obj.stat_loader_block_mesh_total
+                        obj.stat_loader_block_inflight_prev = obj.stat_loader_block_inflight_total
+                        obj.stat_loader_sent_prev = obj.stat_loader_sent_total
+                        obj.stat_load_refresh_prev = obj.stat_load_refresh_total
+                        obj.stat_load_candidates_prev = obj.stat_load_candidates_total
 
-            def _quad_count(entry):
-                if not entry or entry[0] <= 0:
-                    return 0
-                return int(entry[0] // 4)
-
-            def _float_count(entry):
-                if not entry or entry[0] <= 0:
-                    return 0
-                _, v, t, n, c = entry
-                return len(v) + len(t) + len(n) + len(c)
-
-            vt_info = "vt=N"
-            if s.vt_data is not None:
-                if isinstance(s.vt_data, dict):
-                    solid_entry = s.vt_data.get('solid')
-                    water_entry = s.vt_data.get('water')
+                _refresh_stat_last(self.model)
+                if s is None:
+                    sector_state.append("state=missing")
+                    sector_debug.append("state=missing")
                 else:
-                    solid_entry = s.vt_data
-                    water_entry = None
-                solid_quads = _quad_count(solid_entry)
-                water_quads = _quad_count(water_entry)
-                total_floats = _float_count(solid_entry) + _float_count(water_entry)
-                kb = (total_floats * 4) / 1024.0 if total_floats else 0.0
-                vt_info = f"vt=Y q={solid_quads}/{water_quads} kb={kb:.1f}"
-            else:
-                solid_quads = int(getattr(s, "vt_solid_quads", 0) or 0)
-                water_quads = int(getattr(s, "vt_water_quads", 0) or 0)
-                if solid_quads or water_quads:
-                    vt_info = f"vt=N q={solid_quads}/{water_quads}"
+                    _refresh_stat_last(s)
 
-            uploaded = "Y" if (s.vt or s.vt_water) else "N"
-            solid_verts = sum(getattr(vt, "count", 0) for vt in s.vt)
-            water_verts = sum(getattr(vt, "count", 0) for vt in s.vt_water)
-            upload_solid = f"{s.vt_upload_solid}/{s.vt_solid_quads}"
-            upload_water = f"{s.vt_upload_water}/{s.vt_water_quads}"
-            solid_tris_expected = int(s.vt_solid_quads * 2)
-            water_tris_expected = int(s.vt_water_quads * 2)
-            pending_vt = len(getattr(s, "pending_vt", []))
-            pending_vt_water = len(getattr(s, "pending_vt_water", []))
-            use_pending = "Y" if getattr(s, "vt_upload_use_pending", False) else "N"
-            upload_prepared = "Y" if s.vt_upload_prepared else "N"
-            clear_pending = "Y" if s.vt_clear_pending else "N"
-            token = getattr(s, "vt_upload_token", 0)
-            active_token = getattr(s, "vt_upload_active_token", None)
-            active_token_text = "None" if active_token is None else str(active_token)
-            dirty = "Y" if s.mesh_job_dirty else "N"
-            inflight = "Y" if s.edit_inflight else "N"
+                    light = 'Y' if (not s.light_dirty_internal and not s.light_dirty_incoming) else 'N'
+                    mesh_ready = self.model._mesh_ready(s)
+                    neighbors_missing = self.model._neighbors_missing(s)
+                    needs_mesh = (s.vt_data is None and not s.mesh_built)
+                    needs_light = self.model._needs_light(s)
+                    if s.mesh_job_pending:
+                        waiting = "mesh_job"
+                    elif neighbors_missing:
+                        waiting = "neighbors"
+                    elif needs_mesh:
+                        waiting = "mesh"
+                    elif needs_light:
+                        waiting = "light_recalc"
+                    else:
+                        waiting = "idle"
 
-            sector_state.append(
-                f"seam={'Y' if s.seam_synced else 'N'} light={light} "
-                f"combined={'Y' if s.light_combined else 'N'} "
-                f"mesh_ready={'Y' if mesh_ready else 'N'} "
-                f"pending={'Y' if s.mesh_job_pending else 'N'} "
-                f"built={'Y' if s.mesh_built else 'N'} "
-                f"uploaded={uploaded} vt_lists={len(s.vt)}/{len(s.vt_water)} "
-                f"verts={solid_verts}/{water_verts} "
-                f"upload={upload_solid}/{upload_water} "
-                f"{vt_info} wait={waiting}"
-            )
-            sector_debug.append(
-                f"tris={solid_verts}/{solid_tris_expected} water={water_verts}/{water_tris_expected} "
-                f"pending_vt={pending_vt}/{pending_vt_water} use_pending={use_pending} "
-                f"prep={upload_prepared} clear_pending={clear_pending} token={token}/{active_token_text} "
-                f"gen={s.mesh_gen} dirty={dirty} inflight={inflight}"
-            )
-        self.sector_label.text = " | ".join(sector_state)
-        self.sector_debug_label.text = " | ".join(sector_debug)
-        entity_lines = []
-        for entity_state in self.entities.values():
-            if entity_state['type'] == 'player':
-                continue
-            pos = entity_state.get('pos')
-            if pos is None:
-                continue
-            px, py, pz = pos
-            entity_lines.append(f"{entity_state['type']}({px:.1f},{py:.1f},{pz:.1f})")
-        if entity_lines:
-            entity_text = "Ent: " + " | ".join(entity_lines)
+                    def _quad_count(entry):
+                        if not entry or entry[0] <= 0:
+                            return 0
+                        return int(entry[0] // 4)
+
+                    def _float_count(entry):
+                        if not entry or entry[0] <= 0:
+                            return 0
+                        _, v, t, n, c, l = entry
+                        return len(v) + len(t) + len(n) + len(c) + len(l)
+
+                    vt_info = "vt=N"
+                    if s.vt_data is not None:
+                        if isinstance(s.vt_data, dict):
+                            solid_entry = s.vt_data.get('solid')
+                            water_entry = s.vt_data.get('water')
+                        else:
+                            solid_entry = s.vt_data
+                            water_entry = None
+                        solid_quads = _quad_count(solid_entry)
+                        water_quads = _quad_count(water_entry)
+                        total_floats = _float_count(solid_entry) + _float_count(water_entry)
+                        kb = (total_floats * 4) / 1024.0 if total_floats else 0.0
+                        vt_info = f"vt=Y quads={solid_quads}/{water_quads} kb={kb:.1f}"
+                    else:
+                        solid_quads = int(getattr(s, "vt_solid_quads", 0) or 0)
+                        water_quads = int(getattr(s, "vt_water_quads", 0) or 0)
+                        if solid_quads or water_quads:
+                            vt_info = f"vt=N quads={solid_quads}/{water_quads}"
+
+                    uploaded = "Y" if (s.vt or s.vt_water) else "N"
+                    solid_verts = sum(getattr(vt, "count", 0) for vt in s.vt)
+                    water_verts = sum(getattr(vt, "count", 0) for vt in s.vt_water)
+                    upload_solid = f"{s.vt_upload_solid}/{s.vt_solid_quads}"
+                    upload_water = f"{s.vt_upload_water}/{s.vt_water_quads}"
+                    solid_tris_expected = int(s.vt_solid_quads * 2)
+                    water_tris_expected = int(s.vt_water_quads * 2)
+                    solid_tris_actual = int(solid_verts // 3) if solid_verts else 0
+                    water_tris_actual = int(water_verts // 3) if water_verts else 0
+                    pending_vt = len(getattr(s, "pending_vt", []))
+                    pending_vt_water = len(getattr(s, "pending_vt_water", []))
+                    use_pending = "Y" if getattr(s, "vt_upload_use_pending", False) else "N"
+                    upload_prepared = "Y" if s.vt_upload_prepared else "N"
+                    clear_pending = "Y" if s.vt_clear_pending else "N"
+                    token = getattr(s, "vt_upload_token", 0)
+                    active_token = getattr(s, "vt_upload_active_token", None)
+                    active_token_text = "None" if active_token is None else str(active_token)
+                    dirty = "Y" if s.mesh_job_dirty else "N"
+                    inflight = "Y" if s.edit_inflight else "N"
+
+                    sector_state.append(
+                        f"light={light} mesh_ready={'Y' if mesh_ready else 'N'} "
+                        f"pending={'Y' if s.mesh_job_pending else 'N'} "
+                        f"built={'Y' if s.mesh_built else 'N'} "
+                        f"uploaded={uploaded} vt_lists={len(s.vt)}/{len(s.vt_water)} "
+                        f"verts={solid_verts}/{water_verts} "
+                        f"upload={upload_solid}/{upload_water} "
+                        f"{vt_info} wait={waiting}"
+                    )
+                    sector_debug.append(
+                        f"tris={solid_tris_actual}/{solid_tris_expected} verts={solid_verts}/"
+                        f"{solid_tris_expected * 3} water_tris={water_tris_actual}/{water_tris_expected} "
+                        f"water_verts={water_verts}/{water_tris_expected * 3} "
+                        f"pending_vt={pending_vt}/{pending_vt_water} use_pending={use_pending} "
+                        f"prep={upload_prepared} clear_pending={clear_pending} token={token}/{active_token_text} "
+                        f"gen={s.mesh_gen} dirty={dirty} inflight={inflight}"
+                    )
+
+                self._hud_block3_text = f"{pad_header("Current sector")}\n" + " | ".join(sector_state)
+                if sector_debug:
+                    self._hud_block3_text = f"{self._hud_block3_text}\n" + " | ".join(sector_debug)
+                if s is not None:
+                    table = [
+                        "stage   total_ct total_ms 1s_ct 1s_ms",
+                        f"load    {s.stat_load_count_total:8d} {s.stat_load_ms_total:8.1f} {s.stat_load_count_last:5d} {s.stat_load_ms_last:6.1f}",
+                        f"light   {s.stat_light_count_total:8d} {s.stat_light_ms_total:8.1f} {s.stat_light_count_last:5d} {s.stat_light_ms_last:6.1f}",
+                        f"mesh    {s.stat_mesh_count_total:8d} {s.stat_mesh_ms_total:8.1f} {s.stat_mesh_count_last:5d} {s.stat_mesh_ms_last:6.1f}",
+                        f"upload  {s.stat_upload_count_total:8d} {s.stat_upload_ms_total:8.1f} {s.stat_upload_count_last:5d} {s.stat_upload_ms_last:6.1f}",
+                    ]
+                    self._hud_block3_text = f"{self._hud_block3_text}\n" + "\n".join(table)
+
+                model = self.model
+                inflight = model.n_requests - model.n_responses
+                pending_load = len(getattr(model, "update_sectors_pos", []))
+                loader_q = len(getattr(model, "loader_requests", []))
+                mesh_pending = sum(1 for s in model.sectors.values() if s.mesh_job_pending)
+                upload_pending = len(getattr(model, "pending_uploads", []))
+                loader_total = getattr(model, "loader_sectors_received_total", 0)
+                mesh_total = getattr(model, "mesh_jobs_completed_total", 0)
+                mesh_submit_total = getattr(model, "mesh_jobs_submitted_total", 0)
+                loader_delta = loader_total - self._hud_last_loader_count
+                mesh_delta = mesh_total - self._hud_last_mesh_done
+                mesh_submit_delta = mesh_submit_total - getattr(self, "_hud_last_mesh_submitted", 0)
+                self._hud_last_loader_count = loader_total
+                self._hud_last_mesh_done = mesh_total
+                self._hud_last_mesh_submitted = mesh_submit_total
+                upload_skipped_delta = self._hud_upload_skipped - self._hud_last_upload_skipped
+                self._hud_last_upload_skipped = self._hud_upload_skipped
+                recent_load = list(getattr(model, "loader_recent", []))
+                recent_mesh = list(getattr(model, "mesh_recent", []))
+                stats_enabled = True
+                shown = getattr(model, "stats_shown_sectors", 0)
+                total = getattr(model, "stats_total_sectors", len(model.sectors))
+                drawn_solid = getattr(model, "stats_drawn_tris_solid", 0)
+                drawn_water = getattr(model, "stats_drawn_tris_water", 0)
+                cull_ms = getattr(model, "stats_cull_ms", 0.0)
+                batches_solid = getattr(model, "stats_batches_solid", 0)
+                batches_water = getattr(model, "stats_batches_water", 0)
+                vlists_solid = getattr(model, "stats_vlists_solid", 0)
+                vlists_water = getattr(model, "stats_vlists_water", 0)
+                draw_calls = getattr(model, "stats_draw_calls", 0)
+                if not stats_enabled:
+                    shown_text = "shown=NA/NA"
+                    tris_text = "tris_solid=NA tris_water=NA"
+                    cull_text = "cull_ms=NA"
+                    draw_text = "draw_calls=NA batches=NA/NA vlists=NA/NA"
+                else:
+                    shown_text = f"shown={shown}/{total}"
+                    tris_text = f"tris_solid={drawn_solid} tris_water={drawn_water}"
+                    cull_text = f"cull_ms={cull_ms:.2f}"
+                    draw_text = f"draw_calls={draw_calls} batches={batches_solid}/{batches_water} vlists={vlists_solid}/{vlists_water}"
+
+                self._hud_block4_text = (
+                    f"{pad_header("Terrain info")}\n"
+                    f"loaded={len(model.sectors)} pending_load={pending_load} inflight={inflight} "
+                    f"loader_q={loader_q} mesh_pending={mesh_pending} upload_pending={upload_pending}\n"
+                    f"{shown_text} {tris_text} {cull_text}\n"
+                    f"{draw_text}"
+                )
+                terrain_table = [
+                    "stage   total_ct total_ms 1s_ct 1s_ms",
+                    f"load    {model.stat_load_count_total:8d} {model.stat_load_ms_total:8.1f} {model.stat_load_count_last:5d} {model.stat_load_ms_last:6.1f}",
+                    f"light   {model.stat_light_count_total:8d} {model.stat_light_ms_total:8.1f} {model.stat_light_count_last:5d} {model.stat_light_ms_last:6.1f}",
+                    f"mesh    {model.stat_mesh_count_total:8d} {model.stat_mesh_ms_total:8.1f} {model.stat_mesh_count_last:5d} {model.stat_mesh_ms_last:6.1f}",
+                    f"upload  {model.stat_upload_count_total:8d} {model.stat_upload_ms_total:8.1f} {model.stat_upload_count_last:5d} {model.stat_upload_ms_last:6.1f}",
+                ]
+                self._hud_block4_text += "\n" + "\n".join(terrain_table)
+                backlog_count = model._mesh_backlog_count()
+                loader_table = [
+                    "loader  total_ct 1s_ct",
+                    f"send    {model.stat_loader_sent_total:8d} {model.stat_loader_sent_last:5d}",
+                    f"block_defer {model.stat_loader_block_defer_total:6d} {model.stat_loader_block_defer_last:5d}",
+                    f"block_mesh  {model.stat_loader_block_mesh_total:6d} {model.stat_loader_block_mesh_last:5d}",
+                    f"block_inflight {model.stat_loader_block_inflight_total:3d} {model.stat_loader_block_inflight_last:5d}",
+                    f"refresh {model.stat_load_refresh_total:6d} {model.stat_load_refresh_last:5d}",
+                    f"candidates {model.stat_load_candidates_total:3d} {model.stat_load_candidates_last:5d}",
+                    f"mesh_backlog {backlog_count:4d}",
+                ]
+                draw_stats_line = "draw_stats=on" if stats_enabled else "draw_stats=off"
+                self._hud_block4_text += "\n" + "\n".join(loader_table)
+                self._hud_block4_text += f"\n{draw_stats_line}"
+                self._hud_block4_text += (
+                    f"\nWork/s: loader={loader_delta} mesh_done={mesh_delta} mesh_submit={mesh_submit_delta}"
+                )
+                self._hud_block4_text += (
+                    f"\nUpload: budget_ms={self._hud_upload_budget_ms:.2f} skipped={upload_skipped_delta} "
+                    f"tri_budget={self._hud_tri_budget} tri_uploaded={self._hud_tri_uploaded} "
+                    f"pending={self._hud_upload_pending}"
+                )
+                if recent_load or recent_mesh:
+                    self._hud_block4_text += f"\nRecent: load={recent_load} mesh={recent_mesh}"
+
+                entity_lines = []
+                for entity_state in self.entities.values():
+                    if entity_state['type'] == 'player':
+                        continue
+                    pos = entity_state.get('pos')
+                    if pos is None:
+                        continue
+                    px, py, pz = pos
+                    entity_lines.append(f"{entity_state['type']}({px:.1f},{py:.1f},{pz:.1f})")
+                title = pad_header("Entities")
+                if entity_lines:
+                    self._hud_block5_text = f"{title}\n" + " | ".join(entity_lines)
+                else:
+                    self._hud_block5_text = f"{title}\nnone"
+
+        layout_dirty = False
+        layout_dirty |= self._set_label_text(self.label, self._hud_block1_text)
+        info_text = f"{self._hud_block2_text}\n" if self._hud_block2_text else ""
+        sector_text = f"{self._hud_block3_text}\n" if self._hud_block3_text else ""
+        debug_text = f"{self._hud_block4_text}\n" if self._hud_block4_text else ""
+        entity_text = f"{self._hud_block5_text}\n" if self._hud_block5_text else ""
+        if self.hud_details_visible:
+            layout_dirty |= self._set_label_text(self.hud_info_label, info_text)
+            layout_dirty |= self._set_label_text(self.sector_label, sector_text)
+            layout_dirty |= self._set_label_text(self.sector_debug_label, debug_text)
+            layout_dirty |= self._set_label_text(self.entity_label, entity_text)
         else:
-            entity_text = "Ent: none"
-        
+            layout_dirty |= self._set_label_text(self.hud_info_label, "")
+            layout_dirty |= self._set_label_text(self.sector_label, "")
+            layout_dirty |= self._set_label_text(self.sector_debug_label, "")
+            layout_dirty |= self._set_label_text(self.entity_label, "")
+        hud_state = "on" if self.hud_visible else "off"
+        vsync_state = "on" if self.vsync_enabled else "off"
+        camera_state = "1p" if self.camera_mode == 'first_person' else "3p"
+        details_state = "on" if self.hud_details_visible else "off"
+        snake_state = "on" if self.snake_enabled else "off"
+        snail_state = "on" if self.snail_enabled else "off"
+        seagull_state = "on" if self.seagull_enabled else "off"
+        dog_state = "on" if self.dog_enabled else "off"
         keybind_text = (
-            "Toggles: (F1)HUD (F2)Vsync (F5)Camera (F8)Copy | "
-            "(N)ake (B)Snail (M)Seagull (V)Dog"
+            "Toggles: (F1)HUD=%s (F2)Vsync=%s (F3)Details=%s (F5)Cam=%s (F8)Copy | "
+            "(N)Snake=%s (B)Snail=%s (M)Seagull=%s (V)Dog=%s"
+            % (hud_state, vsync_state, details_state, camera_state, snake_state, snail_state, seagull_state, dog_state)
         )
+        layout_dirty |= self._set_label_text(self.keybind_label, keybind_text)
+        if layout_dirty:
+            self._hud_layout_dirty = True
 
-        line_spacing = 4
-        self.hud_info_label.y = self.label.y - self.label.content_height - line_spacing
-        self.sector_label.y = self.hud_info_label.y - self.hud_info_label.content_height - line_spacing
-        self.sector_debug_label.y = self.sector_label.y - self.sector_label.content_height - line_spacing
-        self.entity_label.text = entity_text
-        self.entity_label.y = self.sector_debug_label.y - self.sector_debug_label.content_height - line_spacing
-        
-        self.keybind_label.text = keybind_text
-        self.keybind_label.y = self.entity_label.y - self.entity_label.content_height - line_spacing
+        if self._hud_layout_dirty:
+            wrap_width = max(120, self.width - 20)
+            for lbl in (self.hud_info_label, self.sector_label, self.sector_debug_label, self.entity_label, self.keybind_label):
+                lbl.width = wrap_width
+                lbl.multiline = True
+            line_spacing = 4
+            if self.hud_details_visible:
+                self.hud_info_label.y = self.label.y - self.label.content_height - line_spacing
+                self.sector_label.y = self.hud_info_label.y - self.hud_info_label.content_height - line_spacing
+                self.sector_debug_label.y = self.sector_label.y - self.sector_label.content_height - line_spacing
+                self.entity_label.y = self.sector_debug_label.y - self.sector_debug_label.content_height - line_spacing
+                self.keybind_label.y = self.entity_label.y - self.entity_label.content_height - line_spacing
+            else:
+                self.hud_info_label.y = self.label.y
+                self.sector_label.y = self.label.y
+                self.sector_debug_label.y = self.label.y
+                self.entity_label.y = self.label.y
+                self.keybind_label.y = self.label.y - self.label.content_height - line_spacing
 
-        # Light backdrop to keep text readable on bright backgrounds.
-        pad_x = 6
-        pad_y = 3
-        top = self.label.y
-        bottom = self.keybind_label.y - self.keybind_label.content_height
-        entity_width = max(
-            self.label.content_width,
-            self.hud_info_label.content_width,
-            self.sector_label.content_width,
-            self.sector_debug_label.content_width,
-            self.entity_label.content_width,
-            self.keybind_label.content_width,
-        )
-        bg_width = entity_width + pad_x * 2
-        bg_height = (top - bottom) + pad_y * 2
-        bg_x = self.label.x - pad_x
-        bg_y = bottom - pad_y
-        self._label_bg.x = bg_x
-        self._label_bg.y = bg_y
-        self._label_bg.width = bg_width
-        self._label_bg.height = bg_height
+            # Light backdrop to keep text readable on bright backgrounds.
+            pad_x = 6
+            pad_y = 3
+            top = self.label.y
+            bottom = self.keybind_label.y - self.keybind_label.content_height
+            if self.hud_details_visible:
+                entity_width = max(
+                    self.label.content_width,
+                    self.hud_info_label.content_width,
+                    self.sector_label.content_width,
+                    self.sector_debug_label.content_width,
+                    self.entity_label.content_width,
+                    self.keybind_label.content_width,
+                )
+            else:
+                entity_width = max(
+                    self.label.content_width,
+                    self.keybind_label.content_width,
+                )
+            bg_width = entity_width + pad_x * 2
+            bg_height = (top - bottom) + pad_y * 2
+            bg_x = self.label.x - pad_x
+            bg_y = bottom - pad_y
+            self._label_bg.x = bg_x
+            self._label_bg.y = bg_y
+            self._label_bg.width = bg_width
+            self._label_bg.height = bg_height
+            self._hud_layout_dirty = False
+
         self._label_bg.draw()
         self.label.draw()
-        self.hud_info_label.draw()
-        self.sector_label.draw()
-        self.sector_debug_label.draw()
-        self.entity_label.draw()
+        if self.hud_details_visible:
+            self.hud_info_label.draw()
+            self.sector_label.draw()
+            self.sector_debug_label.draw()
+            self.entity_label.draw()
         self.keybind_label.draw()
 
     def _current_fps(self):

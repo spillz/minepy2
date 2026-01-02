@@ -82,6 +82,7 @@ class AnimatedEntityRenderer:
 
             # Dummy tex coords so the shader attribute exists
             tri_tex = np.zeros((count, 2), dtype='f4')
+            tri_light = np.ones((count, 2), dtype='f4')
 
             # *** CHANGE: build RGBA (count, 4), not RGB (count, 3) ***
             base_rgba = np.array([base_rgb[0], base_rgb[1], base_rgb[2], 1.0], dtype='f4')
@@ -97,6 +98,7 @@ class AnimatedEntityRenderer:
                 tex_coords=('f', tri_tex.ravel().astype('f4')),
                 normal=('f', tri_norms.ravel().astype('f4')),
                 color=('f', tri_col.ravel().astype('f4')),   # now 4 floats/vertex
+                light=('f', tri_light.ravel().astype('f4')),
             )
 
     def set_animation(self, anim_name):
@@ -238,6 +240,7 @@ class SnakeRenderer:
             tex_coords=('f', self._buffer["tex"].ravel()),
             normal=('f', self._buffer["normals"].ravel()),
             color=('f', self._buffer["colors"].ravel()),
+            light=('f', self._buffer["light"].ravel()),
         )
 
     def _build_mesh(self, size):
@@ -289,6 +292,7 @@ class SnakeRenderer:
         normals = np.vstack(normals).astype('f4')
         tex = np.vstack(tex).astype('f4')
         colors = np.vstack(vertex_colors).astype('f4')
+        light = np.ones((base_positions.shape[0], 2), dtype='f4')
         tri_count = base_positions.shape[0] // self.segment_capacity
         segment_index = np.repeat(np.arange(self.segment_capacity), tri_count).astype(np.int32)
         positions = base_positions.copy()
@@ -301,6 +305,7 @@ class SnakeRenderer:
             "normals": normals,
             "tex": tex,
             "colors": colors,
+            "light": light,
             "segment_index": segment_index,
             "target_trans": target_trans,
         }

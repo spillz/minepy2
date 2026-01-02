@@ -48,8 +48,6 @@ LOADER_IP = 'localhost'
 LOADER_PORT = 20230
 # Send mesh (vt_data) from the loader process instead of building in world_proxy.
 LOADER_SEND_MESH = False
-# Send per-block light field from the loader process even when mesh is client-built.
-LOADER_SEND_LIGHT = True
 
 # Debug: skip world loading and render a single block in front of the player.
 DEBUG_SINGLE_BLOCK = False
@@ -62,31 +60,20 @@ MESH_SINGLE_WORKER = True
 
 # Upload throttling: max triangles per sector upload chunk (None for full).
 UPLOAD_TRIANGLE_CHUNK = 4000
-
-# Lighting policy: defer lighting until neighbors are present; reuse loader light if available.
-DEFER_LIGHTING_UNTIL_NEIGHBORS = True
-DEFER_LIGHTING_REQUIRE_DIAGONALS = True
-REUSE_LIGHTING_WHEN_AVAILABLE = True
+# Minimum per-frame upload budget (milliseconds).
+UPLOAD_MIN_BUDGET_MS = 1.0
 
 # Patch meshes are a temporary visual hack; disable when sync rebuilds are fast enough.
 USE_PATCH_MESH = False
-
-# Mesh readiness: allow meshing without waiting for neighbors for contiguous build-out.
-MESH_READY_REQUIRE_NEIGHBORS = False
-MESH_READY_REQUIRE_DIAGONALS = False
-
-# When True, wait for neighbors before meshing so lighting can be combined once.
-MESH_WAIT_FOR_NEIGHBORS = True
-MESH_WAIT_REQUIRE_DIAGONALS = False
-
-# Strict terrain pipeline: seam sync -> light combine -> mesh.
-STRICT_TERRAIN_PIPELINE = True
 
 # Enable ANSI colors in logs.
 LOG_COLOR = True
 
 # Log main-loop timings and frame boundaries.
 LOG_MAIN_LOOP = True
+
+# Enable per-frame HUD stats collection (can be disabled to reduce overhead).
+HUD_STATS_ENABLED = False
 
 # Log queue/inflight state (loader + mesh).
 LOG_QUEUE_STATE = True
@@ -95,21 +82,11 @@ LOG_QUEUE_STATE = True
 LOG_MISSING_SECTORS = True
 LOG_MISSING_SECTORS_EVERY_N_FRAMES = 30
 
-# Log strict terrain pipeline stage and candidate counts.
-LOG_STRICT_PIPELINE = True
-LOG_STRICT_PIPELINE_EVERY_N_FRAMES = 30
 
-# Show placeholder blocks while waiting for strict pipeline stages.
-STRICT_SHOW_PLACEHOLDER = True
-
-# Log edge mismatch diagnostics for a nearby unmeshed sector.
-LOG_SEAM_DIAGNOSTICS = True
-LOG_SEAM_DIAGNOSTICS_EVERY_N_FRAMES = 60
-
-# When True, only emit strict/seam logs (and warnings/errors).
-LOG_STRICT_ONLY = False
-LOG_STRICT_TRACE = True
-LOG_STRICT_TRACE_EVERY_N_FRAMES = 1
+# Debug: log load candidate ordering and loader request/response flow.
+LOG_LOAD_CANDIDATES = False
+LOG_LOAD_CANDIDATES_EVERY_N_FRAMES = 30
+LOG_LOADER_FLOW = False
 
 # Logging for mesh activity.
 MESH_LOG = False
@@ -144,8 +121,11 @@ VIEW_PRIORITY_SCALE = 0.0
 MAX_SEAM_REBUILDS_PER_TICK = None
 
 # Lighting settings
-LIGHT_DECAY = 0.1  # per-step attenuation for flood-fill lighting
 AMBIENT_LIGHT = 0.1  # minimum light level (0-1 range)
+MAX_LIGHT = 15  # integer light level range (0..MAX_LIGHT)
+SKY_INTENSITY = 1.0  # global sky light multiplier (0..1)
+SKY_SIDEFILL_ENABLED = True  # indirect sky light from sides/seams
+TORCH_FILL_ENABLED = True # torch light propagation to nearby blocks
 # Ambient occlusion settings (darken inner edges/corners of exposed faces).
 AO_ENABLED = True
 AO_STRENGTH = 0.6

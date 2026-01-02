@@ -13,10 +13,12 @@ in vec3 position;
 in vec2 tex_coords;
 in vec3 normal;
 in vec4 color;
+in vec2 light;
 
 out vec2 v_tex_coords;
 out vec3 v_normal;
 out vec4 v_color;
+out vec2 v_light;
 out vec3 v_view_position;
 
 void main() {
@@ -35,6 +37,7 @@ void main() {
     v_normal = mat3(u_view) * mat3(u_model) * normal;
     
     v_color = color / 255.0;
+    v_light = light;
     v_view_position = view_position.xyz;
 }
 """
@@ -45,6 +48,8 @@ FRAGMENT_SOURCE = """
 
 uniform sampler2D u_texture;
 uniform vec3 u_light_dir;
+uniform float u_ambient_light;
+uniform float u_sky_intensity;
 uniform vec3 u_fog_color;
 uniform float u_fog_start;
 uniform float u_fog_end;
@@ -56,6 +61,7 @@ uniform bool u_use_texture;
 in vec2 v_tex_coords;
 in vec3 v_normal;
 in vec4 v_color;
+in vec2 v_light;
 in vec3 v_view_position;
 
 out vec4 out_color;
@@ -69,8 +75,11 @@ void main() {
     if (alpha < 0.05) {
         discard;
     }
+    float torch_light = v_light.x;
+    float sky_light = v_light.y * u_sky_intensity;
+    float voxel_light = clamp(u_ambient_light + (torch_light + sky_light) * (1.0 - u_ambient_light), 0.0, 1.0);
     vec3 base_color = tex_color.rgb * color;
-    vec3 lit_color = base_color * (0.3 + 0.7 * light);
+    vec3 lit_color = base_color * (0.3 + 0.7 * light) * voxel_light;
     vec3 emissive = tex_color.rgb * v_color.a;
     vec3 final_color = lit_color + emissive;
     float distance = length(v_view_position);
@@ -92,4 +101,6 @@ def create_block_shader():
     program = ShaderProgram(vertex_shader, fragment_shader)
     program['u_use_texture'] = True
     program['u_use_vertex_color'] = True
+    program['u_ambient_light'] = 0.0
+    program['u_sky_intensity'] = 1.0
     return program

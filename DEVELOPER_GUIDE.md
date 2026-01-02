@@ -31,3 +31,22 @@ This codebase is a pyglet-driven voxel world with numpy-heavy data processing. P
 - `entities/tetrapod.py`: Generic quadruped model builder and base tetrapod entity behavior.
 - `entities/dog.py`: Dog model built from tetrapod and simple wandering AI.
 - `entities/__init__.py`: Package marker.
+
+## Tests
+Tests live in `tests/`. We use `pytest`.
+
+Install dependency:
+
+    pip install pytest
+
+Run diagnostics (bash):
+
+    python -m pytest -vv -s tests/test_mapgen_diagnostics.py
+
+Run diagnostics (PowerShell):
+
+    python -m pytest -vv -s tests/test_mapgen_diagnostics.py
+
+Optional: dump seam maps for every test case (PowerShell):
+
+    $env:MAPGEN_DUMP="1"; python -m pytest -vv -s tests/test_mapgen_diagnostics.py
