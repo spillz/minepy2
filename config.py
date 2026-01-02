@@ -126,6 +126,7 @@ MAX_LIGHT = 15  # integer light level range (0..MAX_LIGHT)
 SKY_INTENSITY = 1.0  # global sky light multiplier (0..1)
 SKY_SIDEFILL_ENABLED = True  # indirect sky light from sides/seams
 TORCH_FILL_ENABLED = True # torch light propagation to nearby blocks
+LIGHT_PROPAGATION_BFS = False  # use numpy frontier BFS instead of dense relaxation
 # Ambient occlusion settings (darken inner edges/corners of exposed faces).
 AO_ENABLED = True
 AO_STRENGTH = 0.6

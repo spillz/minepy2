@@ -1099,6 +1099,7 @@ class ModelProxy(object):
         recompute_internal,
         interrupt_event=None,
         build_mesh=True,
+        debug_light_grids=False,
     ):
         """Build vt_data for a sector snapshot; runs off the main thread."""
         sidefill_enabled = getattr(config, 'SKY_SIDEFILL_ENABLED', True)
@@ -1152,6 +1153,105 @@ class ModelProxy(object):
                 light_grid = new_light
             return light_grid
 
+        def _unique_frontier(coords, levels, shape):
+            if coords.size == 0:
+                return coords, levels
+            area = shape[1] * shape[2]
+            flat = coords[:, 0] * area + coords[:, 1] * shape[2] + coords[:, 2]
+            order = numpy.argsort(flat)
+            flat = flat[order]
+            levels = levels[order]
+            unique, idx = numpy.unique(flat, return_index=True)
+            max_levels = numpy.maximum.reduceat(levels, idx)
+            coords_u = numpy.empty((len(unique), 3), dtype=numpy.intp)
+            coords_u[:, 0] = unique // area
+            rem = unique % area
+            coords_u[:, 1] = rem // shape[2]
+            coords_u[:, 2] = rem % shape[2]
+            return coords_u, max_levels
+
+        def _relax_bfs(light_grid, air_mask, offsets, debug_updates=None):
+            coords = numpy.argwhere(light_grid > 0)
+            if coords.size == 0:
+                return light_grid
+            levels = light_grid[coords[:, 0], coords[:, 1], coords[:, 2]].astype(light_grid.dtype, copy=False)
+            shape = light_grid.shape
+            offsets_arr = numpy.array(offsets, dtype=numpy.intp)
+            # Prefilter initial frontier: keep only sources that can improve a neighbor.
+            keep = levels > 1
+            if offsets_arr.size > 0 and numpy.any(keep):
+                keep_any = numpy.zeros(len(coords), dtype=bool)
+                for off in offsets_arr:
+                    n_coords = coords + off
+                    mask = (
+                        (n_coords[:, 0] >= 0) & (n_coords[:, 0] < shape[0])
+                        & (n_coords[:, 1] >= 0) & (n_coords[:, 1] < shape[1])
+                        & (n_coords[:, 2] >= 0) & (n_coords[:, 2] < shape[2])
+                    )
+                    if not numpy.any(mask):
+                        continue
+                    idx = numpy.nonzero(mask)[0]
+                    n_coords_m = n_coords[mask]
+                    n_levels = levels[mask] - 1
+                    air = air_mask[n_coords_m[:, 0], n_coords_m[:, 1], n_coords_m[:, 2]]
+                    if not numpy.any(air):
+                        continue
+                    idx_air = idx[air]
+                    n_coords_a = n_coords_m[air]
+                    n_levels_a = n_levels[air]
+                    existing = light_grid[n_coords_a[:, 0], n_coords_a[:, 1], n_coords_a[:, 2]]
+                    better = n_levels_a > existing
+                    if numpy.any(better):
+                        keep_any[idx_air[better]] = True
+                keep &= keep_any
+            if numpy.any(keep):
+                coords = coords[keep]
+                levels = levels[keep]
+            else:
+                return light_grid
+            while True:
+                active = levels > 1
+                if not numpy.any(active):
+                    break
+                coords = coords[active]
+                levels = levels[active] - 1
+                n_coords = numpy.repeat(coords, len(offsets_arr), axis=0)
+                n_coords += numpy.tile(offsets_arr, (len(coords), 1))
+                n_levels = numpy.repeat(levels, len(offsets_arr))
+                mask = (
+                    (n_coords[:, 0] >= 0) & (n_coords[:, 0] < shape[0])
+                    & (n_coords[:, 1] >= 0) & (n_coords[:, 1] < shape[1])
+                    & (n_coords[:, 2] >= 0) & (n_coords[:, 2] < shape[2])
+                )
+                if not numpy.any(mask):
+                    break
+                n_coords = n_coords[mask]
+                n_levels = n_levels[mask]
+                if n_coords.size == 0:
+                    break
+                air = air_mask[n_coords[:, 0], n_coords[:, 1], n_coords[:, 2]]
+                if not numpy.any(air):
+                    break
+                n_coords = n_coords[air]
+                n_levels = n_levels[air]
+                if n_coords.size == 0:
+                    break
+                existing = light_grid[n_coords[:, 0], n_coords[:, 1], n_coords[:, 2]]
+                better = n_levels > existing
+                if not numpy.any(better):
+                    break
+                n_coords = n_coords[better]
+                n_levels = n_levels[better]
+                if n_coords.size == 0:
+                    break
+                n_coords, n_levels = _unique_frontier(n_coords, n_levels, shape)
+                light_grid[n_coords[:, 0], n_coords[:, 1], n_coords[:, 2]] = n_levels
+                if debug_updates is not None:
+                    debug_updates[n_coords[:, 0], n_coords[:, 1], n_coords[:, 2]] = True
+                coords = n_coords
+                levels = n_levels
+            return light_grid
+
         if build_mesh:
             # Compute exposed faces.
             solid = (blocks > 0) & (blocks != WATER)
@@ -1183,6 +1283,14 @@ class ModelProxy(object):
         sky_side = internal_sky_side if sidefill_enabled else EMPTY_LIGHT_LIST
         torch_side = internal_torch if torch_fill_enabled else EMPTY_LIGHT_LIST
         light_ms = 0.0
+        light_torch_ms = 0.0
+        light_sky_ms = 0.0
+        debug_torch = None
+        debug_sky = None
+        debug_sky_direct = None
+        debug_torch_sources = None
+        debug_torch_updates = None
+        debug_sky_updates = None
         if recompute_internal:
             light_start = time.perf_counter()
             tile = light_blocks
@@ -1191,13 +1299,38 @@ class ModelProxy(object):
                 tile[SECTOR_SIZE:SECTOR_SIZE * 2, :, SECTOR_SIZE:SECTOR_SIZE * 2] = blocks[1:-1, :, 1:-1]
             sx = SECTOR_SIZE
             air_tile = (BLOCK_OCCLUDES[tile] == 0)
+            tile_occ = (BLOCK_OCCLUDES[tile] != 0)
+            tile_occ_rev = tile_occ[:, ::-1, :]
+            tile_has_occ = tile_occ_rev.any(axis=1)
+            tile_first_occ_rev = tile_occ_rev.argmax(axis=1)
+            sky_floor_tile = numpy.where(tile_has_occ, SECTOR_HEIGHT - tile_first_occ_rev, 0).astype(numpy.uint16)
+            y_grid = numpy.arange(SECTOR_HEIGHT)[None, :, None]
             center = tile[sx:2 * sx, :, sx:2 * sx]
+            use_bfs = bool(getattr(config, "LIGHT_PROPAGATION_BFS", False))
             if torch_fill_enabled:
+                torch_start = time.perf_counter()
                 torch = numpy.zeros(tile.shape, dtype=numpy.int16)
-                torch[sx:2 * sx, :, sx:2 * sx] = BLOCK_LIGHT_LUT[center]
-                torch = _relax_6way(torch, air_tile)
+                center_torch_sources = BLOCK_LIGHT_LUT[center]
+                torch[sx:2 * sx, :, sx:2 * sx] = center_torch_sources
+                if use_bfs:
+                    if debug_light_grids:
+                        debug_torch_updates = numpy.zeros(tile.shape, dtype=bool)
+                    torch = _relax_bfs(
+                        torch,
+                        air_tile,
+                        ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)),
+                        debug_updates=debug_torch_updates,
+                    )
+                else:
+                    torch = _relax_6way(torch, air_tile)
+                light_torch_ms = (time.perf_counter() - torch_start) * 1000.0
+                if debug_light_grids:
+                    debug_torch = torch
+                    debug_torch_sources = numpy.zeros(tile.shape, dtype=bool)
+                    debug_torch_sources[sx:2 * sx, :, sx:2 * sx] = (center_torch_sources > 0)
             else:
                 torch = None
+            sky_start = time.perf_counter()
             center_occ = (BLOCK_OCCLUDES[center] != 0)
             occ_rev = center_occ[:, ::-1, :]
             has_occ = occ_rev.any(axis=1)
@@ -1205,10 +1338,24 @@ class ModelProxy(object):
             sky_floor = numpy.where(has_occ, SECTOR_HEIGHT - first_occ_rev, 0).astype(numpy.uint16)
             if sidefill_enabled:
                 sky = numpy.zeros(tile.shape, dtype=numpy.int16)
-                y_grid = numpy.arange(SECTOR_HEIGHT)[None, :, None]
                 direct_mask = (y_grid >= sky_floor[:, None, :])
                 sky[sx:2 * sx, :, sx:2 * sx] = numpy.where(direct_mask, MAX_LIGHT, 0)
-                sky = _relax_4way(sky, air_tile)
+                sky_air_mask = air_tile & (y_grid < sky_floor_tile[:, None, :])
+                if use_bfs:
+                    if debug_light_grids:
+                        debug_sky_updates = numpy.zeros(tile.shape, dtype=bool)
+                    sky = _relax_bfs(
+                        sky,
+                        sky_air_mask,
+                        ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)),
+                        debug_updates=debug_sky_updates,
+                    )
+                else:
+                    sky = _relax_4way(sky, sky_air_mask)
+                if debug_light_grids:
+                    debug_sky = sky
+                    debug_sky_direct = numpy.zeros(tile.shape, dtype=bool)
+                    debug_sky_direct[sx:2 * sx, :, sx:2 * sx] = direct_mask
                 center_sky = sky[sx:2 * sx, :, sx:2 * sx]
                 sky_side = _pack_list(numpy.where(direct_mask, 0, center_sky))
                 outgoing_sky_chunk = _pack_list(center_sky)
@@ -1216,6 +1363,7 @@ class ModelProxy(object):
                     outgoing_sky[(dx, dz)] = outgoing_sky_chunk
             else:
                 sky_side = EMPTY_LIGHT_LIST
+            light_sky_ms = (time.perf_counter() - sky_start) * 1000.0
             if torch_fill_enabled:
                 center_torch = torch[sx:2 * sx, :, sx:2 * sx]
                 torch_side = _pack_list(center_torch)
@@ -1237,6 +1385,20 @@ class ModelProxy(object):
                 "outgoing_sky": outgoing_sky,
                 "outgoing_torch": outgoing_torch,
                 "light_ms": light_ms,
+                "light_torch_ms": light_torch_ms,
+                "light_sky_ms": light_sky_ms,
+                **(
+                    {
+                        "debug_torch_grid": debug_torch,
+                        "debug_sky_grid": debug_sky,
+                        "debug_sky_direct_mask": debug_sky_direct,
+                        "debug_torch_sources": debug_torch_sources,
+                        "debug_torch_updates": debug_torch_updates,
+                        "debug_sky_updates": debug_sky_updates,
+                    }
+                    if debug_light_grids
+                    else {}
+                ),
             }
 
         # Assemble combined light for the center sector.
@@ -1418,6 +1580,20 @@ class ModelProxy(object):
             "outgoing_sky": outgoing_sky,
             "outgoing_torch": outgoing_torch,
             "light_ms": light_ms,
+            "light_torch_ms": light_torch_ms,
+            "light_sky_ms": light_sky_ms,
+            **(
+                {
+                    "debug_torch_grid": debug_torch,
+                    "debug_sky_grid": debug_sky,
+                    "debug_sky_direct_mask": debug_sky_direct,
+                    "debug_torch_sources": debug_torch_sources,
+                    "debug_torch_updates": debug_torch_updates,
+                    "debug_sky_updates": debug_sky_updates,
+                }
+                if debug_light_grids
+                else {}
+            ),
         }
 
     def _queue_upload(self, sector, priority=False):
