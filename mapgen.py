@@ -2143,7 +2143,7 @@ class BiomeGenerator:
         for i in range(1, len(centers)):
             self._draw_path(blocks, centers[i - 1], centers[i])
 
-        if False:
+        if True:
             # Final water seal: ensure any air pockets below water level are filled.
             y_grid = numpy.arange(SECTOR_HEIGHT)[:, None, None]
             water_cols = (ground_h <= water_level_i)
