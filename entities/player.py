@@ -1,4 +1,5 @@
 import math
+import time
 import numpy as np
 import util
 from entity import BaseEntity
@@ -202,7 +203,7 @@ class Player(BaseEntity):
         self.ladder_mount_duration = 0.25
         self.ladder_collider_pad = 0.12
         self.ladder_align_enabled = True
-        self.ladder_remount_cooldown = 0.25
+        self.ladder_remount_cooldown = 0.5
         self.ladder_dismount_push = WALKING_SPEED * 0.6
         self.ladder_dismount_yaw_duration = 0.2
         self.ladder_dismount_nudge = 0.18
@@ -221,7 +222,6 @@ class Player(BaseEntity):
         self._ladder_dismount_nudge_timer = 0.0
         self._ladder_dismount_nudge_vec = np.zeros(3, dtype=float)
         self._ladder_mount_from = None
-        self._ladder_dismount_requires_release = False
         self.ladder_mount_pitch_bottom = 70.0
         self.ladder_mount_pitch_top = -70.0
         self.ladder_mount_pitch_neutral = 0.0
@@ -295,28 +295,33 @@ class Player(BaseEntity):
         
         self.velocity[0] = dx * speed
         self.velocity[2] = dz * speed
-        if self._ladder_remount_timer > 0.0:
-            self._ladder_remount_timer = max(0.0, self._ladder_remount_timer - dt)
         ladder_contact = None if self.flying else self._ladder_contact()
+        if ladder_contact is not None:
+            _, _, _, block_pos, _ = ladder_contact
+            bx, by, bz = block_pos
+            player_above_ladder = (self.position[1] > by + 0.6) or (self.velocity[1] < 0)
+            ladder_continues = self.world[util.normalize((bx, by - 1, bz))]
+            if ladder_continues not in LADDER_IDS and player_above_ladder:
+                ladder_contact = None
         forward = -float(strafe[0])
         right_input = float(strafe[1])
-        if (
-            self._ladder_dismount_requires_release
-            and abs(forward) <= 1e-3
-            and self._ladder_mount_timer <= 1e-6
-            and self._ladder_dismount_yaw_timer <= 1e-6
-        ):
-            self._ladder_dismount_requires_release = False
-        wants_ladder = (abs(forward) > 1e-3 or self.on_ladder) and not self._ladder_dismount_requires_release
+        wants_ladder = (abs(forward) > 1e-3 or self.on_ladder) and self._ladder_remount_timer <= 1e-6
         if (
             not self.on_ladder
             and ladder_contact
             and self._ladder_mount_timer <= 1e-6
             and self._ladder_remount_timer <= 1e-6
             and not self._ladder_requires_clear
-            and not self._ladder_dismount_requires_release
         ):
+            print('MOUNTING', time.time()*1000,
+            'not self.on_ladder', not self.on_ladder,
+            'ladder_contact', ladder_contact,
+            'self._ladder_mount_timer <= 1e-6', self._ladder_mount_timer <= 1e-6,
+            'self._ladder_remount_timer <= 1e-6', self._ladder_remount_timer <= 1e-6,
+            'not self._ladder_requires_clear', not self._ladder_requires_clear
+            )
             self._start_ladder_mount(ladder_contact)
+
         if self._ladder_mount_timer > 1e-6:
             self._update_ladder_mount(dt)
             self.on_ladder = True
@@ -358,6 +363,7 @@ class Player(BaseEntity):
                 self._align_to_ladder(orient, dt)
                 dismount_reason = self._ladder_should_dismount(block_pos)
                 if dismount_reason is not None:
+                    print('LADDER DISMOUNT', time.time()*1000)
                     self._ladder_dismount(
                         orient=orient,
                         forward_input=forward,
@@ -425,6 +431,8 @@ class Player(BaseEntity):
             self.camera_yaw_follow = False
             self.camera_pitch_follow = False
         self._jump_was_down = jump_down
+        if self._ladder_remount_timer > 0.0:
+            self._ladder_remount_timer = max(0.0, self._ladder_remount_timer - dt)
         
         super().update(dt)
 
@@ -524,6 +532,11 @@ class Player(BaseEntity):
     def _start_ladder_mount(self, ladder_contact):
         orient, plane_axis, plane_pos, block_pos, _ = ladder_contact
         bx, by, bz = block_pos
+        ladder_above = self.world[util.normalize((bx, by + 1, bz))]
+        ladder_below = self.world[util.normalize((bx, by - 1, bz))]
+        has_neighbor = ladder_above in LADDER_IDS or ladder_below in LADDER_IDS
+        if not (has_neighbor and self.position[1] >= by + 0.9):
+            return
         target = np.array(self.position, dtype=float)
         target[1] = float(by)
         target[plane_axis] = plane_pos
@@ -533,7 +546,6 @@ class Player(BaseEntity):
         self._ladder_mount_orient = orient
         self._ladder_mount_start_pos = self.position.copy()
         self._ladder_mount_target_pos = target
-        self._ladder_dismount_requires_release = False
         if self.position[1] <= by + 0.1:
             self._ladder_mount_from = "bottom"
         elif self.position[1] >= by + 0.9:
@@ -605,7 +617,6 @@ class Player(BaseEntity):
         self._ladder_contact_cache = None
         self._ladder_requires_clear = True
         self._ladder_mount_from = None
-        self._ladder_dismount_requires_release = reason in ("down", "up")
         if remount_cooldown is None:
             remount_cooldown = self.ladder_remount_cooldown
         self._ladder_remount_timer = max(self._ladder_remount_timer, remount_cooldown)
