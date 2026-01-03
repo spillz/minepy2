@@ -313,13 +313,6 @@ class Player(BaseEntity):
             and self._ladder_remount_timer <= 1e-6
             and not self._ladder_requires_clear
         ):
-            print('MOUNTING', time.time()*1000,
-            'not self.on_ladder', not self.on_ladder,
-            'ladder_contact', ladder_contact,
-            'self._ladder_mount_timer <= 1e-6', self._ladder_mount_timer <= 1e-6,
-            'self._ladder_remount_timer <= 1e-6', self._ladder_remount_timer <= 1e-6,
-            'not self._ladder_requires_clear', not self._ladder_requires_clear
-            )
             self._start_ladder_mount(ladder_contact)
 
         if self._ladder_mount_timer > 1e-6:
@@ -363,7 +356,6 @@ class Player(BaseEntity):
                 self._align_to_ladder(orient, dt)
                 dismount_reason = self._ladder_should_dismount(block_pos)
                 if dismount_reason is not None:
-                    print('LADDER DISMOUNT', time.time()*1000)
                     self._ladder_dismount(
                         orient=orient,
                         forward_input=forward,
@@ -670,5 +662,4 @@ class Player(BaseEntity):
 
     def _yaw_lerp(self, start, end, t):
         delta = ((end - start + 180.0) % 360.0) - 180.0
-        print('YAW LERP', start, end, t, delta)
         return start + delta * t
