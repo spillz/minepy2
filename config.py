@@ -14,6 +14,8 @@ UPDATE_SLOW_LOG_MS = 10.0
 # Size of sectors used to ease block loading.
 SECTOR_SIZE = 16 #width and depth (x and z)
 SECTOR_HEIGHT = 256 #height of world (y)
+MAP_GEN_SECTOR_SIZE = 3*SECTOR_SIZE
+MAP_GEN_PAD_SIZE = 1  # extra XZ boundary blocks for mapgen; set 0 to disable
 LOADED_SECTORS = DIST//SECTOR_SIZE + 1 #number of sections in (x,z) directions to load sectors for
 LOAD_RADIUS = LOADED_SECTORS + 1
 KEEP_RADIUS = LOAD_RADIUS*2
@@ -76,6 +78,8 @@ LOG_COLOR = True
 
 # Log main-loop timings and frame boundaries.
 LOG_MAIN_LOOP = True
+# Log detailed map generation timings.
+LOG_MAPGEN_TIMINGS = True
 
 # Enable per-frame HUD stats collection (can be disabled to reduce overhead).
 HUD_STATS_ENABLED = False
@@ -165,6 +169,18 @@ AO_DEBUG_SHADER_FORCE = False
 USE_EXPERIMENTAL_BIOME_GEN = True
 # Performance toggle for biome generator: skip caves/ores and limit structures/trees.
 BIOME_FAST_MODE = False
+# Skip expensive cave carving; keeps terrain but no underground caverns.
+MAPGEN_CAVES_ENABLED = True
+# Sparse ore placement toggle.
+MAPGEN_ORES_ENABLED = True
+# Base spacing (in blocks) for ore columns; higher = fewer ores.
+MAPGEN_ORE_SPACING = 10
+# Cave tuning: lower max roof height and lower density for speed.
+CAVE_MAX_ROOF = 50
+CAVE_REGION_THRESHOLD = 0.68
+CAVE_DILATE_ITERS = 2
+CAVE_CONNECTOR_SPACING = 20
+CAVE_BREACH_SPACING = 48
 # Macro features: large-scale river and road networks.
 ENABLE_RIVER_NETWORKS = False
 ENABLE_ROAD_NETWORKS = True

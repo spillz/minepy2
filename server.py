@@ -172,7 +172,7 @@ class Server(object):
             if op.name == name:
                 used = True
         if not used:
-            player.name = data
+            player.name = name
         self.handler.queue_for_all_players(player, 'player_set_name', player.name)
 
     def set_position(self, player, position):

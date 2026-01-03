@@ -7,10 +7,20 @@ import time
 import numpy
 import pickle
 import multiprocessing
+from collections import OrderedDict
 
 # local imports
 import config
-from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS, SERVER_IP, SERVER_PORT, LOADER_IP, LOADER_PORT
+from config import (
+    SECTOR_SIZE,
+    SECTOR_HEIGHT,
+    LOADED_SECTORS,
+    SERVER_IP,
+    SERVER_PORT,
+    LOADER_IP,
+    LOADER_PORT,
+    MAP_GEN_SECTOR_SIZE,
+)
 from util import normalize, sectorize, FACES
 from blocks import BLOCK_ID
 import mapgen
@@ -41,6 +51,18 @@ class WorldLoader(object):
         self.blocks = numpy.zeros((SECTOR_SIZE, SECTOR_HEIGHT, SECTOR_SIZE), dtype='u2') #blocks of a sector not the whole world
         self.vt_data = None #vertex data for the current sector
         self.light = None
+        self._sector_cache = OrderedDict()
+        self._cache_limit = max(0, int(getattr(config, 'LOADER_CACHE_SECTORS', 64)))
+        self._map_gen_sector_size = int(getattr(config, 'MAP_GEN_SECTOR_SIZE', SECTOR_SIZE))
+        if self._map_gen_sector_size <= 0:
+            self._map_gen_sector_size = SECTOR_SIZE
+        if self._map_gen_sector_size % SECTOR_SIZE != 0:
+            loader_log(
+                'MAP_GEN_SECTOR_SIZE (%d) not divisible by SECTOR_SIZE (%d); '
+                'batching may be misaligned',
+                self._map_gen_sector_size, SECTOR_SIZE,
+            )
+        self._batch_size = max(1, self._map_gen_sector_size // SECTOR_SIZE)
         self._loader_loop()
 
     def _loader_loop(self):
@@ -165,31 +187,63 @@ class WorldLoader(object):
         simplex noise.
 
         """
-        if getattr(config, 'USE_EXPERIMENTAL_BIOME_GEN', False):
-            self.blocks = mapgen.generate_biome_sector(position, None, None)
-        else:
-            self.blocks = mapgen.generate_sector(position, None, None)
-        if sector_block_delta is not None:
-            for p in sector_block_delta:
-                x, y, z = p
-                if 0 <= x < SECTOR_SIZE and 0 <= y < SECTOR_HEIGHT and 0 <= z < SECTOR_SIZE:
-                    self.blocks[x, y, z] = sector_block_delta[p]
-        # Debug: print first mushroom world position for this sector if any.
-        try:
-            from blocks import BLOCK_ID
-            MUSH = BLOCK_ID.get('Mushroom')
-            if MUSH:
-                coords = numpy.argwhere(self.blocks == MUSH)
-                for cx, cy, cz in coords[:1]:
-                    world_pos = (int(position[0] + cx - 1), int(cy), int(position[2] + cz - 1))
-                    logutil.log(
-                        "LOADER",
-                        f"mushroom world {world_pos} sector {position} local ({int(cx)}, {int(cy)}, {int(cz)})",
-                        level="DEBUG",
-                    )
-        except Exception:
-            pass
+        self.blocks = self._get_sector_blocks(position, sector_block_delta)
 
+    def _cache_get(self, position):
+        blocks = self._sector_cache.get(position)
+        if blocks is None:
+            return None
+        self._sector_cache.move_to_end(position)
+        return blocks
+
+    def _cache_put(self, position, blocks):
+        if self._cache_limit <= 0:
+            return
+        self._sector_cache[position] = blocks
+        self._sector_cache.move_to_end(position)
+        while len(self._sector_cache) > self._cache_limit:
+            self._sector_cache.popitem(last=False)
+
+    def _batch_origin(self, position):
+        x, _, z = position
+        base_x = (x // self._map_gen_sector_size) * self._map_gen_sector_size
+        base_z = (z // self._map_gen_sector_size) * self._map_gen_sector_size
+        return (base_x, 0, base_z)
+
+    def _fill_cache_for_batch(self, batch_origin):
+        if getattr(config, 'USE_EXPERIMENTAL_BIOME_GEN', False):
+            batch = mapgen.generate_biome_sector(batch_origin, None, None)
+        else:
+            batch = mapgen.generate_sector(batch_origin, None, None)
+        step = SECTOR_SIZE
+        limit = self._map_gen_sector_size
+        for ox in range(0, limit, step):
+            for oz in range(0, limit, step):
+                pos = (batch_origin[0] + ox, 0, batch_origin[2] + oz)
+                if pos in self._sector_cache:
+                    continue
+                sector_blocks = numpy.ascontiguousarray(
+                    batch[ox:ox + step, :, oz:oz + step]
+                )
+                self._cache_put(pos, sector_blocks)
+
+    def _get_sector_blocks(self, position, sector_block_delta):
+        base = self._cache_get(position)
+        if base is None:
+            batch_origin = self._batch_origin(position)
+            self._fill_cache_for_batch(batch_origin)
+            base = self._cache_get(position)
+            if base is None:
+                loader_log('failed to cache sector %s after batch gen', position)
+                base = numpy.zeros((SECTOR_SIZE, SECTOR_HEIGHT, SECTOR_SIZE), dtype='u2')
+        if sector_block_delta is None:
+            return base
+        blocks = base.copy()
+        for p in sector_block_delta:
+            x, y, z = p
+            if 0 <= x < SECTOR_SIZE and 0 <= y < SECTOR_HEIGHT and 0 <= z < SECTOR_SIZE:
+                blocks[x, y, z] = sector_block_delta[p]
+        return blocks
 
     def get_block(self, position, sector_position):
         pos = position - numpy.array(sector_position)

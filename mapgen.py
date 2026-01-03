@@ -4,11 +4,18 @@ import math
 import numpy
 
 #local libs
-from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS
+from config import MAP_GEN_SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS
 from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH, STAIR_ORIENTED_IDS
 import noise
 import config
 import logutil
+
+MAP_GEN_CORE_SIZE = MAP_GEN_SECTOR_SIZE
+MAP_GEN_PAD_SIZE = max(0, int(getattr(config, "MAP_GEN_PAD_SIZE", 0)))
+if MAP_GEN_PAD_SIZE:
+    MAP_GEN_SECTOR_SIZE = MAP_GEN_CORE_SIZE + 2 * MAP_GEN_PAD_SIZE
+
+_Y_GRID_FLOAT = numpy.arange(SECTOR_HEIGHT, dtype=float)[:, None, None]
 
 STONE = BLOCK_ID['Stone']
 SAND = BLOCK_ID['Sand']
@@ -62,35 +69,65 @@ GLOBAL_WATER_LEVEL = WATER_LEVEL
 # Debug tracker for nearest placed mushroom.
 _debug_mushroom_hint = {'best': None, 'best_dist2': None}
 
+def _mapgen_pad_position(position, pad):
+    if pad <= 0:
+        return position
+    if len(position) >= 3:
+        return (position[0] - pad, position[1], position[2] - pad)
+    if len(position) == 2:
+        return (position[0] - pad, position[1] - pad)
+    return (position[0] - pad,)
 
-def _record_mushroom_hint(world_pos, sector_pos, local_pos):
-    """Track and print the closest mushroom position found so far."""
-    global _debug_mushroom_hint
-    x, _, z = world_pos
-    dist2 = x * x + z * z
-    best = _debug_mushroom_hint.get('best')
-    best_d2 = _debug_mushroom_hint.get('best_dist2')
-    if best is None or dist2 < best_d2:
-        _debug_mushroom_hint['best'] = world_pos
-        _debug_mushroom_hint['best_dist2'] = dist2
-        horiz = math.sqrt(dist2)
-        logutil.log(
-            "MAPGEN",
-            f"mushroom placed world {world_pos} sector {sector_pos} local {local_pos} horiz~{horiz:.1f}",
-            level="DEBUG",
-        )
 
+def _mapgen_crop_blocks(blocks, pad, core_size):
+    if pad <= 0:
+        return blocks
+    end = pad + core_size
+    return blocks[pad:end, :, pad:end]
+
+
+class _MapGenPerfTimer(object):
+    def __init__(self, enabled):
+        self.enabled = enabled
+        if enabled:
+            self.start = time.perf_counter()
+            self.last = self.start
+            self.marks = []
+
+    def mark(self, name):
+        if not self.enabled:
+            return
+        now = time.perf_counter()
+        self.marks.append((name, (now - self.last) * 1000.0))
+        self.last = now
+
+    def finish(self):
+        if not self.enabled:
+            return None
+        total = (time.perf_counter() - self.start) * 1000.0
+        return total, self.marks
+
+
+def _log_mapgen_timings(position, total, marks):
+    if total is None:
+        return
+    parts = " ".join(f"{name}={ms:.2f}ms" for name, ms in marks)
+    logutil.log(
+        "MAPGEN",
+        f"gen position={position} total={total:.2f}ms {parts}",
+        level="DEBUG",
+    )
 
 class SectorNoise2D(object):
-    def __init__(self, seed, step = SECTOR_SIZE, step_offset = 0, scale = 1, offset = 0):
+    def __init__(self, seed, step = MAP_GEN_SECTOR_SIZE, step_offset = 0, scale = 1, offset = 0):
         self.noise = noise.SimplexNoise(seed = seed)
         self.seed = seed
         self.step = step
         self.scale = scale
         self.offset = offset
         xs, zs = numpy.meshgrid(
-            numpy.arange(SECTOR_SIZE, dtype=numpy.float32),
-            numpy.arange(SECTOR_SIZE, dtype=numpy.float32),
+            numpy.arange(MAP_GEN_SECTOR_SIZE, dtype=numpy.float32),
+            numpy.arange(MAP_GEN_SECTOR_SIZE, dtype=numpy.float32),
             indexing='ij',
         )
         self.Z = numpy.stack([xs, zs], axis=-1).reshape((-1, 2)) + step_offset
@@ -98,18 +135,18 @@ class SectorNoise2D(object):
     def __call__(self, position):
         Z = self.Z + numpy.array([position[0],position[2]])
         N=self.noise.noise(Z/self.step)*self.scale + self.offset
-        return N.reshape((SECTOR_SIZE, SECTOR_SIZE))
+        return N.reshape((MAP_GEN_SECTOR_SIZE, MAP_GEN_SECTOR_SIZE))
 
 
 class SectorNoise3D(object):
     """3D Simplex noise helper with overgeneration to avoid seams."""
-    def __init__(self, seed, step=SECTOR_SIZE, step_offset=0, scale=1.0, offset=0.0):
+    def __init__(self, seed, step=MAP_GEN_SECTOR_SIZE, step_offset=0, scale=1.0, offset=0.0):
         self.noise = noise.SimplexNoise(seed=seed)
         self.step = step
         self.scale = scale
         self.offset = offset
         self.step_offset = step_offset
-        Z = numpy.mgrid[0:SECTOR_SIZE, 0:SECTOR_HEIGHT, 0:SECTOR_SIZE].T
+        Z = numpy.mgrid[0:MAP_GEN_SECTOR_SIZE, 0:SECTOR_HEIGHT, 0:MAP_GEN_SECTOR_SIZE].T
         shape = Z.shape
         self.Z = Z.reshape((shape[0]*shape[1]*shape[2], 3))
 
@@ -119,7 +156,7 @@ class SectorNoise3D(object):
         Z = self.Z + offset + self.step_offset
         coords = numpy.mod(Z / self.step, 64.0).astype(numpy.float32)  # keep coordinates small for noise
         N = self.noise.noise(coords) * self.scale + self.offset
-        return N.reshape((SECTOR_SIZE, SECTOR_HEIGHT, SECTOR_SIZE))
+        return N.reshape((MAP_GEN_SECTOR_SIZE, SECTOR_HEIGHT, MAP_GEN_SECTOR_SIZE))
 
 def initialize_map_generator(seed = None):
     global noise1, noise2, noise3, noise4
@@ -148,6 +185,8 @@ def generate_sector(position, sector, world):
     simplex noise.
 
     """
+    if MAP_GEN_PAD_SIZE:
+        position = _mapgen_pad_position(position, MAP_GEN_PAD_SIZE)
     N1=noise1(position)
     N2=noise2(position)
     N3=noise3(position)
@@ -156,12 +195,13 @@ def generate_sector(position, sector, world):
     N1 = N1*N4+N3
     N2 = N2+N3
 
-    b = numpy.zeros((SECTOR_HEIGHT, SECTOR_SIZE, SECTOR_SIZE), dtype='u2')
+    b = numpy.zeros((SECTOR_HEIGHT, MAP_GEN_SECTOR_SIZE, MAP_GEN_SECTOR_SIZE), dtype='u2')
     for y in range(SECTOR_HEIGHT):
         b[y] = ((y<N1-3)*STONE + (((y>=N1-3) & (y<N1))*GRASS))
         thresh = ((y>N3)*(y<N2)*(y>10))>0
         b[y] = b[y]*(1 - thresh) + SAND * thresh
-    return b.swapaxes(0,1)
+    blocks = b.swapaxes(0,1)
+    return _mapgen_crop_blocks(blocks, MAP_GEN_PAD_SIZE, MAP_GEN_CORE_SIZE)
 
 # -------- Experimental road generation helpers -----------
 
@@ -466,8 +506,8 @@ class BiomeGenerator:
         return int(position[0]), 0
 
     def _world_axes(self, position):
-        sx = SECTOR_SIZE
-        sz = SECTOR_SIZE
+        sx = MAP_GEN_SECTOR_SIZE
+        sz = MAP_GEN_SECTOR_SIZE
         ox, oz = self._sector_origin(position)
         xs = numpy.arange(sx, dtype=float) + ox
         zs = numpy.arange(sz, dtype=float) + oz
@@ -1685,23 +1725,23 @@ class BiomeGenerator:
         trunk, canopy = self.tree_templates[idx]
         # Keep trees spaced out: skip if near edge or too tall for ceiling.
         max_height = max(t[1] for t in trunk + canopy) + ground_y
-        if max_height >= SECTOR_HEIGHT or x < 2 or z < 2 or x >= SECTOR_SIZE - 1 or z >= SECTOR_SIZE - 1:
+        if max_height >= SECTOR_HEIGHT or x < 2 or z < 2 or x >= MAP_GEN_SECTOR_SIZE - 1 or z >= MAP_GEN_SECTOR_SIZE - 1:
             return
         # Draw trunk and canopy with bounds checks.
         for dx, dy, dz in trunk:
             cx, cy, cz = x + dx, ground_y + dy, z + dz
-            if 0 <= cx < SECTOR_SIZE and 0 <= cz < SECTOR_SIZE and 0 <= cy < SECTOR_HEIGHT:
+            if 0 <= cx < MAP_GEN_SECTOR_SIZE and 0 <= cz < MAP_GEN_SECTOR_SIZE and 0 <= cy < SECTOR_HEIGHT:
                 blocks[cy, cx, cz] = WOOD
         for dx, dy, dz in canopy:
             cx, cy, cz = x + dx, ground_y + dy, z + dz
-            if 0 <= cx < SECTOR_SIZE and 0 <= cz < SECTOR_SIZE and 0 <= cy < SECTOR_HEIGHT:
+            if 0 <= cx < MAP_GEN_SECTOR_SIZE and 0 <= cz < MAP_GEN_SECTOR_SIZE and 0 <= cy < SECTOR_HEIGHT:
                 blocks[cy, cx, cz] = LEAVES
 
     def _place_cabin(self, blocks, x, z, ground_y):
         # Small 4x4 hut with plank walls, cobble base, and brick chimney.
         width = 4
         height = 4
-        if x < 1 or z < 1 or x + width >= SECTOR_SIZE or z + width >= SECTOR_SIZE:
+        if x < 1 or z < 1 or x + width >= MAP_GEN_SECTOR_SIZE or z + width >= MAP_GEN_SECTOR_SIZE:
             return
         if ground_y + height + 2 >= SECTOR_HEIGHT:
             return
@@ -1719,7 +1759,7 @@ class BiomeGenerator:
         for dx in range(-1, width + 1):
             for dz in range(-1, width + 1):
                 wx, wz = x + dx, z + dz
-                if 0 <= wx < SECTOR_SIZE and 0 <= wz < SECTOR_SIZE:
+                if 0 <= wx < MAP_GEN_SECTOR_SIZE and 0 <= wz < MAP_GEN_SECTOR_SIZE:
                     blocks[roof_y, wx, wz] = WOOD if (dx in (-1, width) or dz in (-1, width)) else PLANK
         # foundation
         for dx in range(width):
@@ -1747,7 +1787,7 @@ class BiomeGenerator:
 
     def _place_rect_building(self, blocks, x, z, ground_y, width, depth, height, wall_block, roof_block, pitched=True, doorway_dir='z+', windows=True):
         """Generic rectangular building with door openings and optional windows."""
-        if x < 1 or z < 1 or x + width >= SECTOR_SIZE or z + depth >= SECTOR_SIZE:
+        if x < 1 or z < 1 or x + width >= MAP_GEN_SECTOR_SIZE or z + depth >= MAP_GEN_SECTOR_SIZE:
             return
         base_y = ground_y + 1
         roof_y = base_y + height
@@ -1787,9 +1827,9 @@ class BiomeGenerator:
         inside_x, inside_z = door_x - dx_out, door_z - dz_out
         outside_x, outside_z = door_x + dx_out, door_z + dz_out
         door_allowed = True
-        if not (0 <= inside_x < SECTOR_SIZE and 0 <= inside_z < SECTOR_SIZE):
+        if not (0 <= inside_x < MAP_GEN_SECTOR_SIZE and 0 <= inside_z < MAP_GEN_SECTOR_SIZE):
             door_allowed = False
-        if not (0 <= outside_x < SECTOR_SIZE and 0 <= outside_z < SECTOR_SIZE):
+        if not (0 <= outside_x < MAP_GEN_SECTOR_SIZE and 0 <= outside_z < MAP_GEN_SECTOR_SIZE):
             door_allowed = False
         if door_allowed:
             for wy in (base_y + 1, base_y + 2):
@@ -1864,7 +1904,7 @@ class BiomeGenerator:
                 for dz in range(2, d - 2):
                     wx, wz = x + dx, z + dz
                     for dy in range(1, h):
-                        if 0 <= wx < SECTOR_SIZE and 0 <= wz < SECTOR_SIZE and ground_y + 1 + dy < SECTOR_HEIGHT:
+                        if 0 <= wx < MAP_GEN_SECTOR_SIZE and 0 <= wz < MAP_GEN_SECTOR_SIZE and ground_y + 1 + dy < SECTOR_HEIGHT:
                             blocks[ground_y + 1 + dy, wx, wz] = 0
             # battlements
             top = ground_y + 1 + h
@@ -1874,7 +1914,7 @@ class BiomeGenerator:
                         if dx in (0, w - 1) or dz in (0, d - 1):
                             if (dx + dz) % 2 == 0:
                                 wx, wz = x + dx, z + dz
-                                if 0 <= wx < SECTOR_SIZE and 0 <= wz < SECTOR_SIZE:
+                                if 0 <= wx < MAP_GEN_SECTOR_SIZE and 0 <= wz < MAP_GEN_SECTOR_SIZE:
                                     blocks[top, wx, wz] = BRICK
         elif btype == 'church':
             self._place_rect_building(blocks, x, z, ground_y, width=7, depth=11, height=5, wall_block=PLANK, roof_block=WOOD, pitched=True, doorway_dir=orient)
@@ -1888,7 +1928,7 @@ class BiomeGenerator:
         start_z = z - size_z // 2
         end_x = start_x + size_x
         end_z = start_z + size_z
-        if start_x < 1 or start_z < 1 or end_x >= SECTOR_SIZE or end_z >= SECTOR_SIZE:
+        if start_x < 1 or start_z < 1 or end_x >= MAP_GEN_SECTOR_SIZE or end_z >= MAP_GEN_SECTOR_SIZE:
             return
         for dx in range(size_x):
             for dz in range(size_z):
@@ -1901,8 +1941,8 @@ class BiomeGenerator:
     def _reserve_area(self, taken_mask, x, z, width, depth, padding=1):
         x0 = max(0, x - padding)
         z0 = max(0, z - padding)
-        x1 = min(SECTOR_SIZE, x + width + padding)
-        z1 = min(SECTOR_SIZE, z + depth + padding)
+        x1 = min(MAP_GEN_SECTOR_SIZE, x + width + padding)
+        z1 = min(MAP_GEN_SECTOR_SIZE, z + depth + padding)
         if taken_mask[x0:x1, z0:z1].any():
             return False
         taken_mask[x0:x1, z0:z1] = True
@@ -1933,6 +1973,8 @@ class BiomeGenerator:
 
     def _carve_caves(self, position, blocks, elevation, cliff_mask):
         """Carve caves whose roofs sit between bedrock+20 and the terrain surface."""
+        if not getattr(config, "MAPGEN_CAVES_ENABLED", True):
+            return
         region_base = self.cave_region_noise(position)
         region_detail = self.cave_region_detail(position)
         region01 = numpy.clip(0.5 + 0.5 * region_base + 0.25 * region_detail, 0.0, 1.0)
@@ -1941,13 +1983,21 @@ class BiomeGenerator:
         if not cliff_mask.any() and not region_mask.any():
             return
 
+        xs, zs = self._world_axes(position)
+        wxg, wzg = numpy.meshgrid(xs, zs, indexing="ij")
+        breach_spacing = int(getattr(config, "CAVE_BREACH_SPACING", 48))
+        breach_spacing = max(8, breach_spacing)
+        breach_hash = (wxg.astype(numpy.int64) * 73856093 + wzg.astype(numpy.int64) * 19349663 + int(self.seed)) % breach_spacing
+        breach_mask = region_mask & (breach_hash == 0)
+
         # Height selection: absolute roof height drawn from noise; discard columns where the target roof would poke above ground.
         height_pref = self.cave_height_noise(position)             # (X,Z)
         height_fine = self.cave_height_fine(position)              # (X,Z)
         height01 = numpy.clip(0.5 + 0.5 * height_pref + 0.25 * height_fine, 0.0, 1.0)
         min_roof = 20.0
-        max_roof = SECTOR_HEIGHT - 6.0
-        ground_cap = numpy.clip(elevation, min_roof, max_roof)
+        max_roof = min(SECTOR_HEIGHT - 6.0, float(getattr(config, "CAVE_MAX_ROOF", SECTOR_HEIGHT - 6.0)))
+        ground_cap = numpy.clip(elevation, min_roof, SECTOR_HEIGHT - 6.0)
+        ground_cap = numpy.where(breach_mask, ground_cap, numpy.minimum(ground_cap, max_roof))
         # Map roof height into [min_roof, ground height]; if ground is below min_roof we skip that column.
         target_roof = min_roof + height01 * (ground_cap - min_roof)
 
@@ -1986,22 +2036,29 @@ class BiomeGenerator:
         floor_upper = numpy.maximum(min_roof - 1.0, roof_upper - depth_upper)
         floor_deep = numpy.maximum(min_roof - 1.0, roof_deep - depth_deep)
 
-        y_grid = numpy.arange(SECTOR_HEIGHT, dtype=float)[:, None, None]  # (H,1,1)
+        y_min = int(max(0, numpy.floor(floor_deep.min())))
+        y_max = int(min(SECTOR_HEIGHT - 1, numpy.ceil(roof_upper.max())))
+        if y_max <= y_min:
+            return
+        y_slice = slice(y_min, y_max + 1)
+        y_grid = _Y_GRID_FLOAT[y_slice]  # (H,1,1)
         elev_grid = elevation[None, :, :]                                 # (1,X,Z)
         cliff3d = cliff_mask[None, :, :]                                  # (1,X,Z)
         land3d = (elevation > WATER_LEVEL)[None, :, :]                    # avoid flooding seafloor caves
         cliff_gate = float(getattr(config, "CAVE_CLIFF_DENSITY_GATE", 0.72))
-        region3d = region_mask[None, :, :]
-        area_mask = region3d | (cliff3d & (density2d[None, :, :] > cliff_gate))
+        area_mask2d = region_mask | (cliff_mask & (density2d > cliff_gate))
+        if not area_mask2d.any():
+            return
+        area_mask = area_mask2d[None, :, :]
 
         vertical_mid = (y_grid >= floor_mid[None, :, :]) & (y_grid <= roof_mid[None, :, :])
         vertical_upper = (y_grid >= floor_upper[None, :, :]) & (y_grid <= roof_upper[None, :, :])
         vertical_deep = (y_grid >= floor_deep[None, :, :]) & (y_grid <= roof_deep[None, :, :])
         vertical_any = vertical_mid | vertical_upper | vertical_deep
         below_surface = y_grid < (elev_grid - 2.0)
-        density_mid = density2d > 0.35
-        density_upper = density2d > 0.5
-        density_deep = density2d > 0.3
+        density_mid = density2d > 0.42
+        density_upper = density2d > 0.58
+        density_deep = density2d > 0.38
         column_gate = has_space[None, :, :] & land3d
 
         carve = (
@@ -2017,6 +2074,10 @@ class BiomeGenerator:
         outlet_gate = density2d > 0.7
         carve |= outlet_band & outlet_gate[None, :, :] & column_gate & cliff3d & deep_roof[None, :, :]
 
+        # Rare surface breaches (keep column gating to avoid flooding everything).
+        breach_band = (y_grid >= (elev_grid - 1.0)) & (y_grid <= elev_grid)
+        carve |= breach_band & breach_mask[None, :, :] & column_gate & area_mask
+
         # Small lateral dilation to connect nearby passages while respecting height masks.
         for _ in range(int(getattr(config, "CAVE_DILATE_ITERS", 3))):
             neighbor = numpy.zeros_like(carve, dtype=bool)
@@ -2028,8 +2089,6 @@ class BiomeGenerator:
             carve |= spread
 
         # Thin connectors between levels in cave regions.
-        xs, zs = self._world_axes(position)
-        wxg, wzg = numpy.meshgrid(xs, zs, indexing="ij")
         connector_spacing = int(getattr(config, "CAVE_CONNECTOR_SPACING", 16))
         connector_spacing = max(4, connector_spacing)
         hashv = (wxg.astype(numpy.int64) * 73856093 + wzg.astype(numpy.int64) * 19349663 + int(self.seed)) % connector_spacing
@@ -2059,45 +2118,67 @@ class BiomeGenerator:
         # total_voxels = carve.size
         # print("carve fraction", carve.sum() / total_voxels)
         if carve.any():
-            road_protect = (blocks == COBBLE) | (blocks == PLANK) | (blocks == JACK)
+            road_protect = (blocks[y_slice] == COBBLE) | (blocks[y_slice] == PLANK) | (blocks[y_slice] == JACK)
             carve = carve & (~road_protect)
-            blocks[carve] = 0
+            blocks[y_slice][carve] = 0
 
     def _place_ores(self, position, blocks, elevation, cliff_mask):
         """Sprinkle ore clumps in stone within cliffy areas using band-pass 3D noise."""
+        if not getattr(config, "MAPGEN_ORES_ENABLED", True):
+            return
         if not cliff_mask.any():
             return
-        y_grid = numpy.arange(SECTOR_HEIGHT)[:, None, None]  # (H,1,1)
-        stone_mask = blocks == STONE                         # (H,X,Z)
-        cliff3d = cliff_mask[None, :, :]                     # (1,X,Z)
-        height_pref = self.ore_height_noise(position)        # (X,Z)
-        density2d = 0.5 + 0.5 * self.ore_density_noise(position)  # (X,Z) in 0..1
-        # ground heights to bias ore vertically
+        height_pref = self.ore_height_noise(position)             # (X,Z)
         ground = numpy.clip(elevation, 2, SECTOR_HEIGHT - 3)
-        for setting in self.ore_settings:
-            roof_offset = 3 + 6 * (0.5 + 0.5 * height_pref)  # 3..9 below surface
-            roof = ground - roof_offset
-            roof = numpy.clip(roof, 2, setting['max_y'] - 1)
-            above_ground = roof >= ground - 1
-
-            depth = 0.5 + 2.5 * density2d  # up to ~3
-            shallow = depth < 0.8
-            floor = numpy.clip(roof - depth, 1, SECTOR_HEIGHT - 2)
-
-            vertical_mask = (y_grid <= roof[None, :, :]) & (y_grid >= floor[None, :, :])
-            depth_mask = y_grid < setting['max_y']
-            density_gate = density2d > 0.85
-            density3d = density_gate[None, :, :]
-
-            mask = vertical_mask & depth_mask & stone_mask & cliff3d & density3d & (~above_ground) & (~shallow[None, :, :])
-            blocks[mask] = setting['id']
+        base_roof = ground - (3.0 + 6.0 * (0.5 + 0.5 * height_pref))  # 3..9 below surface
+        xs, zs = self._world_axes(position)
+        wxg, wzg = numpy.meshgrid(xs, zs, indexing="ij")
+        base_hash = (
+            wxg.astype(numpy.int64) * 73856093
+            + wzg.astype(numpy.int64) * 19349663
+            + int(self.seed) * 83492791
+        )
+        base_spacing = int(getattr(config, "MAPGEN_ORE_SPACING", 10))
+        base_spacing = max(2, base_spacing)
+        for idx, setting in enumerate(self.ore_settings):
+            max_y = int(setting['max_y'])
+            if max_y <= 2:
+                continue
+            spacing = base_spacing + idx * 2
+            salt = (idx + 1) * 104729
+            column_mask = cliff_mask & ((base_hash + salt) % spacing == 0)
+            if not column_mask.any():
+                continue
+            roof = numpy.clip(base_roof, 2, max_y - 1)
+            ys = roof.astype(int)
+            coords = numpy.argwhere(column_mask)
+            if coords.size == 0:
+                continue
+            x_idx = coords[:, 0]
+            z_idx = coords[:, 1]
+            y_idx = ys[x_idx, z_idx]
+            thickness = 1 + int(round(setting.get('band', 0.0) * 4.0))
+            for dy in range(thickness):
+                y_sel = y_idx - dy
+                valid = (y_sel > 0) & (y_sel < max_y)
+                if not valid.any():
+                    continue
+                vx = x_idx[valid]
+                vz = z_idx[valid]
+                vy = y_sel[valid]
+                stone = blocks[vy, vx, vz] == STONE
+                if not stone.any():
+                    continue
+                blocks[vy[stone], vx[stone], vz[stone]] = setting['id']
 
     def _place_cave_mushrooms(self, position, blocks, ground_h, water_mask, decor_noise, decor_detail):
         """Sprinkle glowing mushrooms on dark cave floors at low density."""
         if self.fast:
             return
-        sx = SECTOR_SIZE
-        sz = SECTOR_SIZE
+        if not getattr(config, "MAPGEN_CAVES_ENABLED", True):
+            return
+        sx = MAP_GEN_SECTOR_SIZE
+        sz = MAP_GEN_SECTOR_SIZE
         # Ensure deterministic, non-negative seed for RNG
         px = int(position[0])
         pz = int(position[2] if len(position) > 2 else (position[1] if len(position) > 1 else 0))
@@ -2157,13 +2238,17 @@ class BiomeGenerator:
                         column[y] = MUSHROOM
                         world_pos = (int(position[0] + x), int(y), int(position[2] + z))
                         local_pos = (int(x), int(y), int(z))
-                        _record_mushroom_hint(world_pos, position, local_pos)
                         break
 
     def generate(self, position):
+        perf = _MapGenPerfTimer(getattr(config, "LOG_MAPGEN_TIMINGS", True))
+        base_position = position
+        if MAP_GEN_PAD_SIZE:
+            position = _mapgen_pad_position(position, MAP_GEN_PAD_SIZE)
         elevation, canyon_noise, road_height = self._height_field(position)
         if False:
             elevation = self._apply_spawn_bias(elevation, position)
+        perf.mark("height")
         ox, oz = self._sector_origin(position)
         mix = numpy.uint64(0x9E3779B97F4A7C15)
         mix ^= numpy.uint64(numpy.int64(self.seed))
@@ -2207,16 +2292,15 @@ class BiomeGenerator:
         surface_block[highland_mask] = STONE
         soil_depth[highland_mask] = 2
 
+        perf.mark("biome")
+
         river_plan = None
         if self.enable_rivers:
             river_plan = self._compute_river_plan(position, elevation)
             if river_plan:
                 biome[river_plan['mask']] = 5
 
-        rural_plan = None
-        trail_plan = None
-        if self.enable_roads:
-            rural_plan, trail_plan = self._transport_plans_vectorized(position, elevation, road_height=road_height)
+        perf.mark("river-plan")
 
         # Identify cliffy regions (steep gradients).
         gx, gz = numpy.gradient(elevation)
@@ -2231,8 +2315,8 @@ class BiomeGenerator:
         building_mask = numpy.zeros_like(biome, dtype=bool)
         max_buildings = 2 if self.fast else 4
         step = 12 if self.fast else 8
-        for x in range(2, SECTOR_SIZE - 6, step):
-            for z in range(2, SECTOR_SIZE - 6, step):
+        for x in range(2, MAP_GEN_SECTOR_SIZE - 6, step):
+            for z in range(2, MAP_GEN_SECTOR_SIZE - 6, step):
                 if len(building_spots) >= max_buildings:
                     break
                 if elevation[x, z] < WATER_LEVEL:
@@ -2255,7 +2339,7 @@ class BiomeGenerator:
                     btype, size = 'cabin', (4, 4)
                 w, d = size
                 # Ensure space and flatten.
-                target_h = int(round(numpy.mean(elevation[max(x-1,0):min(x+w+1, SECTOR_SIZE), max(z-1,0):min(z+d+1, SECTOR_SIZE)])))
+                target_h = int(round(numpy.mean(elevation[max(x-1,0):min(x+w+1, MAP_GEN_SECTOR_SIZE), max(z-1,0):min(z+d+1, MAP_GEN_SECTOR_SIZE)])))
                 if target_h + 10 >= SECTOR_HEIGHT:
                     continue
                 if not self._reserve_area(building_mask, x, z, w, d, padding=2):
@@ -2263,8 +2347,10 @@ class BiomeGenerator:
                 self._clear_area(blocks=None, elevation=elevation, x=x, z=z, width=w, depth=d, target_height=target_h)
                 building_spots.append((x, z, target_h, btype, size, building_cluster[x, z]))
 
-        sx = SECTOR_SIZE
-        sz = SECTOR_SIZE
+        perf.mark("building-plan")
+
+        sx = MAP_GEN_SECTOR_SIZE
+        sz = MAP_GEN_SECTOR_SIZE
         y_grid = numpy.arange(SECTOR_HEIGHT)[:, None, None]
         ground_h = numpy.clip(elevation, 2, SECTOR_HEIGHT - 3).astype(int)
         depth = soil_depth.astype(int)
@@ -2293,17 +2379,30 @@ class BiomeGenerator:
             water_fill = (y_grid > ground_h[None, :, :]) & (y_grid <= wl[None, :, :]) & water_mask[None, :, :]
             blocks[water_fill] = WATER
 
+        perf.mark("terrain")
+
         if river_plan:
             # Carve river beds and fill with water along the planned river mask.
             self._apply_river_columns(blocks, river_plan)
             # Treat river tiles as water for later decoration / cave logic (even if above sea level).
             water_mask = water_mask | river_plan['mask']
 
+        perf.mark("river-apply")
+
         # Ores and caves after terrain fill, before roads/trails.
         if not self.fast:
             self._place_ores(position, blocks, elevation, cliff_mask)
             self._carve_caves(position, blocks, elevation, cliff_mask)
             self._place_cave_mushrooms(position, blocks, ground_h, water_mask, decor_noise, decor_detail)
+
+        perf.mark("caves-ores")
+
+        rural_plan = None
+        trail_plan = None
+        if self.enable_roads:
+            rural_plan, trail_plan = self._transport_plans_vectorized(position, elevation, road_height=road_height)
+
+        perf.mark("transport-plan")
 
         road_mask = None
         trail_mask = None
@@ -2325,6 +2424,8 @@ class BiomeGenerator:
                 dr = numpy.zeros_like(road_mask);   dr[:-1, :-1] = road_mask[1:, 1:]
                 road_mask = road_mask | up | dn | lt | rt | ul | ur | dl | dr
             self._apply_rural_roads_vec(blocks, rural_plan)
+
+        perf.mark("transport-apply")
 
         # Sparse tree + boulder placement for forest/plains (deterministic per sector).
         passable_mask = (~water_mask) & (~building_mask) & (~cliff_mask)
@@ -2388,6 +2489,8 @@ class BiomeGenerator:
                 self._place_boulder(blocks, bx, bz, ground_h[bx, bz], size_x=size_x, size_y=size_y, size_z=size_z)
                 boulder_mask[bx, bz] = True
 
+        perf.mark("trees")
+
         # Per-column decorations that need decisions.
         for x in range(sx):
             for z in range(sz):
@@ -2428,6 +2531,8 @@ class BiomeGenerator:
                 elif dense_hit and biome[x, z] == 0 and ground + 1 < SECTOR_HEIGHT and (2 * x + z) % 23 == 0:
                     blocks[ground + 1, x, z] = CAKE
 
+        perf.mark("decor")
+
         # Place planned buildings and connect them with paths.
         centers = []
         for x, z, gh, btype, size, orient_val in building_spots:
@@ -2437,6 +2542,8 @@ class BiomeGenerator:
             centers.append((x + w // 2, gh + 1, z + d // 2))
         for i in range(1, len(centers)):
             self._draw_path(blocks, centers[i - 1], centers[i])
+
+        perf.mark("buildings")
 
         if True:
             # Final water seal: ensure any air pockets below water level are filled.
@@ -2465,7 +2572,16 @@ class BiomeGenerator:
                     water_mask |= spread
                     air_mask &= ~spread
 
-        return blocks.swapaxes(0,1)
+        perf.mark("water-seal")
+
+        blocks = blocks.swapaxes(0,1)
+        blocks = _mapgen_crop_blocks(blocks, MAP_GEN_PAD_SIZE, MAP_GEN_CORE_SIZE)
+        perf.mark("finalize")
+        result = perf.finish()
+        if result is not None:
+            total, marks = result
+            _log_mapgen_timings(base_position, total, marks)
+        return blocks
 
 
 biome_generator = None
@@ -2500,8 +2616,8 @@ if __name__ == "__main__":
         Builds a simple elevation plane and runs _compute_trail_plan_vec, returning the mask.
         Uses a 3-length 'position' tuple so _sector_origin reads x/z correctly.
         """
-        sx = SECTOR_SIZE
-        sz = SECTOR_SIZE
+        sx = MAP_GEN_SECTOR_SIZE
+        sz = MAP_GEN_SECTOR_SIZE
 
         # Flat-ish elevation well above WATER_LEVEL, within SECTOR_HEIGHT range
         # (the relaxer/clipping won't matter for the mask checks, but avoid water logic surprises)
@@ -2525,9 +2641,9 @@ if __name__ == "__main__":
           O core right edge: world-x = ox+15 => ix = 15
           X core left edge:  world-x = ox+16 => ix = 0
         """
-        ix_O = SECTOR_SIZE - 1
+        ix_O = MAP_GEN_SECTOR_SIZE - 1
         ix_X = 0
-        inward_O = SECTOR_SIZE - 2   # one cell inward from O seam edge
+        inward_O = MAP_GEN_SECTOR_SIZE - 2   # one cell inward from O seam edge
         inward_X = 1    # one cell inward from X seam edge
         return ix_O, ix_X, inward_O, inward_X
 
@@ -2541,9 +2657,9 @@ if __name__ == "__main__":
           O core top edge:  world-z = oz+15 => iz = 15
           Z core bottom:    world-z = oz+16 => iz = 0
         """
-        iz_O = SECTOR_SIZE - 1
+        iz_O = MAP_GEN_SECTOR_SIZE - 1
         iz_Z = 0
-        inward_O = SECTOR_SIZE - 2
+        inward_O = MAP_GEN_SECTOR_SIZE - 2
         inward_Z = 1
         return iz_O, iz_Z, inward_O, inward_Z
 
@@ -2654,8 +2770,8 @@ if __name__ == "__main__":
     # --- Run the 3-sector test ---
     print("Computing masks for 3 sectors: O=(0,0), X=(+16,0), Z=(0,+16) ...")
     maskO = compute_mask_for_sector(0, 0)
-    maskX = compute_mask_for_sector(SECTOR_SIZE, 0)
-    maskZ = compute_mask_for_sector(0, SECTOR_SIZE)
+    maskX = compute_mask_for_sector(MAP_GEN_SECTOR_SIZE, 0)
+    maskZ = compute_mask_for_sector(0, MAP_GEN_SECTOR_SIZE)
 
     compare_seam_core_x(maskO, maskX, label="Origin vs +X sector")
     compare_seam_core_z(maskO, maskZ, label="Origin vs +Z sector")
