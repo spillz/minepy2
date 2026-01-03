@@ -138,6 +138,19 @@ SKY_INTENSITY = 1.0  # global sky light multiplier (0..1)
 SKY_SIDEFILL_ENABLED = True  # indirect sky light from sides/seams
 TORCH_FILL_ENABLED = True # torch light propagation to nearby blocks
 LIGHT_PROPAGATION_BFS = True  # use numpy frontier BFS instead of dense relaxation
+
+# Day/night cycle (visual only; no skylight recompute).
+DAY_NIGHT_CYCLE_ENABLED = True
+DAY_LENGTH_SECONDS = 1200.0
+DAY_START_PHASE = 0.0  # 0.0 = midday, 0.5 = midnight
+DAY_LIGHT_CURVE = 1.0  # >1.0 darkens nights, <1.0 brightens nights
+SUN_LIGHT_DIR = (0.35, 1.0, 0.65)  # midday light direction (x, y, z)
+DAY_AMBIENT_LIGHT = 0.18
+NIGHT_AMBIENT_LIGHT = 0.06
+DAY_SKY_INTENSITY = 1.0
+NIGHT_SKY_INTENSITY = 0.25
+DAY_FOG_COLOR = (0.5, 0.69, 1.0)
+NIGHT_FOG_COLOR = (0.02, 0.03, 0.06)
 # Ambient occlusion settings (darken inner edges/corners of exposed faces).
 AO_ENABLED = True
 AO_STRENGTH = 0.6

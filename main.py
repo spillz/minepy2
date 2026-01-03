@@ -152,8 +152,8 @@ class Window(pyglet.window.Window):
         # Shader program used for world rendering.
         self.block_program = shaders.create_block_shader()
         self.block_program['u_texture'] = 0
-        self.block_program['u_light_dir'] = (0.35, 1.0, 0.65)
-        self.block_program['u_fog_color'] = (0.5, 0.69, 1.0)
+        self.block_program['u_light_dir'] = getattr(config, 'SUN_LIGHT_DIR', (0.35, 1.0, 0.65))
+        self.block_program['u_fog_color'] = getattr(config, 'DAY_FOG_COLOR', (0.5, 0.69, 1.0))
         self.block_program['u_water_pass'] = False
         self.block_program['u_water_alpha'] = getattr(config, 'WATER_ALPHA', 0.8)
         self.block_program['u_ambient_light'] = getattr(config, 'AMBIENT_LIGHT', 0.0)
@@ -164,6 +164,20 @@ class Window(pyglet.window.Window):
         else:
             self.block_program['u_fog_start'] = 0.75 * DIST
             self.block_program['u_fog_end'] = DIST
+
+        self.day_night_enabled = getattr(config, "DAY_NIGHT_CYCLE_ENABLED", False)
+        self.day_length = float(getattr(config, "DAY_LENGTH_SECONDS", 1200.0))
+        if self.day_length <= 1e-6:
+            self.day_length = 1200.0
+        self.day_phase = float(getattr(config, "DAY_START_PHASE", 0.0)) % 1.0
+        sun_dir = getattr(config, "SUN_LIGHT_DIR", (0.35, 1.0, 0.65))
+        self._sun_dir_xz = self._normalize_xz_dir(sun_dir)
+        self._day_light_dir = self._normalize_light_dir(sun_dir[0], sun_dir[1], sun_dir[2])
+        self._day_ambient = getattr(config, "AMBIENT_LIGHT", 0.0)
+        self._day_sky_intensity = getattr(config, "SKY_INTENSITY", 1.0)
+        self._day_fog_color = getattr(config, "DAY_FOG_COLOR", (0.5, 0.69, 1.0))
+        if self.day_night_enabled:
+            self._update_day_night(0.0)
 
         # Instance of the model that handles the world.
         self.model = world.ModelProxy(self.block_program)
@@ -422,6 +436,51 @@ class Window(pyglet.window.Window):
         delta = ((end - start + 180.0) % 360.0) - 180.0
         return start + delta * t
 
+    def _normalize_light_dir(self, x, y, z):
+        mag = math.sqrt(x * x + y * y + z * z)
+        if mag <= 1e-6:
+            return (0.0, 1.0, 0.0)
+        return (x / mag, y / mag, z / mag)
+
+    def _normalize_xz_dir(self, sun_dir):
+        x = float(sun_dir[0])
+        z = float(sun_dir[2])
+        mag = math.sqrt(x * x + z * z)
+        if mag <= 1e-6:
+            return (0.35, 0.65)
+        return (x / mag, z / mag)
+
+    def _update_day_night(self, dt):
+        if not self.day_night_enabled:
+            return
+        if self.day_length > 1e-6:
+            self.day_phase = (self.day_phase + dt / self.day_length) % 1.0
+        angle = self.day_phase * 2.0 * math.pi
+        sun_elev = math.cos(angle)
+        day_factor = 0.5 + 0.5 * sun_elev
+        curve = getattr(config, "DAY_LIGHT_CURVE", 1.0)
+        if curve != 1.0:
+            day_factor = day_factor ** curve
+
+        day_ambient = getattr(config, "DAY_AMBIENT_LIGHT", getattr(config, "AMBIENT_LIGHT", 0.1))
+        night_ambient = getattr(config, "NIGHT_AMBIENT_LIGHT", day_ambient)
+        self._day_ambient = night_ambient + (day_ambient - night_ambient) * day_factor
+
+        day_sky = getattr(config, "DAY_SKY_INTENSITY", getattr(config, "SKY_INTENSITY", 1.0))
+        night_sky = getattr(config, "NIGHT_SKY_INTENSITY", day_sky)
+        self._day_sky_intensity = night_sky + (day_sky - night_sky) * day_factor
+
+        day_fog = getattr(config, "DAY_FOG_COLOR", (0.5, 0.69, 1.0))
+        night_fog = getattr(config, "NIGHT_FOG_COLOR", day_fog)
+        self._day_fog_color = (
+            night_fog[0] + (day_fog[0] - night_fog[0]) * day_factor,
+            night_fog[1] + (day_fog[1] - night_fog[1]) * day_factor,
+            night_fog[2] + (day_fog[2] - night_fog[2]) * day_factor,
+        )
+
+        xz = self._sun_dir_xz
+        self._day_light_dir = self._normalize_light_dir(xz[0], sun_elev, xz[1])
+
     def _player_back_orient(self):
         """Return orientation for wall-attached blocks based on player facing."""
         dx, _, dz = self.get_sight_vector()
@@ -520,6 +579,7 @@ class Window(pyglet.window.Window):
 
         """
         update_start = time.perf_counter()
+        self._update_day_night(dt)
         sector = util.sectorize(self.position)
         t0 = time.perf_counter()
         frustum_circle = None
@@ -1388,8 +1448,29 @@ class Window(pyglet.window.Window):
         self.clear()
         self.set_3d()
 
-        self.block_program['u_ambient_light'] = getattr(config, 'AMBIENT_LIGHT', 0.0)
-        self.block_program['u_sky_intensity'] = getattr(config, 'SKY_INTENSITY', 1.0)
+        if self.day_night_enabled:
+            self.block_program['u_ambient_light'] = self._day_ambient
+            self.block_program['u_sky_intensity'] = self._day_sky_intensity
+            self.block_program['u_light_dir'] = self._day_light_dir
+            self.block_program['u_fog_color'] = self._day_fog_color
+            gl.glClearColor(
+                self._day_fog_color[0],
+                self._day_fog_color[1],
+                self._day_fog_color[2],
+                1.0,
+            )
+        else:
+            self.block_program['u_ambient_light'] = getattr(config, 'AMBIENT_LIGHT', 0.0)
+            self.block_program['u_sky_intensity'] = getattr(config, 'SKY_INTENSITY', 1.0)
+            self.block_program['u_light_dir'] = getattr(config, 'SUN_LIGHT_DIR', (0.35, 1.0, 0.65))
+            fog_color = getattr(config, 'DAY_FOG_COLOR', (0.5, 0.69, 1.0))
+            self.block_program['u_fog_color'] = fog_color
+            gl.glClearColor(
+                fog_color[0],
+                fog_color[1],
+                fog_color[2],
+                1.0,
+            )
         
         t0 = time.perf_counter()
         # Draw world (opaque pass only so water can overlay entities).
@@ -2201,7 +2282,8 @@ def setup():
 
     """
     # Set the color of "clear", i.e. the sky, in rgba.
-    gl.glClearColor(0.5, 0.69, 1.0, 1)
+    fog = getattr(config, 'DAY_FOG_COLOR', (0.5, 0.69, 1.0))
+    gl.glClearColor(fog[0], fog[1], fog[2], 1)
     # Cull back faces for better fill-rate; geometry is built with consistent winding.
     gl.glEnable(gl.GL_CULL_FACE)
     gl.glCullFace(gl.GL_BACK)
