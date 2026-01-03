@@ -30,6 +30,7 @@ import shaders
 import renderer
 import world_entity_store
 import logutil
+import mapgen
 from entities.player import HUMANOID_MODEL, Player
 from entities.snake import SNAKE_MODEL, SnakeEntity
 from entities.snail import SNAIL_MODEL, SnailEntity
@@ -45,6 +46,7 @@ from blocks import (
     BLOCK_VERTICES,
     BLOCK_COLORS,
     BLOCK_SOLID,
+    BLOCK_COLLIDES,
     BLOCK_PICKER_FACE,
     BLOCK_INVENTORY,
     ORIENTED_BLOCK_IDS,
@@ -189,21 +191,6 @@ class Window(pyglet.window.Window):
             self.player_entity.position = np.array(grounded_pos, dtype=float)
         self.position = tuple(self.player_entity.position)
 
-        saved_snake_state = world_entity_store.load_entity_state("snake")
-        self.snake_entity = SnakeEntity(
-            self.model, player_position=self.position, entity_id=1, saved_state=saved_snake_state
-        )
-        saved_snail_state = world_entity_store.load_entity_state("snail")
-        self.snail_entity = SnailEntity(
-            self.model, player_position=self.position, entity_id=2, saved_state=saved_snail_state
-        )
-        saved_seagull_state = world_entity_store.load_entity_state("seagull")
-        self.seagull_entity = SeagullEntity(
-            self.model, player_position=self.position, entity_id=3, saved_state=saved_seagull_state
-        )
-        saved_dog_state = world_entity_store.load_entity_state("dog")
-        self.dog_entity = Dog(self.model, entity_id=4, saved_state=saved_dog_state)
-        self.dog_entity.snap_to_ground()
         self.entity_renderers = {
             'player': renderer.AnimatedEntityRenderer(self.block_program, HUMANOID_MODEL),
             'snake': renderer.SnakeRenderer(self.block_program, SNAKE_MODEL),
@@ -213,11 +200,14 @@ class Window(pyglet.window.Window):
         }
         self.entity_objects = {
             self.player_entity.id: self.player_entity,
-            self.snake_entity.id: self.snake_entity,
-            self.snail_entity.id: self.snail_entity,
-            self.seagull_entity.id: self.seagull_entity,
-            self.dog_entity.id: self.dog_entity,
         }
+        self._next_entity_id = 1
+        self._sector_entity_state = {}
+        self._entity_sector_map = {}
+        self._last_loaded_sectors = set()
+        self._biome_generator = None
+        self._entity_spawn_radius = int(getattr(config, "ENTITY_SPAWN_RADIUS", 3))
+        self._entity_max = int(getattr(config, "ENTITY_MAX", 6))
         ready_radius = getattr(config, 'READY_SECTOR_RADIUS', None)
         if ready_radius is None:
             ready_fraction = getattr(config, 'READY_SECTOR_FRACTION', 1.0)
@@ -549,6 +539,7 @@ class Window(pyglet.window.Window):
             )
             update_sectors_ms = (time.perf_counter() - t1) * 1000.0
             self.sector = sector
+        self._sync_sector_entities(sector)
         self.model.mesh_budget_deadline = None
         t2 = time.perf_counter()
         self.model.process_pending_mesh_jobs(frustum_circle=frustum_circle, allow_submit=True)
@@ -606,6 +597,240 @@ class Window(pyglet.window.Window):
             f"entities enabled={enabled_entities} updates={entity_updates_total} substeps={substeps} ms={entity_ms_total:.2f}",
         )
         self.last_update_ms = total_ms
+
+    def _ensure_biome_generator(self):
+        if self._biome_generator is not None:
+            return self._biome_generator
+        seed = getattr(self.model, "world_seed", None)
+        if seed is None:
+            return None
+        mapgen.initialize_biome_map_generator(seed=seed)
+        self._biome_generator = mapgen.biome_generator
+        return self._biome_generator
+
+    def _entity_type_enabled(self, entity_type):
+        if entity_type == "snake":
+            return self.snake_enabled
+        if entity_type == "snail":
+            return self.snail_enabled
+        if entity_type == "seagull":
+            return self.seagull_enabled
+        if entity_type == "dog":
+            return self.dog_enabled
+        return True
+
+    def _sector_distance(self, a, b):
+        dx = abs((a[0] - b[0]) // config.SECTOR_SIZE)
+        dz = abs((a[2] - b[2]) // config.SECTOR_SIZE)
+        return max(dx, dz)
+
+    def _sector_in_range(self, ref_sector, sector_pos, radius):
+        if ref_sector is None:
+            return False
+        return self._sector_distance(ref_sector, sector_pos) <= radius
+
+    def _spawn_entity_for_plan(self, sector_pos, plan):
+        if plan is None:
+            return None
+        sector = self.model.sectors.get(sector_pos)
+        if sector is None:
+            return None
+        entity_type = plan.get("type")
+        local_pos = plan.get("local_pos")
+        if entity_type is None or local_pos is None:
+            return None
+        local_x, local_z = local_pos
+        spawn_pos = None
+        if entity_type == "seagull":
+            spawn_pos = self._find_water_spawn(sector, local_x, local_z)
+        elif entity_type == "snail":
+            spawn_pos = self._find_cave_spawn(sector, local_x, local_z)
+        else:
+            spawn_pos = self._find_surface_spawn(sector, local_x, local_z)
+        if spawn_pos is None:
+            return None
+
+        entity_id = self._next_entity_id
+        self._next_entity_id += 1
+        if entity_type == "snake":
+            entity = SnakeEntity(self.model, player_position=spawn_pos, entity_id=entity_id)
+        elif entity_type == "snail":
+            entity = SnailEntity(
+                self.model,
+                player_position=spawn_pos,
+                entity_id=entity_id,
+                saved_state={"pos": spawn_pos, "rot": (0.0, 0.0)},
+            )
+        elif entity_type == "seagull":
+            entity = SeagullEntity(
+                self.model,
+                player_position=spawn_pos,
+                entity_id=entity_id,
+                saved_state={"pos": spawn_pos, "rot": (0.0, 0.0)},
+            )
+        elif entity_type == "dog":
+            entity = Dog(self.model, entity_id=entity_id, saved_state={"pos": spawn_pos, "rot": (0.0, 0.0)})
+            entity.snap_to_ground()
+        else:
+            return None
+        self.entity_objects[entity_id] = entity
+        return entity
+
+    def _find_surface_spawn(self, sector, local_x, local_z):
+        offsets = [
+            (0, 0), (1, 0), (-1, 0), (0, 1), (0, -1),
+            (1, 1), (-1, 1), (1, -1), (-1, -1),
+            (2, 0), (-2, 0), (0, 2), (0, -2),
+        ]
+        for dx, dz in offsets:
+            lx = local_x + dx
+            lz = local_z + dz
+            if lx < 0 or lx >= config.SECTOR_SIZE or lz < 0 or lz >= config.SECTOR_SIZE:
+                continue
+            column = sector.blocks[lx, :, lz]
+            collides = BLOCK_COLLIDES[column]
+            if not collides.any():
+                continue
+            top = int(np.nonzero(collides)[0][-1])
+            if column[top] == WATER:
+                continue
+            if top + 1 < column.shape[0] and BLOCK_COLLIDES[column[top + 1]]:
+                continue
+            wx = sector.position[0] + lx
+            wz = sector.position[2] + lz
+            return (float(wx), float(top + 1), float(wz))
+        return None
+
+    def _find_water_spawn(self, sector, local_x, local_z):
+        offsets = [
+            (0, 0), (1, 0), (-1, 0), (0, 1), (0, -1),
+            (1, 1), (-1, 1), (1, -1), (-1, -1),
+            (2, 0), (-2, 0), (0, 2), (0, -2),
+        ]
+        for dx, dz in offsets:
+            lx = local_x + dx
+            lz = local_z + dz
+            if lx < 0 or lx >= config.SECTOR_SIZE or lz < 0 or lz >= config.SECTOR_SIZE:
+                continue
+            column = sector.blocks[lx, :, lz]
+            water = column == WATER
+            if not water.any():
+                continue
+            top = int(np.nonzero(water)[0][-1])
+            wx = sector.position[0] + lx
+            wz = sector.position[2] + lz
+            y = float(top + 1 + getattr(SeagullEntity, "ALTITUDE_OFFSET", 12.0))
+            return (float(wx), y, float(wz))
+        return None
+
+    def _find_cave_spawn(self, sector, local_x, local_z):
+        offsets = [
+            (0, 0), (1, 0), (-1, 0), (0, 1), (0, -1),
+            (1, 1), (-1, 1), (1, -1), (-1, -1),
+            (2, 0), (-2, 0), (0, 2), (0, -2),
+            (3, 0), (-3, 0), (0, 3), (0, -3),
+        ]
+        for dx, dz in offsets:
+            lx = local_x + dx
+            lz = local_z + dz
+            if lx < 0 or lx >= config.SECTOR_SIZE or lz < 0 or lz >= config.SECTOR_SIZE:
+                continue
+            column = sector.blocks[lx, :, lz]
+            collides = BLOCK_COLLIDES[column]
+            if not collides.any():
+                continue
+            top = int(np.nonzero(collides)[0][-1])
+            if top <= 4:
+                continue
+            for y in range(2, top - 2):
+                if column[y] != 0:
+                    continue
+                if not BLOCK_COLLIDES[column[y - 1]] or column[y - 1] == WATER:
+                    continue
+                if column[y + 1] != 0:
+                    continue
+                ceiling_band = column[y + 2:min(top, y + 12)]
+                if ceiling_band.size == 0 or not BLOCK_COLLIDES[ceiling_band].any():
+                    continue
+                wx = sector.position[0] + lx
+                wz = sector.position[2] + lz
+                return (float(wx), float(y), float(wz))
+        return None
+
+    def _despawn_entity(self, entity_id, reset_sector_spawn=False):
+        entity = self.entity_objects.pop(entity_id, None)
+        if entity is None:
+            return
+        sector_pos = self._entity_sector_map.pop(entity_id, None)
+        if sector_pos is None:
+            return
+        state = self._sector_entity_state.get(sector_pos)
+        if state is None:
+            return
+        state["entity_id"] = None
+        if reset_sector_spawn:
+            state["spawned"] = False
+
+    def _enforce_entity_cap(self):
+        max_entities = int(getattr(config, "ENTITY_MAX", self._entity_max))
+        extras = [
+            entity for entity in self.entity_objects.values()
+            if entity is not self.player_entity
+        ]
+        if max_entities <= 0:
+            for entity in extras:
+                self._despawn_entity(entity.id, reset_sector_spawn=False)
+            return
+        if len(extras) <= max_entities:
+            return
+        px, py, pz = self.player_entity.position
+        extras.sort(
+            key=lambda ent: (ent.position[0] - px) ** 2
+            + (ent.position[1] - py) ** 2
+            + (ent.position[2] - pz) ** 2,
+            reverse=True,
+        )
+        remove_count = len(extras) - max_entities
+        for entity in extras[:remove_count]:
+            self._despawn_entity(entity.id, reset_sector_spawn=False)
+
+    def _sync_sector_entities(self, player_sector):
+        generator = self._ensure_biome_generator()
+        if generator is None:
+            return
+        loaded_sectors = set(self.model.sectors.keys())
+        if self._last_loaded_sectors:
+            for dropped in self._last_loaded_sectors - loaded_sectors:
+                state = self._sector_entity_state.get(dropped)
+                if state and state.get("entity_id") is not None:
+                    self._despawn_entity(state["entity_id"], reset_sector_spawn=True)
+                elif state:
+                    state["spawned"] = False
+        self._last_loaded_sectors = loaded_sectors
+        if player_sector is None:
+            return
+
+        for sector_pos in loaded_sectors:
+            if not self._sector_in_range(player_sector, sector_pos, self._entity_spawn_radius):
+                continue
+            state = self._sector_entity_state.get(sector_pos)
+            if state is None:
+                plan = generator.sector_entity_plan(sector_pos)
+                state = {"plan": plan, "spawned": False, "entity_id": None}
+                self._sector_entity_state[sector_pos] = state
+            plan = state.get("plan")
+            if plan is None or state.get("spawned"):
+                continue
+            if not self._entity_type_enabled(plan.get("type")):
+                continue
+            entity = self._spawn_entity_for_plan(sector_pos, plan)
+            if entity is None:
+                continue
+            state["spawned"] = True
+            state["entity_id"] = entity.id
+            self._entity_sector_map[entity.id] = sector_pos
+
+        self._enforce_entity_cap()
 
 
     def _update(self, dt):
@@ -710,22 +935,20 @@ class Window(pyglet.window.Window):
         return entity_ms, update_count
 
     def _entity_is_enabled(self, entity):
-        if entity is self.snake_entity:
+        if entity.type == "snake":
             return self.snake_enabled
-        if entity is self.snail_entity:
+        if entity.type == "snail":
             return self.snail_enabled
-        if entity is self.seagull_entity:
+        if entity.type == "seagull":
             return self.seagull_enabled
-        if entity is self.dog_entity:
+        if entity.type == "dog":
             return self.dog_enabled
         return True
 
     def _persist_entity_states(self):
-        for entity in self.entity_objects.values():
-            state = entity.serialize_state()
-            if state is not None:
-                # print('persisting',entity, state)
-                world_entity_store.save_entity_state(entity.type, state)
+        state = self.player_entity.serialize_state()
+        if state is not None:
+            world_entity_store.save_entity_state(self.player_entity.type, state)
 
     def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
         ctrl = self.keys[key.LCTRL] or self.keys[key.RCTRL]

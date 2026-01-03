@@ -570,6 +570,12 @@ class PlankStairEastUpsideDown(PlankStair):
     vertices = stair_east_ud
     show_in_inventory = False
 
+class GlassBlock(Block):
+    name = 'Glass Block'
+    coords = ((1, 12), (1, 12), (1, 12))
+    solid = True
+    occludes = False
+
 # Explicit ordering keeps block IDs stable and ensures the initial inventory
 # starts with grass instead of whichever subclass happens to register first.
 BLOCKS = [
@@ -664,6 +670,7 @@ BLOCKS = [
     PlankStairWestUpsideDown,
     PlankStairNorthUpsideDown,
     PlankStairEastUpsideDown,
+    GlassBlock,
 ]
 i = 1
 BLOCK_ID = {}

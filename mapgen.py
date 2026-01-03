@@ -33,11 +33,25 @@ CAKE = BLOCK_ID['Cake']
 ROSE = BLOCK_ID['Rose']
 WATER = BLOCK_ID['Water']
 MUSHROOM = BLOCK_ID['Mushroom']
+GLASS_BLOCK = BLOCK_ID['Glass Block']
 
 LADDER_SOUTH = BLOCK_ID['Ladder South']
 LADDER_WEST = BLOCK_ID['Ladder West']
 LADDER_NORTH = BLOCK_ID['Ladder North']
 LADDER_EAST = BLOCK_ID['Ladder East']
+
+DOOR_LOWER_SOUTH = BLOCK_ID['Door Lower South']
+DOOR_LOWER_WEST = BLOCK_ID['Door Lower West']
+DOOR_LOWER_NORTH = BLOCK_ID['Door Lower North']
+DOOR_LOWER_EAST = BLOCK_ID['Door Lower East']
+DOOR_UPPER_SOUTH = BLOCK_ID['Door Upper South']
+DOOR_UPPER_WEST = BLOCK_ID['Door Upper West']
+DOOR_UPPER_NORTH = BLOCK_ID['Door Upper North']
+DOOR_UPPER_EAST = BLOCK_ID['Door Upper East']
+DOOR_IDS = {
+    DOOR_LOWER_SOUTH, DOOR_LOWER_WEST, DOOR_LOWER_NORTH, DOOR_LOWER_EAST,
+    DOOR_UPPER_SOUTH, DOOR_UPPER_WEST, DOOR_UPPER_NORTH, DOOR_UPPER_EAST,
+}
 
 DIRT_STAIR = BLOCK_ID['Dirt Stair']
 COBBLE_STAIR = BLOCK_ID['Cobble Stair']
@@ -338,28 +352,107 @@ class BiomeGenerator:
 
         # Base biome indices: 0 plains, 1 forest, 2 desert, 3 highland, 4 canyon.
         biome = numpy.zeros(moist01.shape, dtype=numpy.int8)
-        biome[(moist01 > 0.48) & (elev01 < 0.7)] = 1   # forest
-        biome[(moist01 < 0.22) & (temp01 > 0.6)] = 2   # desert (rarer)
-        biome[(elev01 > 0.75)] = 3                     # highlands (smaller area)
+        biome[(moist01 > 0.4) & (elev01 < 0.8)] = 1    # forest (bigger + more common)
+        biome[(moist01 < 0.18) & (temp01 > 0.65)] = 2  # desert (rarer)
+        biome[(elev01 > 0.82)] = 3                     # highlands (smaller area)
         biome[canyon_noise < -0.35] = 4                # canyon/mesa
         return biome
 
+    def _cave_column_mask(self, position, elevation, cliff_mask=None):
+        """Return a 2D mask where cave space is likely under dry land."""
+        if self.fast:
+            return None
+        if cliff_mask is None:
+            gx, gz = numpy.gradient(elevation)
+            cliff_mask = numpy.hypot(gx, gz) > 0.85
+
+        region_base = self.cave_region_noise(position)
+        region_detail = self.cave_region_detail(position)
+        region01 = numpy.clip(0.5 + 0.5 * region_base + 0.25 * region_detail, 0.0, 1.0)
+        region_threshold = float(getattr(config, "CAVE_REGION_THRESHOLD", 0.62))
+        region_mask = region01 > region_threshold
+
+        density2d = 0.5 + 0.5 * self.cave_density_noise(position)
+        pad = numpy.pad(density2d, 1, mode="edge")
+        density2d = (
+            pad[1:-1, 1:-1]
+            + pad[:-2, 1:-1]
+            + pad[2:, 1:-1]
+            + pad[1:-1, :-2]
+            + pad[1:-1, 2:]
+        ) / 5.0
+        cliff_gate = float(getattr(config, "CAVE_CLIFF_DENSITY_GATE", 0.72))
+        area_mask = region_mask | (cliff_mask & (density2d > cliff_gate))
+        land_mask = elevation > WATER_LEVEL
+        return area_mask & land_mask & (density2d > 0.35)
+
+    def sector_entity_plan(self, position):
+        """Return a deterministic spawn plan for a sector, or None."""
+        spawn_chance = float(getattr(config, "ENTITY_SPAWN_CHANCE", 0.01))
+        if spawn_chance <= 0.0:
+            return None
+        ox, oz = self._sector_origin(position)
+        if self._macro_random(ox, oz, 41001) >= spawn_chance:
+            return None
+
+        elevation, canyon_noise, _ = self._height_field(position)
+        moisture = self.moisture(position)
+        temperature = self.temperature(position)
+        biome = self._biome_masks(moisture, temperature, elevation, canyon_noise)
+        water_mask = elevation <= WATER_LEVEL
+        land_mask = ~water_mask
+        forest_canyon_mask = ((biome == 1) | (biome == 4)) & land_mask
+
+        cliff_mask = None
+        if not self.fast:
+            gx, gz = numpy.gradient(elevation)
+            cliff_mask = numpy.hypot(gx, gz) > 0.85
+        cave_mask = self._cave_column_mask(position, elevation, cliff_mask=cliff_mask)
+
+        choices = []
+        if forest_canyon_mask.any():
+            choices.append(("snake", forest_canyon_mask))
+        if cave_mask is not None and cave_mask.any():
+            choices.append(("snail", cave_mask))
+        if water_mask.any():
+            choices.append(("seagull", water_mask))
+        other_land = land_mask & (~forest_canyon_mask)
+        if other_land.any():
+            choices.append(("dog", other_land))
+        if not choices:
+            return None
+
+        pick = int(self._macro_random(ox, oz, 41002) * len(choices))
+        entity_type, mask = choices[pick]
+        coords = numpy.argwhere(mask)
+        if coords.size == 0:
+            return None
+        idx = int(self._macro_random(ox, oz, 41003) * len(coords))
+        x, z = coords[idx]
+        return {"type": entity_type, "local_pos": (int(x), int(z))}
+
     def _build_tree_templates(self):
         templates = []
-        def build(height, radius):
+        rng = numpy.random.default_rng(int(self.seed) + 1337)
+        def build(height, radius, jitter_seed):
             trunk = [(0, dy, 0) for dy in range(1, height + 1)]
             canopy = []
             top = height
-            for dx in range(-radius, radius + 1):
-                for dz in range(-radius, radius + 1):
-                    for dy in range(-1, 2):
-                        if abs(dx) + abs(dz) + abs(dy) > radius + 1:
+            local_rng = numpy.random.default_rng(jitter_seed)
+            for dy in range(-2, 2):
+                layer_r = radius - max(0, abs(dy) - 1)
+                for dx in range(-layer_r, layer_r + 1):
+                    for dz in range(-layer_r, layer_r + 1):
+                        dist2 = dx * dx + dz * dz
+                        if dist2 > layer_r * layer_r + local_rng.integers(0, 2):
+                            continue
+                        if local_rng.random() < 0.08:
                             continue
                         canopy.append((dx, top + dy, dz))
             return trunk, canopy
-        templates.append(build(4, 2))
-        templates.append(build(5, 2))
-        templates.append(build(6, 2))
+        for height in range(5, 9):
+            for radius in (3, 4):
+                templates.append(build(height, radius, rng.integers(0, 1 << 30)))
         return templates
 
     # ----- Macro feature helpers -----
@@ -1665,7 +1758,50 @@ class BiomeGenerator:
                 blocks[base_y, wx, wz] = PLANK
         # Walls with doorway and windows
         door_x = x + width // 2
-        door_z = z + depth - 1 if doorway_dir == 'z+' else (z if doorway_dir == 'z-' else z + depth // 2)
+        door_z = z + depth // 2
+        if doorway_dir == 'z+':
+            door_z = z + depth - 1
+        elif doorway_dir == 'z-':
+            door_z = z
+        elif doorway_dir == 'x+':
+            door_x = x + width - 1
+        elif doorway_dir == 'x-':
+            door_x = x
+        door_lower, door_upper = {
+            'z+': (DOOR_LOWER_SOUTH, DOOR_UPPER_SOUTH),
+            'z-': (DOOR_LOWER_NORTH, DOOR_UPPER_NORTH),
+            'x+': (DOOR_LOWER_EAST, DOOR_UPPER_EAST),
+            'x-': (DOOR_LOWER_WEST, DOOR_UPPER_WEST),
+        }.get(doorway_dir, (DOOR_LOWER_SOUTH, DOOR_UPPER_SOUTH))
+        if doorway_dir == 'z+':
+            dx_out, dz_out = 0, 1
+        elif doorway_dir == 'z-':
+            dx_out, dz_out = 0, -1
+        elif doorway_dir == 'x+':
+            dx_out, dz_out = 1, 0
+        elif doorway_dir == 'x-':
+            dx_out, dz_out = -1, 0
+        else:
+            dx_out, dz_out = 0, 1
+        inside_x, inside_z = door_x - dx_out, door_z - dz_out
+        outside_x, outside_z = door_x + dx_out, door_z + dz_out
+        door_allowed = True
+        if not (0 <= inside_x < SECTOR_SIZE and 0 <= inside_z < SECTOR_SIZE):
+            door_allowed = False
+        if not (0 <= outside_x < SECTOR_SIZE and 0 <= outside_z < SECTOR_SIZE):
+            door_allowed = False
+        if door_allowed:
+            for wy in (base_y + 1, base_y + 2):
+                if wy >= SECTOR_HEIGHT:
+                    door_allowed = False
+                    break
+                if blocks[wy, outside_x, outside_z] != 0:
+                    door_allowed = False
+                    break
+                inside_id = blocks[wy, inside_x, inside_z]
+                if inside_id != 0 and inside_id in DOOR_IDS:
+                    door_allowed = False
+                    break
         for dy in range(1, height):
             wy = base_y + dy
             for dx in range(width):
@@ -1675,11 +1811,17 @@ class BiomeGenerator:
                     if not at_edge:
                         continue
                     # Door opening 2 blocks tall
-                    if (wx == door_x and ((doorway_dir == 'z+' and wz == z + depth - 1) or (doorway_dir == 'z-' and wz == z)) and dy <= 2):
-                        continue
+                    if wx == door_x and wz == door_z and dy <= 2:
+                        if door_allowed:
+                            if dy == 1:
+                                blocks[wy, wx, wz] = door_lower
+                            elif dy == 2:
+                                blocks[wy, wx, wz] = door_upper
+                            continue
                     # Windows in middle height
                     mid_band = (dy == max(2, height // 2)) and windows
                     if mid_band and ((dx % (width - 1) == 0 and dz % 2 == 0) or (dz % (depth - 1) == 0 and dx % 2 == 0)):
+                        blocks[wy, wx, wz] = GLASS_BLOCK
                         continue
                     blocks[wy, wx, wz] = wall_block
         # Roof
@@ -1740,16 +1882,20 @@ class BiomeGenerator:
             tower_z = z + (0 if orient == 'z-' else 7)
             self._place_rect_building(blocks, tower_x, tower_z, ground_y, width=3, depth=3, height=7, wall_block=BRICK, roof_block=WOOD, pitched=False, doorway_dir=orient, windows=True)
 
-    def _place_boulder(self, blocks, x, z, ground_y, radius=2):
-        for dx in range(-radius, radius + 1):
-            for dz in range(-radius, radius + 1):
-                if dx * dx + dz * dz > radius * radius + 1:
-                    continue
-                wx, wz = x + dx, z + dz
-                if 0 <= wx < SECTOR_SIZE and 0 <= wz < SECTOR_SIZE:
-                    h = ground_y + max(0, 1 - abs(dx) - abs(dz))
-                    if h < SECTOR_HEIGHT:
-                        blocks[h, wx, wz] = COBBLE if (dx + dz) % 2 else STONE
+    def _place_boulder(self, blocks, x, z, ground_y, size_x=2, size_y=2, size_z=2, block_id=BETTERSTONE):
+        start_x = x - size_x // 2
+        start_z = z - size_z // 2
+        end_x = start_x + size_x
+        end_z = start_z + size_z
+        if start_x < 1 or start_z < 1 or end_x >= SECTOR_SIZE or end_z >= SECTOR_SIZE:
+            return
+        for dx in range(size_x):
+            for dz in range(size_z):
+                wx, wz = start_x + dx, start_z + dz
+                for dy in range(1, size_y + 1):
+                    wy = ground_y + dy
+                    if 0 <= wy < SECTOR_HEIGHT:
+                        blocks[wy, wx, wz] = block_id
 
     def _reserve_area(self, taken_mask, x, z, width, depth, padding=1):
         x0 = max(0, x - padding)
@@ -2017,6 +2163,12 @@ class BiomeGenerator:
         elevation, canyon_noise, road_height = self._height_field(position)
         if False:
             elevation = self._apply_spawn_bias(elevation, position)
+        ox, oz = self._sector_origin(position)
+        mix = numpy.uint64(0x9E3779B97F4A7C15)
+        mix ^= numpy.uint64(numpy.int64(self.seed))
+        mix ^= numpy.uint64(numpy.int64(ox * 928371))
+        mix ^= numpy.uint64(numpy.int64(oz * 97241))
+        rng = numpy.random.default_rng(int(mix))
         moisture = self.moisture(position)
         temperature = self.temperature(position)
         moist01 = 0.5 + 0.5 * numpy.tanh(moisture)
@@ -2173,6 +2325,68 @@ class BiomeGenerator:
                 road_mask = road_mask | up | dn | lt | rt | ul | ur | dl | dr
             self._apply_rural_roads_vec(blocks, rural_plan)
 
+        # Sparse tree + boulder placement for forest/plains (deterministic per sector).
+        passable_mask = (~water_mask) & (~building_mask) & (~cliff_mask)
+        if road_mask is not None:
+            passable_mask &= ~road_mask
+        if trail_mask is not None:
+            passable_mask &= ~trail_mask
+        grass_mask = surface_block == GRASS
+        forest_spawn_mask = forest_mask & passable_mask & grass_mask
+        plains_spawn_mask = (biome == 0) & passable_mask & grass_mask
+
+        def _pick_positions(mask, count, min_dist, avoid_mask=None):
+            coords = numpy.argwhere(mask)
+            if coords.size == 0:
+                return []
+            rng.shuffle(coords)
+            chosen = []
+            min_d2 = min_dist * min_dist
+            for cx, cz in coords:
+                if avoid_mask is not None and avoid_mask[cx, cz]:
+                    continue
+                ok = True
+                for ox, oz in chosen:
+                    dx = cx - ox
+                    dz = cz - oz
+                    if dx * dx + dz * dz < min_d2:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+                chosen.append((int(cx), int(cz)))
+                if len(chosen) >= count:
+                    break
+            return chosen
+
+        tree_mask = numpy.zeros_like(biome, dtype=bool)
+        boulder_mask = numpy.zeros_like(biome, dtype=bool)
+
+        if forest_spawn_mask.any():
+            forest_tree_count = int(rng.integers(2, 5))
+            for tx, tz in _pick_positions(forest_spawn_mask, forest_tree_count, min_dist=6):
+                self._place_tree(blocks, tx, tz, ground_h[tx, tz], structure[tx, tz] + tree_jitter[tx, tz])
+                tree_mask[tx, tz] = True
+            forest_boulder_count = int(rng.integers(0, 3))
+            for bx, bz in _pick_positions(forest_spawn_mask, forest_boulder_count, min_dist=5, avoid_mask=tree_mask):
+                size_x = int(rng.integers(2, 4))
+                size_y = int(rng.integers(2, 4))
+                size_z = int(rng.integers(2, 4))
+                self._place_boulder(blocks, bx, bz, ground_h[bx, bz], size_x=size_x, size_y=size_y, size_z=size_z)
+                boulder_mask[bx, bz] = True
+
+        if plains_spawn_mask.any() and rng.random() < 0.05:
+            for tx, tz in _pick_positions(plains_spawn_mask, 1, min_dist=6, avoid_mask=tree_mask):
+                self._place_tree(blocks, tx, tz, ground_h[tx, tz], structure[tx, tz] + tree_jitter[tx, tz])
+                tree_mask[tx, tz] = True
+        if plains_spawn_mask.any() and rng.random() < 0.05:
+            for bx, bz in _pick_positions(plains_spawn_mask, 1, min_dist=5, avoid_mask=tree_mask):
+                size_x = int(rng.integers(2, 4))
+                size_y = int(rng.integers(2, 4))
+                size_z = int(rng.integers(2, 4))
+                self._place_boulder(blocks, bx, bz, ground_h[bx, bz], size_x=size_x, size_y=size_y, size_z=size_z)
+                boulder_mask[bx, bz] = True
+
         # Per-column decorations that need decisions.
         for x in range(sx):
             for z in range(sz):
@@ -2183,13 +2397,15 @@ class BiomeGenerator:
                 ground = ground_h[x, z]
                 if water_mask[x, z]:
                     continue
-                # Forest canopy: sparse, jittered placement for walkability.
-                if forest_mask[x, z] and not building_mask[x, z]:
-                    allow_tree = (structure[x, z] > 0.35 if self.fast else structure[x, z] > 0.32) and tree_jitter[x, z] > 0.05
-                    stride = 6 if self.fast else 5
-                    coarse_gate = ((x + z + int(tree_jitter[x, z] * 7)) % stride == 0)
-                    if allow_tree and coarse_gate:
-                        self._place_tree(blocks, x, z, ground, structure[x, z] + tree_jitter[x, z])
+                if tree_mask[x, z] or boulder_mask[x, z]:
+                    continue
+                # Occasional bushes and small decorations on grass in forest/plains.
+                if ground + 1 < SECTOR_HEIGHT and grass_mask[x, z] and (forest_mask[x, z] or biome[x, z] == 0):
+                    bush_roll = rng.random()
+                    if bush_roll < 0.02:
+                        blocks[ground + 1, x, z] = LEAVES
+                    elif bush_roll < 0.03:
+                        blocks[ground + 1, x, z] = ROSE
                 # Sparse shrubs in canyons
                 if canyon_mask[x, z] and structure[x, z] > 0.45 and ground + 1 < SECTOR_HEIGHT:
                     blocks[ground + 1, x, z] = LEAVES
@@ -2200,10 +2416,7 @@ class BiomeGenerator:
                 dd = decor_detail[x, z]
                 dense_hit = (dn > 0.7) and (dd > 0.6)
                 rare_hit = (dn < -0.7) and (dd < -0.6)
-                if dense_hit and not cliff_mask[x, z]:
-                    rad = 1 + int(abs(dn + dd) * 1.2)
-                    self._place_boulder(blocks, x, z, ground, radius=min(2, rad))
-                elif dense_hit and biome[x, z] in (0, 1) and ground + 1 < SECTOR_HEIGHT:
+                if dense_hit and biome[x, z] in (0, 1) and ground + 1 < SECTOR_HEIGHT:
                     blocks[ground + 1, x, z] = ROSE
                 elif rare_hit and biome[x, z] == 0 and ground + 1 < SECTOR_HEIGHT and (x + z) % 15 == 0:
                     blocks[ground + 1, x, z] = PUMPKIN
