@@ -1,8 +1,9 @@
-# Project: minpy2 - a minecraftlike in pure python
+# Project: minepy2 - a minecraftlike in pure python
 
 ## General Instructions
 
-- Ignore the web folder unless told explicitly to look at JavaScript.
+- This is a Minecraft-like game written in Python, Pyglet and Numpy.
+- Ignore the web folder unless told explicitly to look at JavaScript (and incomplete port of the game).
 - The program use a mix of OO and imperative style, avoid functional programming techniques.
 - Prefer vectorized operations with numpy over loops when working on numerically heavy codepaths.
 - Speedy rendering and calculation performance are crucial.
