@@ -281,7 +281,7 @@ class Window(pyglet.window.Window):
         self._hud_probe_mush = 'NA'
         self.hud_visible = True
         self.hud_details_visible = False
-        self.vsync_enabled = True
+        self.vsync_enabled = False
         self._hud_stats_start = time.perf_counter()
         self._hud_stats_frames = 0
         self._hud_stats_dt_sum = 0.0
@@ -2317,7 +2317,7 @@ def main():
         else:
             config.SERVER_IP = arg
         logutil.log("MAIN", f"Using server IP address {config.SERVER_IP}:{config.SERVER_PORT}")
-    window = Window(width=300, height=200, caption='Pyglet', resizable=True, vsync=True)
+    window = Window(width=300, height=200, caption='Pyglet', resizable=True, vsync=False)
     # Hide the mouse cursor and prevent the mouse from leaving the window.
     window.set_exclusive_mouse(True)
     setup()

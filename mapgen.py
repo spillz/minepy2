@@ -16,6 +16,7 @@ if MAP_GEN_PAD_SIZE:
     MAP_GEN_SECTOR_SIZE = MAP_GEN_CORE_SIZE + 2 * MAP_GEN_PAD_SIZE
 
 _Y_GRID_FLOAT = numpy.arange(SECTOR_HEIGHT, dtype=float)[:, None, None]
+_Y_GRID_INT = numpy.arange(SECTOR_HEIGHT, dtype=numpy.int16)[:, None, None]
 
 STONE = BLOCK_ID['Stone']
 SAND = BLOCK_ID['Sand']
@@ -66,8 +67,6 @@ PLANK_STAIR = BLOCK_ID['Plank Stair']
 
 WATER_LEVEL = 70
 GLOBAL_WATER_LEVEL = WATER_LEVEL
-# Debug tracker for nearest placed mushroom.
-_debug_mushroom_hint = {'best': None, 'best_dist2': None}
 
 def _mapgen_pad_position(position, pad):
     if pad <= 0:
@@ -118,6 +117,21 @@ def _log_mapgen_timings(position, total, marks):
         level="DEBUG",
     )
 
+
+def _log_cave_timings(position, total, marks):
+    if total is None:
+        return
+    parts = " ".join(f"{name}={ms:.2f}ms" for name, ms in marks)
+    logutil.log(
+        "MAPGEN_CAVES",
+        f"caves position={position} total={total:.2f}ms {parts}",
+        level="DEBUG",
+    )
+
+
+_last_mapgen_ore_ms = None
+_last_mapgen_mushroom_ms = None
+
 class SectorNoise2D(object):
     def __init__(self, seed, step = MAP_GEN_SECTOR_SIZE, step_offset = 0, scale = 1, offset = 0):
         self.noise = noise.SimplexNoise(seed = seed)
@@ -157,6 +171,7 @@ class SectorNoise3D(object):
         coords = numpy.mod(Z / self.step, 64.0).astype(numpy.float32)  # keep coordinates small for noise
         N = self.noise.noise(coords) * self.scale + self.offset
         return N.reshape((MAP_GEN_SECTOR_SIZE, SECTOR_HEIGHT, MAP_GEN_SECTOR_SIZE))
+
 
 def initialize_map_generator(seed = None):
     global noise1, noise2, noise3, noise4
@@ -1772,8 +1787,10 @@ class BiomeGenerator:
 
     def _clear_area(self, blocks, elevation, x, z, width, depth, target_height):
         """Flatten terrain under a footprint. If blocks is provided, also set ground/grass."""
-        x0, x1 = x, x + width
-        z0, z1 = z, z + depth
+        x0 = max(0, x)
+        z0 = max(0, z)
+        x1 = min(MAP_GEN_SECTOR_SIZE, x + width)
+        z1 = min(MAP_GEN_SECTOR_SIZE, z + depth)
         for xi in range(x0, x1):
             for zi in range(z0, z1):
                 h = int(target_height)
@@ -1971,10 +1988,18 @@ class BiomeGenerator:
             ys = [y1] * len(zs)
             lay_line(xs, zs, ys)
 
-    def _carve_caves(self, position, blocks, elevation, cliff_mask):
+    def _carve_caves(self, position, blocks, elevation, cliff_mask, water_mask, decor_noise, decor_detail):
         """Carve caves whose roofs sit between bedrock+20 and the terrain surface."""
         if not getattr(config, "MAPGEN_CAVES_ENABLED", True):
             return
+        perf = _MapGenPerfTimer(getattr(config, "LOG_MAPGEN_CAVE_TIMINGS", False))
+        px = int(position[0])
+        pz = int(position[2] if len(position) > 2 else (position[1] if len(position) > 1 else 0))
+        mix = numpy.uint64(0x9E3779B97F4A7C15)
+        mix ^= numpy.uint64(numpy.int64(self.seed))
+        mix ^= numpy.uint64(numpy.int64(px * 928371))
+        mix ^= numpy.uint64(numpy.int64(pz * 97241))
+        rng = numpy.random.default_rng(int(mix))
         region_base = self.cave_region_noise(position)
         region_detail = self.cave_region_detail(position)
         region01 = numpy.clip(0.5 + 0.5 * region_base + 0.25 * region_detail, 0.0, 1.0)
@@ -1989,6 +2014,7 @@ class BiomeGenerator:
         breach_spacing = max(8, breach_spacing)
         breach_hash = (wxg.astype(numpy.int64) * 73856093 + wzg.astype(numpy.int64) * 19349663 + int(self.seed)) % breach_spacing
         breach_mask = region_mask & (breach_hash == 0)
+        perf.mark("region")
 
         # Height selection: absolute roof height drawn from noise; discard columns where the target roof would poke above ground.
         height_pref = self.cave_height_noise(position)             # (X,Z)
@@ -2009,6 +2035,7 @@ class BiomeGenerator:
 
         roof_offset = 18.0 * height01  # ~6..16 blocks below surface
         roof = numpy.clip(ground_cap - roof_offset, min_roof, max_roof)
+        perf.mark("height")
 
 
         density2d = 0.5 + 0.5 * self.cave_density_noise(position)  # 0..1 (X,Z)
@@ -2024,6 +2051,7 @@ class BiomeGenerator:
         ) / 5.0
         level_noise = 0.5 + 0.5 * self.cave_level_noise(position)
         depth_noise = 0.5 + 0.5 * self.cave_depth_noise(position)
+        perf.mark("density")
         upper_sep = 5.0 + 6.0 * level_noise
         deep_sep = 10.0 + 12.0 * depth_noise
         roof_mid = roof
@@ -2067,6 +2095,7 @@ class BiomeGenerator:
             | (vertical_deep & density_deep[None, :, :])
         )
         carve &= below_surface & column_gate & area_mask
+        perf.mark("mask")
 
         # Occasional surface outlets only when the roof is comfortably below the surface.
         outlet_band = (y_grid >= (elev_grid - self.cave_surface_outlet_depth)) & (y_grid <= (elev_grid - 1.0))
@@ -2087,6 +2116,7 @@ class BiomeGenerator:
             neighbor[:, :, :-1] |= carve[:, :, 1:]
             spread = neighbor & vertical_any & below_surface & column_gate & area_mask
             carve |= spread
+        perf.mark("dilate")
 
         # Thin connectors between levels in cave regions.
         connector_spacing = int(getattr(config, "CAVE_CONNECTOR_SPACING", 16))
@@ -2097,6 +2127,7 @@ class BiomeGenerator:
         conn_upper = connector3d & (y_grid >= roof_mid[None, :, :]) & (y_grid <= floor_upper[None, :, :])
         conn_deep = connector3d & (y_grid >= roof_deep[None, :, :]) & (y_grid <= floor_mid[None, :, :])
         carve |= conn_upper | conn_deep
+        perf.mark("connectors")
 
         # print("carve shape", carve.shape)  # expect (H, X, Z)
         # print("carve voxels", int(carve.sum()))
@@ -2121,6 +2152,53 @@ class BiomeGenerator:
             road_protect = (blocks[y_slice] == COBBLE) | (blocks[y_slice] == PLANK) | (blocks[y_slice] == JACK)
             carve = carve & (~road_protect)
             blocks[y_slice][carve] = 0
+        perf.mark("apply")
+
+        carve_any = carve.any(axis=0)
+        stone_like = (
+            (blocks == STONE)
+            | (blocks == COBBLE)
+            | (blocks == COAL_ORE)
+            | (blocks == IRON_ORE)
+            | (blocks == GOLD_ORE)
+            | (blocks == DIAMOND_ORE)
+            | (blocks == REDSTONE_ORE)
+            | (blocks == EMERALD_ORE)
+        )
+        floor_y = numpy.clip(floor_mid.astype(numpy.int16), 1, SECTOR_HEIGHT - 2)
+        idx = numpy.indices(floor_y.shape)
+        x_idx = idx[0].ravel()
+        z_idx = idx[1].ravel()
+        y_idx = floor_y.ravel()
+        water_cols = water_mask.ravel()
+        under_surface = y_idx < (elevation.ravel() - 1)
+        floor_stone = stone_like[y_idx - 1, x_idx, z_idx]
+        air_cell = blocks[y_idx, x_idx, z_idx] == 0
+        base_chance = 0.002
+        density_boost = numpy.maximum(0.0, decor_detail).ravel() * 0.01
+        stripe_gate = (0.6 + 0.4 * (decor_noise.ravel() > 0.15))
+        chance = (base_chance + density_boost) * stripe_gate
+        roll = rng.random(chance.shape)
+        place = (
+            carve_any.ravel()
+            & (~water_cols)
+            & under_surface
+            & floor_stone
+            & air_cell
+            & (roll < chance)
+        )
+        if place.any():
+            blocks[y_idx[place], x_idx[place], z_idx[place]] = MUSHROOM
+        perf.mark("mushrooms")
+        result = perf.finish()
+        if result is not None:
+            total, marks = result
+            _log_cave_timings(position, total, marks)
+            global _last_mapgen_mushroom_ms
+            for name, ms in marks:
+                if name == "mushrooms":
+                    _last_mapgen_mushroom_ms = ms
+                    break
 
     def _place_ores(self, position, blocks, elevation, cliff_mask):
         """Sprinkle ore clumps in stone within cliffy areas using band-pass 3D noise."""
@@ -2170,75 +2248,6 @@ class BiomeGenerator:
                 if not stone.any():
                     continue
                 blocks[vy[stone], vx[stone], vz[stone]] = setting['id']
-
-    def _place_cave_mushrooms(self, position, blocks, ground_h, water_mask, decor_noise, decor_detail):
-        """Sprinkle glowing mushrooms on dark cave floors at low density."""
-        if self.fast:
-            return
-        if not getattr(config, "MAPGEN_CAVES_ENABLED", True):
-            return
-        sx = MAP_GEN_SECTOR_SIZE
-        sz = MAP_GEN_SECTOR_SIZE
-        # Ensure deterministic, non-negative seed for RNG
-        px = int(position[0])
-        pz = int(position[2] if len(position) > 2 else (position[1] if len(position) > 1 else 0))
-        mix = numpy.uint64(0x9E3779B97F4A7C15)
-        mix ^= numpy.uint64(numpy.int64(self.seed))
-        mix ^= numpy.uint64(numpy.int64(px * 928371))
-        mix ^= numpy.uint64(numpy.int64(pz * 97241))
-        rng_seed = int(mix)
-        rng = numpy.random.default_rng(rng_seed)
-        stone_like = {STONE, COBBLE, COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE, REDSTONE_ORE, EMERALD_ORE}
-        for x in range(1, sx - 1):
-            for z in range(1, sz - 1):
-                if water_mask[x, z]:
-                    continue
-                max_floor = min(ground_h[x, z] - 2, SECTOR_HEIGHT - 2)
-                if max_floor <= 2:
-                    continue
-                column = blocks[:, x, z]
-                skylight = True
-                sky_reaches = numpy.zeros(SECTOR_HEIGHT, dtype=bool)
-                for y in range(SECTOR_HEIGHT - 1, -1, -1):
-                    if column[y] != 0:
-                        skylight = False
-                    else:
-                        sky_reaches[y] = skylight
-                # scan upward from the floor for a single candidate per column
-                for y in range(2, max_floor):
-                    if column[y] != 0:
-                        continue
-                    if sky_reaches[y]:
-                        continue  # skip skylit pockets
-                    floor_id = column[y - 1]
-                    if floor_id not in stone_like:
-                        continue
-                    # need a ceiling nearby to feel cave-like darkness
-                    ceiling_band = column[y + 1:min(SECTOR_HEIGHT, y + 20)]
-                    if not (ceiling_band != 0).any():
-                        continue
-                    # Require headroom and at least one exposed horizontal face so it isn't buried in a wall.
-                    if y + 1 >= SECTOR_HEIGHT or column[y + 1] != 0:
-                        continue
-                    neighbors = [
-                        blocks[y, x + 1, z],
-                        blocks[y, x - 1, z],
-                        blocks[y, x, z + 1],
-                        blocks[y, x, z - 1],
-                    ]
-                    if all(n != 0 for n in neighbors):
-                        continue
-                    base_chance = 0.002
-                    density_boost = max(0.0, decor_detail[x, z]) * 0.01
-                    stripe_gate = 0.6 + 0.4 * (decor_noise[x, z] > 0.15)
-                    chance = (base_chance + density_boost) * stripe_gate
-                    if rng.random() < chance:
-                        if (blocks[y, x-1:x+2, z-1:z+2] == MUSHROOM).any():
-                            continue
-                        column[y] = MUSHROOM
-                        world_pos = (int(position[0] + x), int(y), int(position[2] + z))
-                        local_pos = (int(x), int(y), int(z))
-                        break
 
     def generate(self, position):
         perf = _MapGenPerfTimer(getattr(config, "LOG_MAPGEN_TIMINGS", True))
@@ -2391,9 +2400,20 @@ class BiomeGenerator:
 
         # Ores and caves after terrain fill, before roads/trails.
         if not self.fast:
+            global _last_mapgen_ore_ms
+            ore_perf = _MapGenPerfTimer(getattr(config, "LOG_MAPGEN_CAVE_TIMINGS", False))
             self._place_ores(position, blocks, elevation, cliff_mask)
-            self._carve_caves(position, blocks, elevation, cliff_mask)
-            self._place_cave_mushrooms(position, blocks, ground_h, water_mask, decor_noise, decor_detail)
+            result = ore_perf.finish()
+            if result is not None:
+                total, _ = result
+                _last_mapgen_ore_ms = total
+
+            cave_perf = _MapGenPerfTimer(getattr(config, "LOG_MAPGEN_CAVE_TIMINGS", False))
+            self._carve_caves(position, blocks, elevation, cliff_mask, water_mask, decor_noise, decor_detail)
+            result = cave_perf.finish()
+            if result is not None:
+                total, marks = result
+                _log_cave_timings(position, total, marks)
 
         perf.mark("caves-ores")
 
@@ -2597,183 +2617,3 @@ def generate_biome_sector(position, sector, world):
     if biome_generator is None:
         initialize_biome_map_generator()
     return biome_generator.generate(position)
-
-if __name__ == "__main__":
-    import numpy as np
-
-    # --- Instantiate generator in the same way your module intends ---
-    gen = initialize_biome_map_generator(seed=12345)
-    if gen is None:
-        # If initializer stores a global instead of returning
-        try:
-            gen = biome_generator
-        except NameError as e:
-            raise RuntimeError("initialize_biome_map_generator() returned None and biome_generator not found") from e
-
-    # --- Helpers ---
-    def compute_mask_for_sector(ox: int, oz: int):
-        """
-        Builds a simple elevation plane and runs _compute_trail_plan_vec, returning the mask.
-        Uses a 3-length 'position' tuple so _sector_origin reads x/z correctly.
-        """
-        sx = MAP_GEN_SECTOR_SIZE
-        sz = MAP_GEN_SECTOR_SIZE
-
-        # Flat-ish elevation well above WATER_LEVEL, within SECTOR_HEIGHT range
-        # (the relaxer/clipping won't matter for the mask checks, but avoid water logic surprises)
-        elev = np.full((sx, sz), max(WATER_LEVEL + 5, 10), dtype=np.int16)
-
-        # IMPORTANT: position must be length>=3 so _sector_origin uses [0] and [2]
-        pos = (ox, 0, oz)
-
-        plan = gen._compute_trail_plan_vec(pos, elev)
-        if plan is None:
-            return np.zeros((sx, sz), dtype=bool)
-        return plan["mask"].astype(bool)
-
-    def seam_indices_core_x():
-        """
-        For a sector with core axes xs = [ox .. ox+15]:
-          core world-x = [ox .. ox+15] => local ix = [0 .. 15]
-        The seam between sector O (ox) and X (ox+16) is between world-x=ox+15 and world-x=ox+16.
-
-        So compare:
-          O core right edge: world-x = ox+15 => ix = 15
-          X core left edge:  world-x = ox+16 => ix = 0
-        """
-        ix_O = MAP_GEN_SECTOR_SIZE - 1
-        ix_X = 0
-        inward_O = MAP_GEN_SECTOR_SIZE - 2   # one cell inward from O seam edge
-        inward_X = 1    # one cell inward from X seam edge
-        return ix_O, ix_X, inward_O, inward_X
-
-    def seam_indices_core_z():
-        """
-        For z axis with core zs = [oz .. oz+15]:
-          core world-z = [oz .. oz+15] => local iz = [0 .. 15]
-        Seam between sector O (oz) and Z (oz+16) is between world-z=oz+15 and world-z=oz+16.
-
-        Compare:
-          O core top edge:  world-z = oz+15 => iz = 15
-          Z core bottom:    world-z = oz+16 => iz = 0
-        """
-        iz_O = MAP_GEN_SECTOR_SIZE - 1
-        iz_Z = 0
-        inward_O = MAP_GEN_SECTOR_SIZE - 2
-        inward_Z = 1
-        return iz_O, iz_Z, inward_O, inward_Z
-
-    def classify_dir(mask: np.ndarray, x: int, z: int):
-        """
-        Classify local direction at a mask cell by checking neighbors.
-        Returns one of: 'x', 'z', 'both', 'iso', or 'off' (if mask is False).
-        """
-        if not mask[x, z]:
-            return "off"
-        sx, sz = mask.shape
-
-        x_conn = False
-        z_conn = False
-
-        if x > 0 and mask[x - 1, z]:
-            x_conn = True
-        if x + 1 < sx and mask[x + 1, z]:
-            x_conn = True
-
-        if z > 0 and mask[x, z - 1]:
-            z_conn = True
-        if z + 1 < sz and mask[x, z + 1]:
-            z_conn = True
-
-        if x_conn and z_conn:
-            return "both"
-        if x_conn:
-            return "x"
-        if z_conn:
-            return "z"
-        return "iso"
-
-    def compare_seam_core_x(maskO: np.ndarray, maskX: np.ndarray, label="O vs +X"):
-        ixO, ixX, inO, inX = seam_indices_core_x()
-        sz = maskO.shape[1]
-
-        # (1) Direct seam continuation: do we have trail on both sides at same z?
-        seamO = maskO[ixO, :]
-        seamX = maskX[ixX, :]
-        mism = seamO != seamX
-        n_mism = int(np.count_nonzero(mism))
-        total = seamO.size
-
-        # (2) Direction consistency: compare local direction one-step inward on each side
-        # Only evaluate where BOTH sides have seam trail (continuation exists).
-        dir_mism = 0
-        dir_total = 0
-        examples = []
-
-        for z in range(sz):
-            if seamO[z] and seamX[z]:
-                dir_total += 1
-                dO = classify_dir(maskO, inO, z)  # inward cell in O
-                dX = classify_dir(maskX, inX, z)  # inward cell in X
-                # For a cross-seam segment, you'd expect both sides to be 'x' or 'both'
-                # (i.e., have x-connectivity). If one side is 'z' only, it is "misoriented".
-                okO = (dO in ("x", "both"))
-                okX = (dX in ("x", "both"))
-                if (okO != okX) or (not okO) or (not okX):
-                    dir_mism += 1
-                    if len(examples) < 5:
-                        examples.append((z, dO, dX))
-
-        print(f"\n[{label}] core seam x-check")
-        print(f"  seam mask mismatches: {n_mism} / {total}")
-        print(f"  seam direction issues (inward cells): {dir_mism} / {max(dir_total,1)}")
-        if examples:
-            print("  examples (z, dir_in_O, dir_in_X):")
-            for ex in examples:
-                print("   ", ex)
-
-    def compare_seam_core_z(maskO: np.ndarray, maskZ: np.ndarray, label="O vs +Z"):
-        izO, izZ, inO, inZ = seam_indices_core_z()
-        sx = maskO.shape[0]
-
-        seamO = maskO[:, izO]
-        seamZ = maskZ[:, izZ]
-        mism = seamO != seamZ
-        n_mism = int(np.count_nonzero(mism))
-        total = seamO.size
-
-        dir_mism = 0
-        dir_total = 0
-        examples = []
-
-        for x in range(sx):
-            if seamO[x] and seamZ[x]:
-                dir_total += 1
-                dO = classify_dir(maskO, x, inO)  # inward cell in O
-                dZ = classify_dir(maskZ, x, inZ)  # inward cell in Z
-                # For a cross-seam segment, you'd expect both sides to be 'z' or 'both'
-                okO = (dO in ("z", "both"))
-                okZ = (dZ in ("z", "both"))
-                if (okO != okZ) or (not okO) or (not okZ):
-                    dir_mism += 1
-                    if len(examples) < 5:
-                        examples.append((x, dO, dZ))
-
-        print(f"\n[{label}] core seam z-check")
-        print(f"  seam mask mismatches: {n_mism} / {total}")
-        print(f"  seam direction issues (inward cells): {dir_mism} / {max(dir_total,1)}")
-        if examples:
-            print("  examples (x, dir_in_O, dir_in_Z):")
-            for ex in examples:
-                print("   ", ex)
-
-    # --- Run the 3-sector test ---
-    print("Computing masks for 3 sectors: O=(0,0), X=(+16,0), Z=(0,+16) ...")
-    maskO = compute_mask_for_sector(0, 0)
-    maskX = compute_mask_for_sector(MAP_GEN_SECTOR_SIZE, 0)
-    maskZ = compute_mask_for_sector(0, MAP_GEN_SECTOR_SIZE)
-
-    compare_seam_core_x(maskO, maskX, label="Origin vs +X sector")
-    compare_seam_core_z(maskO, maskZ, label="Origin vs +Z sector")
-
-    print("\nDone.")

@@ -80,6 +80,8 @@ LOG_COLOR = True
 LOG_MAIN_LOOP = True
 # Log detailed map generation timings.
 LOG_MAPGEN_TIMINGS = True
+# Log per-stage cave carving timings.
+LOG_MAPGEN_CAVE_TIMINGS = True
 
 # Enable per-frame HUD stats collection (can be disabled to reduce overhead).
 HUD_STATS_ENABLED = False
@@ -177,7 +179,7 @@ MAPGEN_ORES_ENABLED = True
 MAPGEN_ORE_SPACING = 10
 # Cave tuning: lower max roof height and lower density for speed.
 CAVE_MAX_ROOF = 50
-CAVE_REGION_THRESHOLD = 0.68
+CAVE_REGION_THRESHOLD = 0.30
 CAVE_DILATE_ITERS = 2
 CAVE_CONNECTOR_SPACING = 20
 CAVE_BREACH_SPACING = 48
