@@ -5,7 +5,7 @@ import numpy
 
 #local libs
 from config import SECTOR_SIZE, SECTOR_HEIGHT, LOADED_SECTORS
-from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH
+from blocks import BLOCK_VERTICES, BLOCK_COLORS, BLOCK_NORMALS, BLOCK_TEXTURES, BLOCK_ID, BLOCK_SOLID, TEXTURE_PATH, STAIR_ORIENTED_IDS
 import noise
 import config
 import logutil
@@ -19,7 +19,7 @@ LEAVES = BLOCK_ID['Leaves']
 PLANK = BLOCK_ID['Plank']
 BRICK = BLOCK_ID['Brick']
 COBBLE = BLOCK_ID['Cobblestone']
-BETTERSTONE = BLOCK_ID['BetterStone']
+BETTERSTONE = BLOCK_ID['Betterstone']
 IRON_ORE = BLOCK_ID['Iron Ore']
 GOLD_ORE = BLOCK_ID['Gold Ore']
 COAL_ORE = BLOCK_ID['Coal Ore']
@@ -38,6 +38,10 @@ LADDER_SOUTH = BLOCK_ID['Ladder South']
 LADDER_WEST = BLOCK_ID['Ladder West']
 LADDER_NORTH = BLOCK_ID['Ladder North']
 LADDER_EAST = BLOCK_ID['Ladder East']
+
+DIRT_STAIR = BLOCK_ID['Dirt Stair']
+COBBLE_STAIR = BLOCK_ID['Cobble Stair']
+PLANK_STAIR = BLOCK_ID['Plank Stair']
 
 WATER_LEVEL = 70
 GLOBAL_WATER_LEVEL = WATER_LEVEL
@@ -828,6 +832,73 @@ class BiomeGenerator:
     # 4) Fully vectorized road stamping: decks, headroom carve, capped pillars
     # ---------------------------------------------------------------------
 
+    def _apply_path_stairs_vec(self, blocks, mask, y, base_id_map):
+        if mask is None or not np.any(mask):
+            return
+        y_i32 = y.astype(np.int32)
+        def _shift_bool(m, dx, dz):
+            out = np.zeros_like(m, dtype=bool)
+            sx_, sz_ = m.shape
+            xs0 = slice(max(0, dx),  min(sx_, sx_ + dx))
+            zs0 = slice(max(0, dz),  min(sz_, sz_ + dz))
+            xs1 = slice(max(0, -dx), min(sx_, sx_ - dx))
+            zs1 = slice(max(0, -dz), min(sz_, sz_ - dz))
+            out[xs1, zs1] = m[xs0, zs0]
+            return out
+        def _shift_i32(a, dx, dz, fill):
+            out = np.full(a.shape, fill, dtype=np.int32)
+            sx_, sz_ = a.shape
+            xs0 = slice(max(0, dx),  min(sx_, sx_ + dx))
+            zs0 = slice(max(0, dz),  min(sz_, sz_ + dz))
+            xs1 = slice(max(0, -dx), min(sx_, sx_ - dx))
+            zs1 = slice(max(0, -dz), min(sz_, sz_ - dz))
+            out[xs1, zs1] = a[xs0, zs0].astype(np.int32)
+            return out
+
+        yE = _shift_i32(y_i32, 1, 0, fill=-32768)
+        yW = _shift_i32(y_i32, -1, 0, fill=-32768)
+        yS = _shift_i32(y_i32, 0, 1, fill=-32768)
+        yN = _shift_i32(y_i32, 0, -1, fill=-32768)
+
+        mE = _shift_bool(mask, 1, 0)
+        mW = _shift_bool(mask, -1, 0)
+        mS = _shift_bool(mask, 0, 1)
+        mN = _shift_bool(mask, 0, -1)
+
+        higher_e = mask & mE & ((y_i32 - yE) == 1)
+        higher_w = mask & mW & ((y_i32 - yW) == 1)
+        higher_s = mask & mS & ((y_i32 - yS) == 1)
+        higher_n = mask & mN & ((y_i32 - yN) == 1)
+
+        low_count = higher_e.astype(np.int8) + higher_w.astype(np.int8) + higher_s.astype(np.int8) + higher_n.astype(np.int8)
+        valid = low_count == 1
+
+        orient = np.full(mask.shape, -1, dtype=np.int8)
+        orient = np.where(valid & higher_s, 0, orient)  # south low neighbor
+        orient = np.where(valid & higher_w, 1, orient)  # west low neighbor
+        orient = np.where(valid & higher_n, 2, orient)  # north low neighbor
+        orient = np.where(valid & higher_e, 3, orient)  # east low neighbor
+        orient = np.where(orient >= 0, (orient + 2) % 4, orient)
+
+        xs, zs = np.nonzero(orient >= 0)
+        if xs.size == 0:
+            return
+        base_ids = base_id_map[xs, zs]
+        for base_id in np.unique(base_ids):
+            if base_id == 0:
+                continue
+            oriented = STAIR_ORIENTED_IDS.get(int(base_id))
+            if not oriented:
+                continue
+            oriented_ids = np.array(oriented, dtype=np.int32)
+            sel = base_ids == base_id
+            if not np.any(sel):
+                continue
+            idx = np.nonzero(sel)[0]
+            o = orient[xs[idx], zs[idx]].astype(np.int32)
+            stair_ids = oriented_ids[o]
+            blocks[y_i32[xs[idx], zs[idx]], xs[idx], zs[idx]] = stair_ids
+
     def _apply_rural_roads_vec(self, blocks, plan):
         if plan is None:
             return
@@ -911,6 +982,12 @@ class BiomeGenerator:
                 bx, bz = np.nonzero(bridge_mask)
                 by = y[bridge_mask]
                 blocks[by, bx, bz] = PLANK
+
+        base_id_map = np.zeros(mask.shape, dtype=np.int32)
+        if mask.any():
+            deck = blocks[ys, xs, zs]
+            base_id_map[mask] = np.where(deck == PLANK, PLANK_STAIR, np.where(deck == COBBLE, COBBLE_STAIR, 0))
+            self._apply_path_stairs_vec(blocks, mask, y, base_id_map)
 
         # --- Capped pillar supports down through air/water (bridging shallow gaps)
         # This will not overwrite solid terrain; it only fills air/water in [y-pillar_cap, y).
@@ -1185,6 +1262,10 @@ class BiomeGenerator:
             if ladder_cells.any():
                 ladder_mask = ladder_cells[None, :, :] & (yy >= start) & (yy <= end)
                 blocks[ladder_mask & air_only] = LADDER_NORTH
+
+        base_id_map = np.zeros(trail_mask.shape, dtype=np.int32)
+        base_id_map[trail_mask] = DIRT_STAIR
+        self._apply_path_stairs_vec(blocks, trail_mask, y, base_id_map)
 
     def _compute_river_plan(self, position, elevation):
         """

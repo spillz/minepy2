@@ -76,6 +76,10 @@ from blocks import (
     BLOCK_COLLISION_MIN,
     BLOCK_COLLISION_MAX,
     BLOCK_RENDER_OFFSET,
+    BLOCK_FACE_COUNT,
+    BLOCK_FACE_DIR,
+    STAIR_COLLISION_BOXES,
+    STAIR_UPSIDE_IDS,
 )
 import mapgen
 import numpy
@@ -580,6 +584,7 @@ class ModelProxy(object):
         self.stats_vlists_solid = 0
         self.stats_vlists_water = 0
         self.stats_draw_calls = 0
+        self.mesh_backlog_last = 0
         self.stat_load_count_total = 0
         self.stat_load_ms_total = 0.0
         self.stat_light_count_total = 0
@@ -958,6 +963,7 @@ class ModelProxy(object):
                 continue
             if sector.shown and self._needs_light(sector):
                 count += 1
+        self.mesh_backlog_last = count
         return count
 
     def _has_mesh_backlog(self):
@@ -993,8 +999,20 @@ class ModelProxy(object):
             return
         if self.player_sector is None:
             return
-        candidates = []
-        for sector in self.sectors.values():
+        self._refresh_mesh_candidates(
+            self.player_sector,
+            self.player_pos,
+            self.player_look,
+            frustum_circle,
+        )
+        candidates = getattr(self, "_mesh_candidates", None) or []
+        if not candidates:
+            return
+        submit_budget = max(0, self.mesh_active_cap - self.mesh_active_jobs)
+        submitted = 0
+        for _, sector in candidates:
+            if submitted >= submit_budget:
+                break
             if sector.mesh_job_pending:
                 continue
             if not self._neighbors_ready(sector, require_diagonals=sector.light_dirty_internal):
@@ -1008,24 +1026,6 @@ class ModelProxy(object):
                 if not self._needs_light(sector):
                     continue
                 reason = "light"
-            prio = self._sector_priority(
-                self.player_sector,
-                sector.position,
-                self.player_pos,
-                self.player_look,
-                frustum_circle,
-            )
-            candidates.append((prio, sector, reason))
-
-        if not candidates:
-            return
-
-        candidates.sort(key=lambda item: item[0])
-        submit_budget = max(0, self.mesh_active_cap - self.mesh_active_jobs)
-        submitted = 0
-        for _, sector, reason in candidates:
-            if submitted >= submit_budget:
-                break
             is_priority = self._in_priority_neighborhood(sector.position)
             self._mesh_log(f"queue sector={sector.position} reason={reason}")
             before = self.mesh_active_jobs
@@ -1483,20 +1483,32 @@ class ModelProxy(object):
         count = 0
         sector_grid = numpy.indices((SECTOR_SIZE, SECTOR_HEIGHT, SECTOR_SIZE)).transpose(1,2,3,0).reshape((SECTOR_SIZE*SECTOR_HEIGHT*SECTOR_SIZE,3))
         if block_mask.any():
+            max_faces = BLOCK_VERTICES.shape[1]
             pos = sector_grid[block_mask] + numpy.array(position)
             face_mask = face_mask[block_mask]
             torch_flat = torch_flat_all[block_mask]
             sky_flat = sky_flat_all[block_mask]
             b = blocks[1:-1,:,1:-1].reshape(sx*sy*sz)[block_mask]
-            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
+            face_dirs = BLOCK_FACE_DIR[b]
+            face_counts = BLOCK_FACE_COUNT[b]
+            face_idx = numpy.arange(max_faces, dtype=face_counts.dtype)[None, :]
+            face_exists = face_idx < face_counts[:, None]
+            face_mask = numpy.take_along_axis(face_mask, face_dirs, axis=1) & face_exists
+            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),max_faces,4,3)
                      + pos[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
-            tex = BLOCK_TEXTURES_FLIPPED[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
-            normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
+            tex_base = BLOCK_TEXTURES_FLIPPED[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
+            tex = numpy.take_along_axis(tex_base, face_dirs[:, :, None, None], axis=1)
+            normals_base = BLOCK_NORMALS[face_dirs].astype(numpy.float32)
+            normals = numpy.broadcast_to(normals_base[:, :, None, :], (len(b), max_faces, 4, 3))
             colors_base = BLOCK_COLORS[b][:,:6].reshape(len(b),6,4,3).astype(numpy.float32)
-            torch_light = torch_flat[:, :, None, None]  # (N,6,1,1)
-            sky_light = sky_flat[:, :, None, None]
+            colors_base = numpy.take_along_axis(colors_base, face_dirs[:, :, None, None], axis=1)
+            torch_faces = numpy.take_along_axis(torch_flat, face_dirs, axis=1)
+            sky_faces = numpy.take_along_axis(sky_flat, face_dirs, axis=1)
+            torch_light = torch_faces[:, :, None, None]  # (N,max_faces,1,1)
+            sky_light = sky_faces[:, :, None, None]
             if ao is not None:
-                ao_flat = numpy.where(face_mask[..., None], ao, 1.0)
+                ao_faces = numpy.take_along_axis(ao, face_dirs[:, :, None], axis=1)
+                ao_flat = numpy.where(face_mask[..., None], ao_faces, 1.0)
                 torch_light = torch_light * ao_flat[..., None]
                 sky_light = sky_light * ao_flat[..., None]
             # Glow acts as a minimum brightness floor after AO.
@@ -1543,7 +1555,7 @@ class ModelProxy(object):
             torch_w = torch_flat_all[water_mask]
             sky_w = sky_flat_all[water_mask]
             b = numpy.full(len(pos_w), WATER, dtype=numpy.int32)
-            verts = (0.5*BLOCK_VERTICES[b].reshape(len(b),6,4,3)
+            verts = (0.5*BLOCK_VERTICES[b][:,:6].reshape(len(b),6,4,3)
                      + pos_w[:,None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
             tex = BLOCK_TEXTURES_FLIPPED[b][:,:6].reshape(len(b),6,4,2).astype(numpy.float32)
             normals = numpy.broadcast_to(BLOCK_NORMALS[None,:,None,:], (len(b),6,4,3)).astype(numpy.float32)
@@ -2713,6 +2725,20 @@ class ModelProxy(object):
             if missing_near:
                 break
 
+        if not missing_any and inflight == 0 and not self.loader_requests and processed_msgs == 0:
+            if _ipc_ok() and self.server and self.server.poll():
+                try:
+                    msg, data = self.server.recv()
+                    if msg == 'connected':
+                        self.player, self.players = data
+                    if msg == 'player_set_block':
+                        logutil.log("SERVER", f"player_set_block {data}")
+                        pos, block = data
+                        self.add_block(pos, block, False, priority=False)
+                except EOFError:
+                    logutil.log("SERVER", "server returned EOF", level="WARN")
+            return
+
         priority_work = self.pending_priority_jobs > 0 or bool(self._deferred_mesh_jobs)
         if not priority_work:
             for sector in self.sectors.values():
@@ -2733,20 +2759,6 @@ class ModelProxy(object):
                 x, _, z = sector.position
                 for dx, dz in NEIGHBOR_OFFSETS_8:
                     allowed_load.add((x + dx * SECTOR_SIZE, 0, z + dz * SECTOR_SIZE))
-
-        if not missing_any and inflight == 0 and not self.loader_requests and processed_msgs == 0:
-            if _ipc_ok() and self.server and self.server.poll():
-                try:
-                    msg, data = self.server.recv()
-                    if msg == 'connected':
-                        self.player, self.players = data
-                    if msg == 'player_set_block':
-                        logutil.log("SERVER", f"player_set_block {data}")
-                        pos, block = data
-                        self.add_block(pos, block, False, priority=False)
-                except EOFError:
-                    logutil.log("SERVER", "server returned EOF", level="WARN")
-            return
 
         requested = set()
         if self.active_loader_request[0] == 'sector_blocks':
@@ -2821,12 +2833,19 @@ class ModelProxy(object):
                 logutil.log("SERVER", "server returned EOF", level="WARN")
 
     def _build_block_vt(self, block_id, pos):
-        verts = (0.5*BLOCK_VERTICES[block_id][:6].reshape(6,4,3)
-                 + pos[None,None,:] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
-        tex = BLOCK_TEXTURES_FLIPPED[block_id][:6].reshape(6,4,2).astype(numpy.float32)
-        normals = numpy.broadcast_to(BLOCK_NORMALS[:,None,:], (6,4,3)).astype(numpy.float32)
-        colors_rgb = BLOCK_COLORS[block_id][:6].reshape(6,4,3).astype(numpy.float32)
-        emissive = numpy.full((6,4,1), BLOCK_GLOW[block_id]*255.0, dtype=numpy.float32)
+        face_count = int(BLOCK_FACE_COUNT[block_id])
+        if face_count <= 0:
+            return {'solid': None, 'water': None}
+        dirs = BLOCK_FACE_DIR[block_id][:face_count]
+        verts = (0.5 * BLOCK_VERTICES[block_id][:face_count].reshape(face_count, 4, 3)
+                 + pos[None, None, :] + BLOCK_RENDER_OFFSET).astype(numpy.float32)
+        tex_base = BLOCK_TEXTURES_FLIPPED[block_id][:6].reshape(6, 4, 2).astype(numpy.float32)
+        tex = numpy.take(tex_base, dirs, axis=0).astype(numpy.float32)
+        normals_base = BLOCK_NORMALS[dirs].astype(numpy.float32)
+        normals = numpy.broadcast_to(normals_base[:, None, :], (face_count, 4, 3))
+        colors_base = BLOCK_COLORS[block_id][:6].reshape(6, 4, 3).astype(numpy.float32)
+        colors_rgb = numpy.take(colors_base, dirs, axis=0)
+        emissive = numpy.full((face_count, 4, 1), BLOCK_GLOW[block_id]*255.0, dtype=numpy.float32)
         colors = numpy.concatenate([colors_rgb, emissive], axis=2)
         light = numpy.ones((6,4,2), dtype=numpy.float32)
         face_mask = numpy.ones((6,4), dtype=bool)
@@ -3094,6 +3113,21 @@ class ModelProxy(object):
                 hi = int(math.floor(max_v - eps))
             return range(lo, hi + 1)
 
+        def iter_block_boxes(block_id, bx, by, bz):
+            if block_id in STAIR_COLLISION_BOXES:
+                for min_v, max_v in STAIR_COLLISION_BOXES[block_id]:
+                    yield (
+                        bx + min_v[0], bx + max_v[0],
+                        by + min_v[1], by + max_v[1],
+                        bz + min_v[2], bz + max_v[2],
+                    )
+            else:
+                yield (
+                    bx + BLOCK_COLLISION_MIN[block_id][0], bx + BLOCK_COLLISION_MAX[block_id][0],
+                    by + BLOCK_COLLISION_MIN[block_id][1], by + BLOCK_COLLISION_MAX[block_id][1],
+                    bz + BLOCK_COLLISION_MIN[block_id][2], bz + BLOCK_COLLISION_MAX[block_id][2],
+                )
+
         def resolve_axis(axis, base_pos):
             nonlocal vertical_collision, horizontal_collision
             delta = p[axis] - prev[axis]
@@ -3115,50 +3149,68 @@ class ModelProxy(object):
                         block_id = self[normalize((bx, by, bz))]
                         if not block_id or not BLOCK_COLLIDES[block_id]:
                             continue
-                        block_min_x = bx + BLOCK_COLLISION_MIN[block_id][0]
-                        block_max_x = bx + BLOCK_COLLISION_MAX[block_id][0]
-                        block_min_y = by + BLOCK_COLLISION_MIN[block_id][1]
-                        block_max_y = by + BLOCK_COLLISION_MAX[block_id][1]
-                        block_min_z = bz + BLOCK_COLLISION_MIN[block_id][2]
-                        block_max_z = bz + BLOCK_COLLISION_MAX[block_id][2]
-
-                        if axis == 0:
-                            if max_y <= block_min_y or min_y >= block_max_y:
-                                continue
-                            if max_z <= block_min_z or min_z >= block_max_z:
-                                continue
-                            if max_x <= block_min_x or min_x >= block_max_x:
-                                continue
-                            if delta > 0:
-                                pos[0] = block_min_x - width / 2
+                        for (block_min_x, block_max_x,
+                             block_min_y, block_max_y,
+                             block_min_z, block_max_z) in iter_block_boxes(block_id, bx, by, bz):
+                            if axis in (0, 2) and block_id in STAIR_COLLISION_BOXES and block_id not in STAIR_UPSIDE_IDS:
+                                foot_y = prev_min_y - by
+                                if -0.05 <= foot_y <= 1.0:
+                                    if not (max_x <= block_min_x or min_x >= block_max_x or max_z <= block_min_z or min_z >= block_max_z):
+                                        low_half = block_max_y <= by + 0.5 + 1e-6
+                                        high_half = block_min_y >= by + 0.5 - 1e-6
+                                        if low_half:
+                                            target_y = by + 0.5
+                                            if velocity is not None:
+                                                if pos[1] >= target_y - 1e-4:
+                                                    velocity[1] = min(velocity[1], 0.0)
+                                                else:
+                                                    velocity[1] = max(velocity[1], 3.0)
+                                            continue
+                                        if high_half and foot_y >= 0.5 - 1e-4:
+                                            target_y = by + 1.0
+                                            if velocity is not None:
+                                                if pos[1] >= target_y - 1e-4:
+                                                    velocity[1] = min(velocity[1], 0.0)
+                                                else:
+                                                    velocity[1] = max(velocity[1], 3.0)
+                                            continue
+                            if axis == 0:
+                                if max_y <= block_min_y or min_y >= block_max_y:
+                                    continue
+                                if max_z <= block_min_z or min_z >= block_max_z:
+                                    continue
+                                if max_x <= block_min_x or min_x >= block_max_x:
+                                    continue
+                                if delta > 0:
+                                    pos[0] = block_min_x - width / 2
+                                else:
+                                    pos[0] = block_max_x + width / 2
+                                horizontal_collision = True
+                                min_x, max_x, min_y, max_y, min_z, max_z = axis_bounds(pos)
+                            elif axis == 2:
+                                if max_y <= block_min_y or min_y >= block_max_y:
+                                    continue
+                                if max_x <= block_min_x or min_x >= block_max_x:
+                                    continue
+                                if max_z <= block_min_z or min_z >= block_max_z:
+                                    continue
+                                if delta > 0:
+                                    pos[2] = block_min_z - depth / 2
+                                else:
+                                    pos[2] = block_max_z + depth / 2
+                                horizontal_collision = True
+                                min_x, max_x, min_y, max_y, min_z, max_z = axis_bounds(pos)
                             else:
-                                pos[0] = block_max_x + width / 2
-                            horizontal_collision = True
-                            min_x, max_x, min_y, max_y, min_z, max_z = axis_bounds(pos)
-                        elif axis == 2:
-                            if max_y <= block_min_y or min_y >= block_max_y:
-                                continue
-                            if max_x <= block_min_x or min_x >= block_max_x:
-                                continue
-                            if max_z <= block_min_z or min_z >= block_max_z:
-                                continue
-                            if delta > 0:
-                                pos[2] = block_min_z - depth / 2
-                            else:
-                                pos[2] = block_max_z + depth / 2
-                            horizontal_collision = True
-                            min_x, max_x, min_y, max_y, min_z, max_z = axis_bounds(pos)
-                        else:
-                            if max_x <= block_min_x or min_x >= block_max_x:
-                                continue
-                            if max_z <= block_min_z or min_z >= block_max_z:
-                                continue
-                            if delta < 0 and prev_min_y >= block_max_y and min_y < block_max_y:
-                                pos[1] = block_max_y
-                                vertical_collision = True
-                            elif delta > 0 and prev_max_y <= block_min_y and max_y > block_min_y:
-                                pos[1] = block_min_y - height
-                            min_x, max_x, min_y, max_y, min_z, max_z = axis_bounds(pos)
+                                if max_x <= block_min_x or min_x >= block_max_x:
+                                    continue
+                                if max_z <= block_min_z or min_z >= block_max_z:
+                                    continue
+                                if delta < 0 and prev_min_y >= block_max_y and min_y < block_max_y:
+                                    pos[1] = block_max_y
+                                    vertical_collision = True
+                                elif delta > 0 and prev_max_y <= block_min_y and max_y > block_min_y:
+                                    pos[1] = block_min_y - height
+                                min_x, max_x, min_y, max_y, min_z, max_z = axis_bounds(pos)
 
             p[axis] = pos[axis]
 
@@ -3181,20 +3233,20 @@ class ModelProxy(object):
                     block_id = self[normalize((bx, by, bz))]
                     if not block_id or not BLOCK_COLLIDES[block_id]:
                         continue
-                    block_max_y = by + BLOCK_COLLISION_MAX[block_id][1]
-                    block_min_x = bx + BLOCK_COLLISION_MIN[block_id][0]
-                    block_max_x = bx + BLOCK_COLLISION_MAX[block_id][0]
-                    block_min_z = bz + BLOCK_COLLISION_MIN[block_id][2]
-                    block_max_z = bz + BLOCK_COLLISION_MAX[block_id][2]
-                    overlap_x = min(max_x, block_max_x) - max(min_x, block_min_x)
-                    overlap_z = min(max_z, block_max_z) - max(min_z, block_min_z)
-                    if overlap_x <= snap_pad or overlap_z <= snap_pad:
-                        continue
-                    if min_y >= block_max_y - eps and min_y <= block_max_y + eps:
-                        if horizontal_collision and prev_min_y < block_max_y - eps:
+                    for (block_min_x, block_max_x,
+                         block_min_y, block_max_y,
+                         block_min_z, block_max_z) in iter_block_boxes(block_id, bx, by, bz):
+                        overlap_x = min(max_x, block_max_x) - max(min_x, block_min_x)
+                        overlap_z = min(max_z, block_max_z) - max(min_z, block_min_z)
+                        if overlap_x <= snap_pad or overlap_z <= snap_pad:
                             continue
-                        p[1] = block_max_y
-                        vertical_collision = True
+                        if min_y >= block_max_y - eps and min_y <= block_max_y + eps:
+                            if horizontal_collision and prev_min_y < block_max_y - eps:
+                                continue
+                            p[1] = block_max_y
+                            vertical_collision = True
+                            break
+                    if vertical_collision:
                         break
                 if vertical_collision:
                     break

@@ -27,6 +27,15 @@ from util import (
     ladder_west,
     ladder_north,
     ladder_east,
+    STAIR_FACE_DIRS,
+    stair_south,
+    stair_west,
+    stair_north,
+    stair_east,
+    stair_south_ud,
+    stair_west_ud,
+    stair_north_ud,
+    stair_east_ud,
 )
 
 TEXTURE_PATH = 'texture_fv.png'
@@ -101,7 +110,7 @@ class CobbleStone(Block):
     coords = ((0, 14), (0, 14), (0, 14))  #4 stone
 
 class BetterStone(Block):
-    name = 'BetterStone'
+    name = 'Betterstone'
     coords = ((3, 14), )  #4 stone
 
 class IronBlock(Block):
@@ -379,6 +388,188 @@ class LadderEast(Ladder):
     vertices = ladder_east
     show_in_inventory = False
 
+class Stair(Block):
+    name = 'Stair'
+    coords = ((4, 15), (4, 15), (4, 15))
+    vertices = stair_south
+    occludes = False
+    collision = 'mesh'
+
+class StairSouth(Stair):
+    name = 'Stair South'
+    vertices = stair_south
+    show_in_inventory = False
+
+class StairWest(Stair):
+    name = 'Stair West'
+    vertices = stair_west
+    show_in_inventory = False
+
+class StairNorth(Stair):
+    name = 'Stair North'
+    vertices = stair_north
+    show_in_inventory = False
+
+class StairEast(Stair):
+    name = 'Stair East'
+    vertices = stair_east
+    show_in_inventory = False
+
+class StairSouthUpsideDown(Stair):
+    name = 'Stair South Upside Down'
+    vertices = stair_south_ud
+    show_in_inventory = False
+
+class StairWestUpsideDown(Stair):
+    name = 'Stair West Upside Down'
+    vertices = stair_west_ud
+    show_in_inventory = False
+
+class StairNorthUpsideDown(Stair):
+    name = 'Stair North Upside Down'
+    vertices = stair_north_ud
+    show_in_inventory = False
+
+class StairEastUpsideDown(Stair):
+    name = 'Stair East Upside Down'
+    vertices = stair_east_ud
+    show_in_inventory = False
+
+class CobbleStair(Stair):
+    name = 'Cobble Stair'
+    coords = ((0, 14), (0, 14), (0, 14))
+    occludes = False
+
+class CobbleStairSouth(CobbleStair):
+    name = 'Cobble Stair South'
+    vertices = stair_south
+    show_in_inventory = False
+
+class CobbleStairWest(CobbleStair):
+    name = 'Cobble Stair West'
+    vertices = stair_west
+    show_in_inventory = False
+
+class CobbleStairNorth(CobbleStair):
+    name = 'Cobble Stair North'
+    vertices = stair_north
+    show_in_inventory = False
+
+class CobbleStairEast(CobbleStair):
+    name = 'Cobble Stair East'
+    vertices = stair_east
+    show_in_inventory = False
+
+class CobbleStairSouthUpsideDown(CobbleStair):
+    name = 'Cobble Stair South Upside Down'
+    vertices = stair_south_ud
+    show_in_inventory = False
+
+class CobbleStairWestUpsideDown(CobbleStair):
+    name = 'Cobble Stair West Upside Down'
+    vertices = stair_west_ud
+    show_in_inventory = False
+
+class CobbleStairNorthUpsideDown(CobbleStair):
+    name = 'Cobble Stair North Upside Down'
+    vertices = stair_north_ud
+    show_in_inventory = False
+
+class CobbleStairEastUpsideDown(CobbleStair):
+    name = 'Cobble Stair East Upside Down'
+    vertices = stair_east_ud
+    show_in_inventory = False
+
+class DirtStair(Stair):
+    name = 'Dirt Stair'
+    coords = ((2, 15), (2, 15), (2, 15))
+    occludes = False
+
+class DirtStairSouth(DirtStair):
+    name = 'Dirt Stair South'
+    vertices = stair_south
+    show_in_inventory = False
+
+class DirtStairWest(DirtStair):
+    name = 'Dirt Stair West'
+    vertices = stair_west
+    show_in_inventory = False
+
+class DirtStairNorth(DirtStair):
+    name = 'Dirt Stair North'
+    vertices = stair_north
+    show_in_inventory = False
+
+class DirtStairEast(DirtStair):
+    name = 'Dirt Stair East'
+    vertices = stair_east
+    show_in_inventory = False
+
+class DirtStairSouthUpsideDown(DirtStair):
+    name = 'Dirt Stair South Upside Down'
+    vertices = stair_south_ud
+    show_in_inventory = False
+
+class DirtStairWestUpsideDown(DirtStair):
+    name = 'Dirt Stair West Upside Down'
+    vertices = stair_west_ud
+    show_in_inventory = False
+
+class DirtStairNorthUpsideDown(DirtStair):
+    name = 'Dirt Stair North Upside Down'
+    vertices = stair_north_ud
+    show_in_inventory = False
+
+class DirtStairEastUpsideDown(DirtStair):
+    name = 'Dirt Stair East Upside Down'
+    vertices = stair_east_ud
+    show_in_inventory = False
+
+class PlankStair(Stair):
+    name = 'Plank Stair'
+    coords = ((4, 15), (4, 15), (4, 15))
+    occludes = False
+
+class PlankStairSouth(PlankStair):
+    name = 'Plank Stair South'
+    vertices = stair_south
+    show_in_inventory = False
+
+class PlankStairWest(PlankStair):
+    name = 'Plank Stair West'
+    vertices = stair_west
+    show_in_inventory = False
+
+class PlankStairNorth(PlankStair):
+    name = 'Plank Stair North'
+    vertices = stair_north
+    show_in_inventory = False
+
+class PlankStairEast(PlankStair):
+    name = 'Plank Stair East'
+    vertices = stair_east
+    show_in_inventory = False
+
+class PlankStairSouthUpsideDown(PlankStair):
+    name = 'Plank Stair South Upside Down'
+    vertices = stair_south_ud
+    show_in_inventory = False
+
+class PlankStairWestUpsideDown(PlankStair):
+    name = 'Plank Stair West Upside Down'
+    vertices = stair_west_ud
+    show_in_inventory = False
+
+class PlankStairNorthUpsideDown(PlankStair):
+    name = 'Plank Stair North Upside Down'
+    vertices = stair_north_ud
+    show_in_inventory = False
+
+class PlankStairEastUpsideDown(PlankStair):
+    name = 'Plank Stair East Upside Down'
+    vertices = stair_east_ud
+    show_in_inventory = False
+
 # Explicit ordering keeps block IDs stable and ensures the initial inventory
 # starts with grass instead of whichever subclass happens to register first.
 BLOCKS = [
@@ -437,6 +628,42 @@ BLOCKS = [
     LadderWest,
     LadderNorth,
     LadderEast,
+    Stair,
+    StairSouth,
+    StairWest,
+    StairNorth,
+    StairEast,
+    StairSouthUpsideDown,
+    StairWestUpsideDown,
+    StairNorthUpsideDown,
+    StairEastUpsideDown,
+    CobbleStair,
+    CobbleStairSouth,
+    CobbleStairWest,
+    CobbleStairNorth,
+    CobbleStairEast,
+    CobbleStairSouthUpsideDown,
+    CobbleStairWestUpsideDown,
+    CobbleStairNorthUpsideDown,
+    CobbleStairEastUpsideDown,
+    DirtStair,
+    DirtStairSouth,
+    DirtStairWest,
+    DirtStairNorth,
+    DirtStairEast,
+    DirtStairSouthUpsideDown,
+    DirtStairWestUpsideDown,
+    DirtStairNorthUpsideDown,
+    DirtStairEastUpsideDown,
+    PlankStair,
+    PlankStairSouth,
+    PlankStairWest,
+    PlankStairNorth,
+    PlankStairEast,
+    PlankStairSouthUpsideDown,
+    PlankStairWestUpsideDown,
+    PlankStairNorthUpsideDown,
+    PlankStairEastUpsideDown,
 ]
 i = 1
 BLOCK_ID = {}
@@ -446,13 +673,34 @@ for x in BLOCKS:
 BLOCK_NORMALS = numpy.array(FACES)
 BLOCK_COLORS = numpy.array([white] + [x.colors for x in BLOCKS])
 BLOCK_TEXTURES = numpy.array([tex_coords((0,0),(0,0),(0,0))] + [tex_coords(*x.coords) for x in BLOCKS],dtype = numpy.float32)/4
-BLOCK_VERTICES = numpy.array([cb_v]+[x.vertices for x in BLOCKS])
+_raw_vertices = [cb_v] + [x.vertices for x in BLOCKS]
+_face_counts = [0]
+for verts in _raw_vertices[1:]:
+    _face_counts.append(int(verts.reshape(-1, 12).shape[0]))
+MAX_FACES = max(max(_face_counts), 6)
+BLOCK_FACE_COUNT = numpy.array(_face_counts, dtype=numpy.uint8)
+BLOCK_VERTICES = numpy.zeros((len(BLOCKS) + 1, MAX_FACES, 12), dtype=numpy.float32)
+for i, verts in enumerate(_raw_vertices):
+    count = BLOCK_FACE_COUNT[i] if i < len(BLOCK_FACE_COUNT) else 0
+    if count <= 0:
+        continue
+    reshaped = verts.reshape(-1, 12).astype(numpy.float32)
+    BLOCK_VERTICES[i, :count] = reshaped[:count]
+    if count < MAX_FACES:
+        BLOCK_VERTICES[i, count:] = reshaped[count - 1]
+BLOCK_FACE_DIR = numpy.zeros((len(BLOCKS) + 1, MAX_FACES), dtype=numpy.uint8)
+for i, count in enumerate(BLOCK_FACE_COUNT):
+    if count <= 0:
+        continue
+    dirs = numpy.array([0, 1, 2, 3, 4, 5], dtype=numpy.uint8)
+    use = min(count, 6)
+    BLOCK_FACE_DIR[i, :use] = dirs[:use]
 BLOCK_SOLID = numpy.array([False]+[x.solid for x in BLOCKS], dtype = numpy.uint8)
 BLOCK_OCCLUDES = numpy.array([False]+[getattr(x,'occludes', True) for x in BLOCKS], dtype = numpy.uint8)
 BLOCK_OCCLUDES_SAME = numpy.array([False]+[getattr(x,'occludes_same', False) for x in BLOCKS], dtype = numpy.uint8)
 BLOCK_RENDER_ALL = numpy.array([False]+[getattr(x,'render_all_faces', False) for x in BLOCKS], dtype = numpy.uint8)
 # Per-block collision AABBs in world space (block-local [0,1] coords).
-_scaled_verts = (0.5 * BLOCK_VERTICES).reshape(len(BLOCKS) + 1, 6, 4, 3)
+_scaled_verts = (0.5 * BLOCK_VERTICES).reshape(len(BLOCKS) + 1, MAX_FACES, 4, 3)
 _mesh_aabb_min = _scaled_verts.min(axis=(1, 2))
 _mesh_aabb_max = _scaled_verts.max(axis=(1, 2))
 # Collision matches rendering: centered X/Z, base-aligned Y (0..1).
@@ -505,6 +753,152 @@ LADDER_ORIENT = {
     BLOCK_ID['Ladder North']: ORIENT_NORTH,
     BLOCK_ID['Ladder East']: ORIENT_EAST,
 }
+
+STAIR_BASE_IDS = set()
+STAIR_ORIENTED_IDS = {}
+STAIR_ORIENTED_UP_IDS = {}
+STAIR_IDS = set()
+STAIR_UPSIDE_IDS = set()
+STAIR_ORIENT = {}
+
+def _register_stair(base_name, south, west, north, east, south_ud, west_ud, north_ud, east_ud):
+    base_id = BLOCK_ID[base_name]
+    oriented = [BLOCK_ID[south], BLOCK_ID[west], BLOCK_ID[north], BLOCK_ID[east]]
+    oriented_up = [BLOCK_ID[south_ud], BLOCK_ID[west_ud], BLOCK_ID[north_ud], BLOCK_ID[east_ud]]
+    STAIR_BASE_IDS.add(base_id)
+    STAIR_ORIENTED_IDS[base_id] = oriented
+    STAIR_ORIENTED_UP_IDS[base_id] = oriented_up
+    STAIR_IDS.update(oriented)
+    STAIR_IDS.update(oriented_up)
+    STAIR_UPSIDE_IDS.update(oriented_up)
+    for _orient, _bid in zip([ORIENT_SOUTH, ORIENT_WEST, ORIENT_NORTH, ORIENT_EAST], oriented):
+        STAIR_ORIENT[_bid] = _orient
+    for _orient, _bid in zip([ORIENT_SOUTH, ORIENT_WEST, ORIENT_NORTH, ORIENT_EAST], oriented_up):
+        STAIR_ORIENT[_bid] = _orient
+
+_register_stair(
+    'Stair',
+    'Stair South', 'Stair West', 'Stair North', 'Stair East',
+    'Stair South Upside Down', 'Stair West Upside Down', 'Stair North Upside Down', 'Stair East Upside Down',
+)
+_register_stair(
+    'Cobble Stair',
+    'Cobble Stair South', 'Cobble Stair West', 'Cobble Stair North', 'Cobble Stair East',
+    'Cobble Stair South Upside Down', 'Cobble Stair West Upside Down', 'Cobble Stair North Upside Down', 'Cobble Stair East Upside Down',
+)
+_register_stair(
+    'Dirt Stair',
+    'Dirt Stair South', 'Dirt Stair West', 'Dirt Stair North', 'Dirt Stair East',
+    'Dirt Stair South Upside Down', 'Dirt Stair West Upside Down', 'Dirt Stair North Upside Down', 'Dirt Stair East Upside Down',
+)
+_register_stair(
+    'Plank Stair',
+    'Plank Stair South', 'Plank Stair West', 'Plank Stair North', 'Plank Stair East',
+    'Plank Stair South Upside Down', 'Plank Stair West Upside Down', 'Plank Stair North Upside Down', 'Plank Stair East Upside Down',
+)
+
+def _rotate_dir(dir_idx, turns):
+    if dir_idx <= 1:
+        return dir_idx
+    turns %= 4
+    for _ in range(turns):
+        if dir_idx == 4:
+            dir_idx = 3
+        elif dir_idx == 3:
+            dir_idx = 5
+        elif dir_idx == 5:
+            dir_idx = 2
+        elif dir_idx == 2:
+            dir_idx = 4
+    return dir_idx
+
+def _rotate_dirs(dirs, turns):
+    return numpy.array([_rotate_dir(int(d), turns) for d in dirs], dtype=numpy.uint8)
+
+_STAIR_TURNS = {
+    ORIENT_SOUTH: 0,
+    ORIENT_EAST: 1,
+    ORIENT_NORTH: 2,
+    ORIENT_WEST: 3,
+}
+_STAIR_DIRS_BASE = numpy.array(STAIR_FACE_DIRS, dtype=numpy.uint8)
+_STAIR_DIRS_UP = numpy.array(
+    [1 if d == 0 else 0 if d == 1 else d for d in _STAIR_DIRS_BASE],
+    dtype=numpy.uint8,
+)
+for _orient, _bid in zip(
+    [ORIENT_SOUTH, ORIENT_WEST, ORIENT_NORTH, ORIENT_EAST],
+    STAIR_ORIENTED_IDS[BLOCK_ID['Stair']],
+):
+    turns = _STAIR_TURNS[_orient]
+    BLOCK_FACE_DIR[_bid, :len(_STAIR_DIRS_BASE)] = _rotate_dirs(_STAIR_DIRS_BASE, turns)
+for _orient, _bid in zip(
+    [ORIENT_SOUTH, ORIENT_WEST, ORIENT_NORTH, ORIENT_EAST],
+    STAIR_ORIENTED_UP_IDS[BLOCK_ID['Stair']],
+):
+    turns = _STAIR_TURNS[_orient]
+    BLOCK_FACE_DIR[_bid, :len(_STAIR_DIRS_UP)] = _rotate_dirs(_STAIR_DIRS_UP, turns)
+for _base_id in STAIR_BASE_IDS:
+    if _base_id == BLOCK_ID['Stair']:
+        continue
+    for _orient, _bid in zip(
+        [ORIENT_SOUTH, ORIENT_WEST, ORIENT_NORTH, ORIENT_EAST],
+        STAIR_ORIENTED_IDS[_base_id],
+    ):
+        turns = _STAIR_TURNS[_orient]
+        BLOCK_FACE_DIR[_bid, :len(_STAIR_DIRS_BASE)] = _rotate_dirs(_STAIR_DIRS_BASE, turns)
+    for _orient, _bid in zip(
+        [ORIENT_SOUTH, ORIENT_WEST, ORIENT_NORTH, ORIENT_EAST],
+        STAIR_ORIENTED_UP_IDS[_base_id],
+    ):
+        turns = _STAIR_TURNS[_orient]
+        BLOCK_FACE_DIR[_bid, :len(_STAIR_DIRS_UP)] = _rotate_dirs(_STAIR_DIRS_UP, turns)
+
+def _rotate_stair_bounds(min_v, max_v, orient):
+    min_x, min_y, min_z = min_v
+    max_x, max_y, max_z = max_v
+    if orient == ORIENT_SOUTH:
+        return min_v, max_v
+    if orient == ORIENT_EAST:
+        return (
+            numpy.array([min_z, min_y, -max_x], dtype=numpy.float32),
+            numpy.array([max_z, max_y, -min_x], dtype=numpy.float32),
+        )
+    if orient == ORIENT_WEST:
+        return (
+            numpy.array([-max_z, min_y, min_x], dtype=numpy.float32),
+            numpy.array([-min_z, max_y, max_x], dtype=numpy.float32),
+        )
+    return (
+        numpy.array([-max_x, min_y, -max_z], dtype=numpy.float32),
+        numpy.array([-min_x, max_y, -min_z], dtype=numpy.float32),
+    )
+
+_STAIR_BASE_BOXES = (
+    (numpy.array([-0.5, 0.0, -0.5], dtype=numpy.float32), numpy.array([0.5, 0.5, 0.0], dtype=numpy.float32)),
+    (numpy.array([-0.5, 0.5, 0.0], dtype=numpy.float32), numpy.array([0.5, 1.0, 0.5], dtype=numpy.float32)),
+)
+_STAIR_BASE_BOXES_UP = (
+    (numpy.array([-0.5, 0.5, -0.5], dtype=numpy.float32), numpy.array([0.5, 1.0, 0.0], dtype=numpy.float32)),
+    (numpy.array([-0.5, 0.0, 0.0], dtype=numpy.float32), numpy.array([0.5, 0.5, 0.5], dtype=numpy.float32)),
+)
+
+def _stair_boxes_for(orient, upside):
+    boxes = _STAIR_BASE_BOXES_UP if upside else _STAIR_BASE_BOXES
+    return [_rotate_stair_bounds(min_v, max_v, orient) for min_v, max_v in boxes]
+
+STAIR_COLLISION_BOXES = {}
+for _base_id in STAIR_BASE_IDS:
+    for _orient, _bid in zip(
+        [ORIENT_SOUTH, ORIENT_WEST, ORIENT_NORTH, ORIENT_EAST],
+        STAIR_ORIENTED_IDS[_base_id],
+    ):
+        STAIR_COLLISION_BOXES[_bid] = _stair_boxes_for(_orient, upside=False)
+    for _orient, _bid in zip(
+        [ORIENT_SOUTH, ORIENT_WEST, ORIENT_NORTH, ORIENT_EAST],
+        STAIR_ORIENTED_UP_IDS[_base_id],
+    ):
+        STAIR_COLLISION_BOXES[_bid] = _stair_boxes_for(_orient, upside=True)
 
 ORIENTED_BLOCK_IDS = {}
 WALL_MOUNTED_BLOCK_IDS = set()

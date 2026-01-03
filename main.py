@@ -5,6 +5,9 @@ import sys
 
 # pyglet imports
 import pyglet
+pyglet.options['debug_gl'] = False
+pyglet.options['debug_media'] = False
+
 image = pyglet.image
 from pyglet.window import key, mouse
 import pyglet.gl as gl
@@ -57,6 +60,9 @@ from blocks import (
     ORIENT_WEST,
     ORIENT_NORTH,
     ORIENT_EAST,
+    STAIR_BASE_IDS,
+    STAIR_ORIENTED_IDS,
+    STAIR_ORIENTED_UP_IDS,
 )
 WATER = BLOCK_ID['Water']
 
@@ -310,6 +316,9 @@ class Window(pyglet.window.Window):
         self._hud_stats_overlay_sum = 0.0
         self._hud_stats_overlay_min = None
         self._hud_stats_overlay_max = None
+        self._hud_stats_hud_sum = 0.0
+        self._hud_stats_hud_min = None
+        self._hud_stats_hud_max = None
         self._hud_stats_upload_sum = 0.0
         self._hud_stats_upload_min = None
         self._hud_stats_upload_max = None
@@ -330,6 +339,8 @@ class Window(pyglet.window.Window):
         self._hud_block4_text = ""
         self._hud_block5_text = ""
         self._hud_block_last_update = 0.0
+        self._hud_detail_last_update = 0.0
+        self._hud_detail_dirty = False
         self._hud_last_loader_count = 0
         self._hud_last_mesh_done = 0
         self._hud_upload_budget_ms = 0.0
@@ -339,6 +350,12 @@ class Window(pyglet.window.Window):
         self._hud_tri_uploaded = 0
         self._hud_upload_pending = 0
         self._hud_layout_dirty = True
+        self._last_hud_ms = 0.0
+        self._hud_profile_last_log = 0.0
+        self._hud_profile_accum = 0.0
+        self._hud_profile_count = 0
+        self._hud_profile_max = 0.0
+        self._hud_profile_segments = {}
 
         # Target frame pacing and local FPS tracking (not dependent on pyglet internals).
         desired_fps = getattr(config, 'TARGET_FPS', None)
@@ -436,6 +453,30 @@ class Window(pyglet.window.Window):
         if dz == -1:
             return ORIENT_NORTH
         return None
+
+    def _hit_face_point(self, origin, vector, block, face):
+        """Return the hit point on the block face, or None if it can't be computed."""
+        ox, oy, oz = origin
+        vx, vy, vz = vector
+        dx, dy, dz = face
+        if dx != 0:
+            plane = block[0] - 0.5 * dx
+            if abs(vx) < 1e-6:
+                return None
+            t = (plane - ox) / vx
+        elif dy != 0:
+            plane = block[1] + (0.0 if dy > 0 else 1.0)
+            if abs(vy) < 1e-6:
+                return None
+            t = (plane - oy) / vy
+        else:
+            plane = block[2] - 0.5 * dz
+            if abs(vz) < 1e-6:
+                return None
+            t = (plane - oz) / vz
+        if t < 0:
+            return None
+        return (ox + vx * t, oy + vy * t, oz + vz * t)
 
     def get_motion_vector(self):
         """ Returns the current motion vector indicating the velocity of the
@@ -753,28 +794,44 @@ class Window(pyglet.window.Window):
                     px, py, pz = util.normalize(self.position)
                     if not (previous == (px, py, pz) or previous == (px, py-1, pz)):
                         block_id = BLOCK_ID[self.block]
-                        oriented = ORIENTED_BLOCK_IDS.get(block_id)
-                        if oriented is not None:
-                            if block_id in WALL_MOUNTED_BLOCK_IDS:
-                                if block is None:
-                                    return
+                        if block_id in STAIR_BASE_IDS:
+                            orient = (self._player_back_orient() + 2) % 4
+                            upside = False
+                            if block is not None:
                                 face = (block[0] - previous[0], block[1] - previous[1], block[2] - previous[2])
-                                orient = self._face_orient(face)
-                                if orient is None:
-                                    return
+                                if face[1] > 0:
+                                    upside = True
+                                elif face[1] == 0:
+                                    hit = self._hit_face_point(hit_origin, vector, block, face)
+                                    if hit is not None and (hit[1] - block[1]) > 0.5:
+                                        upside = True
+                            if upside:
+                                block_id = STAIR_ORIENTED_UP_IDS[block_id][orient]
                             else:
-                                orient = self._player_back_orient()
-                            block_id = oriented[orient]
-                            if block_id in DOOR_LOWER_TO_UPPER:
-                                upper_pos = (previous[0], previous[1] + 1, previous[2])
-                                if self.model[upper_pos] not in (0, None):
+                                block_id = STAIR_ORIENTED_IDS[block_id][orient]
+                        else:
+                            oriented = ORIENTED_BLOCK_IDS.get(block_id)
+                            if oriented is not None:
+                                if block_id in WALL_MOUNTED_BLOCK_IDS:
+                                    if block is None:
+                                        return
+                                    face = (block[0] - previous[0], block[1] - previous[1], block[2] - previous[2])
+                                    orient = self._face_orient(face)
+                                    if orient is None:
+                                        return
+                                else:
+                                    orient = self._player_back_orient()
+                                block_id = oriented[orient]
+                                if block_id in DOOR_LOWER_TO_UPPER:
+                                    upper_pos = (previous[0], previous[1] + 1, previous[2])
+                                    if self.model[upper_pos] not in (0, None):
+                                        return
+                                    upper_id = DOOR_LOWER_TO_UPPER[block_id]
+                                    self.model.add_blocks(
+                                        [(previous, block_id), (upper_pos, upper_id)],
+                                        priority=True,
+                                    )
                                     return
-                                upper_id = DOOR_LOWER_TO_UPPER[block_id]
-                                self.model.add_blocks(
-                                    [(previous, block_id), (upper_pos, upper_id)],
-                                    priority=True,
-                                )
-                                return
                         self.model.add_block(previous, block_id, priority=True)
             elif button == pyglet.window.mouse.LEFT and block:
                 self.model.remove_block(block, priority=True)
@@ -846,6 +903,7 @@ class Window(pyglet.window.Window):
                 self.camera_mode = 'first_person'
         elif symbol == key.F1:
             self.hud_visible = not self.hud_visible
+            self._hud_layout_dirty = True
         elif symbol == key.F2:
             self.vsync_enabled = not self.vsync_enabled
             try:
@@ -854,6 +912,8 @@ class Window(pyglet.window.Window):
                 pass
         elif symbol == key.F3:
             self.hud_details_visible = not self.hud_details_visible
+            self._hud_layout_dirty = True
+            self._hud_detail_dirty = True
         elif symbol == key.B:
             self._toggle_snail()
         elif symbol == key.M:
@@ -1116,7 +1176,9 @@ class Window(pyglet.window.Window):
         self.set_2d()
         if self._is_underwater():
             self.draw_underwater_overlay()
+        hud_start = time.perf_counter()
         self.draw_label()
+        self._last_hud_ms = (time.perf_counter() - hud_start) * 1000.0
         self.draw_reticle()
         self.draw_inventory_item()
         self.draw_focused_block()
@@ -1165,6 +1227,7 @@ class Window(pyglet.window.Window):
         self._hud_stats_entities_sum += entity_draw_ms
         self._hud_stats_water_sum += water_ms
         self._hud_stats_overlay_sum += overlay_ms
+        self._hud_stats_hud_sum += self._last_hud_ms
         self._hud_stats_upload_sum += upload_ms
         if self._hud_stats_sector_min is None or sector_ms < self._hud_stats_sector_min:
             self._hud_stats_sector_min = sector_ms
@@ -1202,6 +1265,10 @@ class Window(pyglet.window.Window):
             self._hud_stats_overlay_min = overlay_ms
         if self._hud_stats_overlay_max is None or overlay_ms > self._hud_stats_overlay_max:
             self._hud_stats_overlay_max = overlay_ms
+        if self._hud_stats_hud_min is None or self._last_hud_ms < self._hud_stats_hud_min:
+            self._hud_stats_hud_min = self._last_hud_ms
+        if self._hud_stats_hud_max is None or self._last_hud_ms > self._hud_stats_hud_max:
+            self._hud_stats_hud_max = self._last_hud_ms
         if self._hud_stats_upload_min is None or upload_ms < self._hud_stats_upload_min:
             self._hud_stats_upload_min = upload_ms
         if self._hud_stats_upload_max is None or upload_ms > self._hud_stats_upload_max:
@@ -1239,6 +1306,7 @@ class Window(pyglet.window.Window):
             avg_entities = self._hud_stats_entities_sum / frames
             avg_water = self._hud_stats_water_sum / frames
             avg_overlay = self._hud_stats_overlay_sum / frames
+            avg_hud = self._hud_stats_hud_sum / frames
             avg_upload = self._hud_stats_upload_sum / frames
             self._hud_stats_detail_text = (
                 f"sector avg={avg_sector:.2f} min={self._hud_stats_sector_min:.2f} max={self._hud_stats_sector_max:.2f} | "
@@ -1252,6 +1320,7 @@ class Window(pyglet.window.Window):
                 f"ent avg={avg_entities:.2f} min={self._hud_stats_entities_min:.2f} max={self._hud_stats_entities_max:.2f} | "
                 f"water avg={avg_water:.2f} min={self._hud_stats_water_min:.2f} max={self._hud_stats_water_max:.2f} | "
                 f"overlay avg={avg_overlay:.2f} min={self._hud_stats_overlay_min:.2f} max={self._hud_stats_overlay_max:.2f} | "
+                f"HUD avg={avg_hud:.2f} min={self._hud_stats_hud_min:.2f} max={self._hud_stats_hud_max:.2f} | "
                 f"upload avg={avg_upload:.2f} min={self._hud_stats_upload_min:.2f} max={self._hud_stats_upload_max:.2f}"
             )
             title = pad_header("Frame update timing")
@@ -1302,6 +1371,9 @@ class Window(pyglet.window.Window):
             self._hud_stats_overlay_sum = 0.0
             self._hud_stats_overlay_min = None
             self._hud_stats_overlay_max = None
+            self._hud_stats_hud_sum = 0.0
+            self._hud_stats_hud_min = None
+            self._hud_stats_hud_max = None
             self._hud_stats_upload_sum = 0.0
             self._hud_stats_upload_min = None
             self._hud_stats_upload_max = None
@@ -1322,6 +1394,16 @@ class Window(pyglet.window.Window):
         """
         if not self.hud_visible:
             return
+        hud_profile = getattr(config, 'HUD_PROFILE', False)
+        if hud_profile:
+            profile_start = time.perf_counter()
+            profile_last = profile_start
+            profile_segments = self._hud_profile_segments
+            def _profile_mark(key):
+                nonlocal profile_last
+                now_mark = time.perf_counter()
+                profile_segments[key] = profile_segments.get(key, 0.0) + (now_mark - profile_last) * 1000.0
+                profile_last = now_mark
         x, y, z = self.position
         rx, ry = self.rotation
         sector = util.sectorize((x, y, z))
@@ -1353,7 +1435,14 @@ class Window(pyglet.window.Window):
         else:
             void_text = 'N/A'
             mush_text = 'NA'
+        if hud_profile:
+            _profile_mark("probe")
         now = time.perf_counter()
+        if self.hud_details_visible:
+            refresh_s = float(getattr(config, "HUD_DETAIL_REFRESH_S", 1.0))
+            if now - self._hud_detail_last_update >= refresh_s:
+                self._hud_detail_last_update = now
+                self._hud_detail_dirty = True
         if now - self._hud_block_last_update >= 1.0:
             self._hud_block_last_update = now
             fps = self._current_fps()
@@ -1364,6 +1453,8 @@ class Window(pyglet.window.Window):
                     fps, x, y, z, sector[0], sector[2], rx, ry, seed_text, void_text, mush_text
                 )
             )
+            if hud_profile:
+                _profile_mark("build_block1")
             if not self.hud_details_visible:
                 self._hud_block2_text = ""
                 self._hud_block3_text = ""
@@ -1512,7 +1603,7 @@ class Window(pyglet.window.Window):
                 inflight = model.n_requests - model.n_responses
                 pending_load = len(getattr(model, "update_sectors_pos", []))
                 loader_q = len(getattr(model, "loader_requests", []))
-                mesh_pending = sum(1 for s in model.sectors.values() if s.mesh_job_pending)
+                mesh_pending = getattr(model, "mesh_active_jobs", 0)
                 upload_pending = len(getattr(model, "pending_uploads", []))
                 loader_total = getattr(model, "loader_sectors_received_total", 0)
                 mesh_total = getattr(model, "mesh_jobs_completed_total", 0)
@@ -1564,7 +1655,7 @@ class Window(pyglet.window.Window):
                     f"upload  {model.stat_upload_count_total:8d} {model.stat_upload_ms_total:8.1f} {model.stat_upload_count_last:5d} {model.stat_upload_ms_last:6.1f}",
                 ]
                 self._hud_block4_text += "\n" + "\n".join(terrain_table)
-                backlog_count = model._mesh_backlog_count()
+                backlog_count = getattr(model, "mesh_backlog_last", 0)
                 loader_table = [
                     "loader  total_ct 1s_ct",
                     f"send    {model.stat_loader_sent_total:8d} {model.stat_loader_sent_last:5d}",
@@ -1603,18 +1694,36 @@ class Window(pyglet.window.Window):
                     self._hud_block5_text = f"{title}\n" + " | ".join(entity_lines)
                 else:
                     self._hud_block5_text = f"{title}\nnone"
+                if hud_profile:
+                    _profile_mark("build_block2_5")
+        if not self.hud_details_visible:
+            self._hud_detail_dirty = False
+        if hud_profile:
+            _profile_mark("build")
 
         layout_dirty = False
         layout_dirty |= self._set_label_text(self.label, self._hud_block1_text)
+        if hud_profile:
+            _profile_mark("set_label_block1")
         info_text = f"{self._hud_block2_text}\n" if self._hud_block2_text else ""
         sector_text = f"{self._hud_block3_text}\n" if self._hud_block3_text else ""
         debug_text = f"{self._hud_block4_text}\n" if self._hud_block4_text else ""
         entity_text = f"{self._hud_block5_text}\n" if self._hud_block5_text else ""
         if self.hud_details_visible:
-            layout_dirty |= self._set_label_text(self.hud_info_label, info_text)
-            layout_dirty |= self._set_label_text(self.sector_label, sector_text)
-            layout_dirty |= self._set_label_text(self.sector_debug_label, debug_text)
-            layout_dirty |= self._set_label_text(self.entity_label, entity_text)
+            detail_update = self._hud_detail_dirty or self._hud_layout_dirty
+            if detail_update:
+                layout_dirty |= self._set_label_text(self.hud_info_label, info_text)
+                if hud_profile:
+                    _profile_mark("set_label_block2")
+                layout_dirty |= self._set_label_text(self.sector_label, sector_text)
+                if hud_profile:
+                    _profile_mark("set_label_block3")
+                layout_dirty |= self._set_label_text(self.sector_debug_label, debug_text)
+                if hud_profile:
+                    _profile_mark("set_label_block4")
+                layout_dirty |= self._set_label_text(self.entity_label, entity_text)
+                if hud_profile:
+                    _profile_mark("set_label_block5")
         else:
             layout_dirty |= self._set_label_text(self.hud_info_label, "")
             layout_dirty |= self._set_label_text(self.sector_label, "")
@@ -1634,8 +1743,8 @@ class Window(pyglet.window.Window):
             % (hud_state, vsync_state, details_state, camera_state, snake_state, snail_state, seagull_state, dog_state)
         )
         layout_dirty |= self._set_label_text(self.keybind_label, keybind_text)
-        if layout_dirty:
-            self._hud_layout_dirty = True
+        if hud_profile:
+            _profile_mark("set_label_keybind")
 
         if self._hud_layout_dirty:
             wrap_width = max(120, self.width - 20)
@@ -1684,15 +1793,83 @@ class Window(pyglet.window.Window):
             self._label_bg.width = bg_width
             self._label_bg.height = bg_height
             self._hud_layout_dirty = False
+        if self._hud_detail_dirty and not self._hud_layout_dirty:
+            self._hud_detail_dirty = False
+        if hud_profile:
+            _profile_mark("layout")
 
         self._label_bg.draw()
+        if hud_profile:
+            _profile_mark("draw_bg")
         self.label.draw()
+        if hud_profile:
+            _profile_mark("draw_block1")
         if self.hud_details_visible:
             self.hud_info_label.draw()
+            if hud_profile:
+                _profile_mark("draw_block2")
             self.sector_label.draw()
+            if hud_profile:
+                _profile_mark("draw_block3")
             self.sector_debug_label.draw()
+            if hud_profile:
+                _profile_mark("draw_block4")
             self.entity_label.draw()
+            if hud_profile:
+                _profile_mark("draw_block5")
         self.keybind_label.draw()
+        if hud_profile:
+            _profile_mark("draw_keybind")
+            total_ms = (time.perf_counter() - profile_start) * 1000.0
+            self._hud_profile_accum += total_ms
+            self._hud_profile_count += 1
+            if total_ms > self._hud_profile_max:
+                self._hud_profile_max = total_ms
+            log_interval = float(getattr(config, 'HUD_PROFILE_LOG_S', 1.0))
+            spike_ms = getattr(config, 'HUD_PROFILE_SPIKE_MS', None)
+            spike = spike_ms is not None and total_ms >= float(spike_ms)
+            log_now = (now - self._hud_profile_last_log) >= log_interval
+            if log_now or spike:
+                avg_ms = self._hud_profile_accum / max(1, self._hud_profile_count)
+                segs = self._hud_profile_segments
+                logutil.log(
+                    "HUD",
+                    "profile total_ms=%.2f avg=%.2f max=%.2f probe=%.2f "
+                    "build=%.2f build_b1=%.2f build_b2_5=%.2f "
+                    "set_b1=%.2f set_b2=%.2f set_b3=%.2f set_b4=%.2f set_b5=%.2f set_key=%.2f "
+                    "layout=%.2f draw_bg=%.2f draw_b1=%.2f draw_b2=%.2f draw_b3=%.2f "
+                    "draw_b4=%.2f draw_b5=%.2f draw_key=%.2f%s"
+                    % (
+                        total_ms,
+                        avg_ms,
+                        self._hud_profile_max,
+                        segs.get("probe", 0.0),
+                        segs.get("build", 0.0),
+                        segs.get("build_block1", 0.0),
+                        segs.get("build_block2_5", 0.0),
+                        segs.get("set_label_block1", 0.0),
+                        segs.get("set_label_block2", 0.0),
+                        segs.get("set_label_block3", 0.0),
+                        segs.get("set_label_block4", 0.0),
+                        segs.get("set_label_block5", 0.0),
+                        segs.get("set_label_keybind", 0.0),
+                        segs.get("layout", 0.0),
+                        segs.get("draw_bg", 0.0),
+                        segs.get("draw_block1", 0.0),
+                        segs.get("draw_block2", 0.0),
+                        segs.get("draw_block3", 0.0),
+                        segs.get("draw_block4", 0.0),
+                        segs.get("draw_block5", 0.0),
+                        segs.get("draw_keybind", 0.0),
+                        " spike=Y" if spike and not log_now else "",
+                    ),
+                )
+            if log_now:
+                self._hud_profile_last_log = now
+                self._hud_profile_accum = 0.0
+                self._hud_profile_count = 0
+                self._hud_profile_max = 0.0
+                self._hud_profile_segments = {}
 
     def _current_fps(self):
         """Return a smoothed FPS based on recent draw intervals."""

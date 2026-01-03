@@ -88,6 +88,73 @@ ladder_north = box_vertices(-1.0, 1.0, -1.0, 1.0, -1.0, -1.0 + LADDER_T)
 ladder_east = box_vertices(1.0 - LADDER_T, 1.0, -1.0, 1.0, -1.0, 1.0)
 ladder_west = box_vertices(-1.0, -1.0 + LADDER_T, -1.0, 1.0, -1.0, 1.0)
 
+# Stair geometry (classic L shape, coordinates are in the [-1, 1] block space).
+def _rotate_y_verts(verts, turns):
+    verts = verts.reshape(-1, 4, 3).copy()
+    x = verts[..., 0].copy()
+    z = verts[..., 2].copy()
+    turns %= 4
+    if turns == 1:
+        verts[..., 0] = z
+        verts[..., 2] = -x
+    elif turns == 2:
+        verts[..., 0] = -x
+        verts[..., 2] = -z
+    elif turns == 3:
+        verts[..., 0] = -z
+        verts[..., 2] = x
+    return verts.reshape(-1, 12)
+
+def _flip_stair_upside(verts):
+    flipped = verts.reshape(-1, 4, 3).copy()
+    flipped[..., 1] *= -1.0
+    flipped = flipped[:, [0, 3, 2, 1], :]
+    return flipped.reshape(-1, 12)
+
+def _stair_base():
+    y0 = -1.0
+    y1 = 0.0
+    y2 = 1.0
+    x0 = -1.0
+    x1 = 1.0
+    z0 = -1.0
+    z1 = 0.0
+    z2 = 1.0
+    return np.array([
+        # bottom
+        [x0, y0, z0,  x1, y0, z0,  x1, y0, z2,  x0, y0, z2],
+        # top (lower step, back half)
+        [x0, y1, z0,  x0, y1, z1,  x1, y1, z1,  x1, y1, z0],
+        # top (upper step, front half)
+        [x0, y2, z1,  x0, y2, z2,  x1, y2, z2,  x1, y2, z1],
+        # back (north)
+        [x1, y0, z0,  x0, y0, z0,  x0, y1, z0,  x1, y1, z0],
+        # front (south)
+        [x0, y0, z2,  x1, y0, z2,  x1, y2, z2,  x0, y2, z2],
+        # step face (between)
+        [x1, y1, z1,  x0, y1, z1,  x0, y2, z1,  x1, y2, z1],
+        # left (back half)
+        [x0, y0, z0,  x0, y0, z1,  x0, y1, z1,  x0, y1, z0],
+        # left (front half)
+        [x0, y0, z1,  x0, y0, z2,  x0, y2, z2,  x0, y2, z1],
+        # right (back half)
+        [x1, y0, z1,  x1, y0, z0,  x1, y1, z0,  x1, y1, z1],
+        # right (front half)
+        [x1, y0, z2,  x1, y0, z1,  x1, y2, z1,  x1, y2, z2],
+    ], dtype=np.float32)
+
+STAIR_FACE_DIRS = np.array([1, 0, 0, 5, 4, 5, 2, 2, 3, 3], dtype=np.uint8)
+
+_stair_base = _stair_base()
+stair_south = _stair_base
+stair_east = _rotate_y_verts(_stair_base, 1)
+stair_north = _rotate_y_verts(_stair_base, 2)
+stair_west = _rotate_y_verts(_stair_base, 3)
+stair_south_ud = _flip_stair_upside(stair_south)
+stair_east_ud = _flip_stair_upside(stair_east)
+stair_north_ud = _flip_stair_upside(stair_north)
+stair_west_ud = _flip_stair_upside(stair_west)
+
 def cube_v(pos,n):
     return n*cb_v+np.tile(pos,4)
 def cube_v2(pos,n):
