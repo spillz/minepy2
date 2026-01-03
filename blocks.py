@@ -331,7 +331,7 @@ class WindowPaneEast(WindowPane):
 
 class WallTorch(Block):
     name = 'Wall Torch'
-    coords = ((3, 9), (3, 9), (3, 9))
+    coords = ((3.5-0.125/2, 9.5, 0.125, 0.125), (3.5-0.125/2, 9.0, 0.125, 0.125), (3.5-0.125/2, 9.0, 0.125, 0.625))
     vertices = torch_south
     solid = False
     occludes = False

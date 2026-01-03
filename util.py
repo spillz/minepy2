@@ -59,7 +59,8 @@ def box_vertices(min_x, max_x, min_y, max_y, min_z, max_z):
 WALL_PLANK_T = 0.2
 WINDOW_PANE_T = 0.16
 DOOR_T = 0.2
-TORCH_T = 0.4
+TORCH_T = 1.0/8
+TORCH_H = 5.0/8
 LADDER_T = 0.1
 
 wall_plank_south = box_vertices(-1.0, 1.0, -1.0, 1.0, 1.0 - WALL_PLANK_T, 1.0)
@@ -78,10 +79,11 @@ door_north = box_vertices(-1.0, 1.0, -1.0, 1.0, -1.0, -1.0 + DOOR_T)
 door_east = box_vertices(1.0 - DOOR_T, 1.0, -1.0, 1.0, -1.0, 1.0)
 door_west = box_vertices(-1.0, -1.0 + DOOR_T, -1.0, 1.0, -1.0, 1.0)
 
-torch_south = box_vertices(-0.2, 0.2, -0.2, 0.8, 1.0 - TORCH_T, 1.0)
-torch_north = box_vertices(-0.2, 0.2, -0.2, 0.8, -1.0, -1.0 + TORCH_T)
-torch_east = box_vertices(1.0 - TORCH_T, 1.0, -0.2, 0.8, -0.2, 0.2)
-torch_west = box_vertices(-1.0, -1.0 + TORCH_T, -0.2, 0.8, -0.2, 0.2)
+
+torch_south = box_vertices(-TORCH_T, TORCH_T, -TORCH_H, TORCH_H, 1.0 - 2*TORCH_T, 1.0)
+torch_north = box_vertices(-TORCH_T, TORCH_T, -TORCH_H, TORCH_H, -1.0, -1.0 + 2*TORCH_T)
+torch_east = box_vertices(1.0 - 2*TORCH_T, 1.0, -TORCH_H, TORCH_H, -TORCH_T, TORCH_T)
+torch_west = box_vertices(-1.0, -1.0 + 2*TORCH_T, -TORCH_H, TORCH_H, -TORCH_T, TORCH_T)
 
 ladder_south = box_vertices(-1.0, 1.0, -1.0, 1.0, 1.0 - LADDER_T, 1.0)
 ladder_north = box_vertices(-1.0, 1.0, -1.0, 1.0, -1.0, -1.0 + LADDER_T)
