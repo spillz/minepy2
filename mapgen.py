@@ -429,7 +429,8 @@ class BiomeGenerator:
             return None
         idx = int(self._macro_random(ox, oz, 41003) * len(coords))
         x, z = coords[idx]
-        return {"type": entity_type, "local_pos": (int(x), int(z))}
+        y = int(elevation[x, z]) + 1
+        return {"type": entity_type, "local_pos": (int(x), int(y), int(z))}
 
     def _build_tree_templates(self):
         templates = []

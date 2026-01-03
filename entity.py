@@ -1,5 +1,6 @@
 import numpy as np
 import logutil
+from blocks import BLOCK_COLLIDES
 
 class BaseEntity:
     """
@@ -32,16 +33,25 @@ class BaseEntity:
         """
         Moves the entity to be on top of the ground.
         """
-        # Set a high initial position to ensure we are above any terrain
-        self.position = np.array([self.position[0], 160, self.position[2]], dtype=float)
-        # Use the world's collide method to find the ground position (returns bottom of bbox)
-        grounded_pos, _ = self.world.collide(tuple(self.position), self.bounding_box)
-        self.position = np.array(grounded_pos, dtype=float)
-        # Adjust y to be the integer block coordinate, as collide returns top surface of block
-        # self.position[1] -= 0.5
-        self.on_ground = True
-        if hasattr(self, 'velocity'):
-            self.velocity[1] = 0
+        x = float(self.position[0])
+        z = float(self.position[2])
+        if hasattr(self.world, "get_vertical_column"):
+            column = self.world.get_vertical_column(x, z)
+            if column is not None and column.size > 0:
+                collides = BLOCK_COLLIDES[column]
+                if collides.any():
+                    top = int(np.nonzero(collides)[0][-1])
+                    self.position = np.array([x, float(top + 1), z], dtype=float)
+                    self.on_ground = True
+                    if hasattr(self, "velocity"):
+                        self.velocity[1] = 0
+                    return
+        if hasattr(self.world, "collide") and callable(self.world.collide):
+            grounded_pos, _ = self.world.collide(tuple(self.position), self.bounding_box)
+            self.position = np.array(grounded_pos, dtype=float)
+            self.on_ground = True
+            if hasattr(self, "velocity"):
+                self.velocity[1] = 0
 
     def update(self, dt):
         """

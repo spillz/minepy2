@@ -639,14 +639,22 @@ class Window(pyglet.window.Window):
         local_pos = plan.get("local_pos")
         if entity_type is None or local_pos is None:
             return None
-        local_x, local_z = local_pos
+        local_x = local_pos[0]
+        local_y = None
+        local_z = local_pos[1]
+        if len(local_pos) >= 3:
+            local_y = local_pos[1]
+            local_z = local_pos[2]
         spawn_pos = None
         if entity_type == "seagull":
             spawn_pos = self._find_water_spawn(sector, local_x, local_z)
         elif entity_type == "snail":
             spawn_pos = self._find_cave_spawn(sector, local_x, local_z)
         else:
-            spawn_pos = self._find_surface_spawn(sector, local_x, local_z)
+            if local_y is not None:
+                spawn_pos = self._spawn_from_surface_hint(sector, local_x, local_y, local_z)
+            if spawn_pos is None:
+                spawn_pos = self._find_surface_spawn(sector, local_x, local_z)
         if spawn_pos is None:
             return None
 
@@ -675,6 +683,26 @@ class Window(pyglet.window.Window):
             return None
         self.entity_objects[entity_id] = entity
         return entity
+
+    def _spawn_from_surface_hint(self, sector, local_x, local_y, local_z):
+        if (
+            local_x < 0
+            or local_x >= config.SECTOR_SIZE
+            or local_z < 0
+            or local_z >= config.SECTOR_SIZE
+        ):
+            return None
+        column = sector.blocks[local_x, :, local_z]
+        if local_y <= 0 or local_y >= column.shape[0]:
+            return None
+        top = local_y - 1
+        if not BLOCK_COLLIDES[column[top]] or column[top] == WATER:
+            return None
+        if local_y < column.shape[0] and BLOCK_COLLIDES[column[local_y]]:
+            return None
+        wx = sector.position[0] + local_x
+        wz = sector.position[2] + local_z
+        return (float(wx), float(local_y), float(wz))
 
     def _find_surface_spawn(self, sector, local_x, local_z):
         offsets = [
