@@ -1430,7 +1430,8 @@ class Window(pyglet.window.Window):
         hud_start = time.perf_counter()
         self.draw_label()
         self._last_hud_ms = (time.perf_counter() - hud_start) * 1000.0
-        self.draw_reticle()
+        if self.camera_mode == 'first_person':
+            self.draw_reticle()
         self.draw_inventory_item()
         self.draw_focused_block()
         overlay_ms = (time.perf_counter() - t0) * 1000.0
