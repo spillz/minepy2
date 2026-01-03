@@ -83,14 +83,14 @@ def build_tetrapod_model(
     # Eyes
     parts["left_eye"] = {
         "parent": "head",
-        "pivot": [-head_size[0]/4, 0, -head_size[2]/2],
+        "pivot": [-head_size[0]/4, 0.15*head_size[1], -head_size[2]/2],
         "position": [0, 0, 0],
         "size": eye_size,
         "material": {"color": eye_color},
     }
     parts["right_eye"] = {
         "parent": "head",
-        "pivot": [head_size[0]/4, 0, -head_size[2]/2],
+        "pivot": [head_size[0]/4, 0.15*head_size[1], -head_size[2]/2],
         "position": [0, 0, 0],
         "size": eye_size,
         "material": {"color": eye_color},
@@ -109,7 +109,7 @@ def build_tetrapod_model(
     parts["nose"] = {
         "parent": "snout",
         "pivot": [0, snout_size[1]/2, -snout_size[2]/2],
-        "position": [0, -nose_size[1]/2, 0],
+        "position": [0, -0.4*nose_size[1], 0],
         "size": nose_size,
         "material": {"color": nose_color},
     }

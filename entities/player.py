@@ -36,6 +36,9 @@ def _scale_model(model, scale):
     model['parts'] = {name: _scale_part(part, scale) for name, part in parts.items()}
     return model
 
+head_size = np.array((0.3, 0.3, 0.3))
+eye_color = (0, 0, 0)
+
 HUMANOID_MODEL = {
     # 'parts' defines the "bones" and their shapes.
     # Each part is a block, positioned relative to its parent.
@@ -57,11 +60,32 @@ HUMANOID_MODEL = {
             'size': [0.3, 0.3, 0.3],
             'material': {'color': (224, 172, 125)}
         },
+        "left_eye": {
+            "parent": "head",
+            "pivot": [-head_size[0]/4, 0.15*head_size[1], -head_size[2]/2],
+            "position": [0, 0, 0],
+            "size": 0.2*head_size,
+            "material": {"color": eye_color},
+        },
+        "right_eye": {
+            "parent": "head",
+            "pivot": [head_size[0]/4, 0.15*head_size[1], -head_size[2]/2],
+            "position": [0, 0, 0],
+            "size": 0.2*head_size,
+            "material": {"color": eye_color},
+        },
+        "mouth": {
+            "parent": "head",
+            "pivot": [0, -0.15*head_size[1], -head_size[2]/2],
+            "position": [0, 0, 0],
+            "size": head_size*(0.3,0.1,0.1),
+            "material": {"color": eye_color},
+        },
         'hair': {
             'parent': 'torso',
             'pivot': [0, 0.5, 0],   # Pivot matches the head pivot for eye-level camera.
-            'position': [0, 0.1, 0.08], # Hair sits on top of the head.
-            'size': [0.34, 0.34, 0.34],
+            'position': [0, 0.2*head_size[1], 0.2*(1.25*head_size[2])], # Hair sits on top of the head.
+            'size': head_size*1.25,
             'material': {'color': (148, 121, 95)}
         },
         'left_arm': {
