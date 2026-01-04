@@ -2,6 +2,7 @@ import math
 import random
 import time
 import sys
+from datetime import datetime
 
 # pyglet imports
 import pyglet
@@ -2072,7 +2073,7 @@ class Window(pyglet.window.Window):
         dog_state = "on" if self.dog_enabled else "off"
         keybind_text = (
             "Toggles: (F1)HUD=%s (F2)Vsync=%s (F3)Details=%s (F5)Cam=%s (F8)Copy | "
-            "(N)Snake=%s (B)Snail=%s (M)Seagull=%s (V)Dog=%s"
+            "(V)Dog=%s (B)Snail=%s S(N)nake=%s (M)Seagull=%s"
             % (hud_state, vsync_state, details_state, camera_state, snake_state, snail_state, seagull_state, dog_state)
         )
         layout_dirty |= self._set_label_text(self.keybind_label, keybind_text)
@@ -2305,6 +2306,7 @@ def setup():
 
 
 def main():
+    logutil.log("MAIN", f"minepy2 start {datetime.now().isoformat(sep=' ', timespec='seconds')}")
     if len(sys.argv)>1:
         arg = sys.argv[1]
         if ':' in arg:

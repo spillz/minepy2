@@ -75,6 +75,12 @@ USE_PATCH_MESH = False
 
 # Enable ANSI colors in logs.
 LOG_COLOR = True
+# Log file path (None or "" to disable file output).
+LOG_FILE_PATH = "log.txt"
+# Log file path for loader process (None or "" to use LOG_FILE_PATH).
+LOG_LOADER_FILE_PATH = None
+# When True, append to existing log; when False, truncate on first log (main process).
+LOG_FILE_APPEND = True
 
 # Log main-loop timings and frame boundaries.
 LOG_MAIN_LOOP = True
@@ -144,6 +150,8 @@ SKY_INTENSITY = 1.0  # global sky light multiplier (0..1)
 SKY_SIDEFILL_ENABLED = True  # indirect sky light from sides/seams
 TORCH_FILL_ENABLED = True # torch light propagation to nearby blocks
 LIGHT_PROPAGATION_BFS = True  # use numpy frontier BFS instead of dense relaxation
+# Send only boundary light values to neighbors to reduce propagation cost.
+LIGHT_OUTGOING_BOUNDARY_ONLY = False
 
 # Day/night cycle (visual only; no skylight recompute).
 DAY_NIGHT_CYCLE_ENABLED = True
