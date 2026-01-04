@@ -80,7 +80,7 @@ LOG_FILE_PATH = "log.txt"
 # Log file path for loader process (None or "" to use LOG_FILE_PATH).
 LOG_LOADER_FILE_PATH = None
 # When True, append to existing log; when False, truncate on first log (main process).
-LOG_FILE_APPEND = True
+LOG_FILE_APPEND = False
 
 # Log main-loop timings and frame boundaries.
 LOG_MAIN_LOOP = True
