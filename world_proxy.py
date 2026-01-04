@@ -134,6 +134,10 @@ class SectorProxy(object):
         self.torch_side = EMPTY_LIGHT_LIST
         self.incoming_sky = {offset: EMPTY_LIGHT_LIST for offset in NEIGHBOR_OFFSETS_8}
         self.incoming_torch = {offset: EMPTY_LIGHT_LIST for offset in NEIGHBOR_OFFSETS_8}
+        self.incoming_sky_updates = 0
+        self.incoming_torch_updates = 0
+        self.edge_sky_counts = (0, 0, 0, 0)
+        self.edge_torch_counts = (0, 0, 0, 0)
         self.light_dirty_internal = True
         self.light_dirty_incoming = True
         self.light_neighbors_ready = False
@@ -664,10 +668,10 @@ class ModelProxy(object):
             logutil.log("WORLD", f"single block spawned at world coords {(cx, cy, cz)}", level="DEBUG")
         else:
             if config.SERVER_IP is not None:
-                print ('Starting server on %s'%(config.SERVER_IP,))
+                logutil.log("MAIN", f"Starting server on {config.SERVER_IP}")
                 self.server = server_connection.start_server_connection(config.SERVER_IP)
                 loader_server_pipe = self.server.loader_pipe
-            print ('Starting sector loader')
+            logutil.log("MAIN", "Starting sector loader")
             self.loader = world_loader.start_loader(loader_server_pipe)
             self.loader_requests.append(['get_seed', []])
             self._loader_thread = threading.Thread(
@@ -1104,6 +1108,7 @@ class ModelProxy(object):
         """Build vt_data for a sector snapshot; runs off the main thread."""
         sidefill_enabled = getattr(config, 'SKY_SIDEFILL_ENABLED', True)
         torch_fill_enabled = getattr(config, 'TORCH_FILL_ENABLED', True)
+        outgoing_boundary_only = getattr(config, 'LIGHT_OUTGOING_BOUNDARY_ONLY', True)
         def _pack_list(light_grid):
             coords = numpy.argwhere(light_grid > 0)
             if coords.size == 0:
@@ -1113,6 +1118,54 @@ class ModelProxy(object):
             out[:, :3] = coords.astype(numpy.uint8, copy=False)
             out[:, 3] = values.astype(numpy.uint8, copy=False)
             return out
+
+        def _pack_boundary(light_grid, dx, dz):
+            sx = light_grid.shape[0]
+            if dx != 0 and dz != 0:
+                x = 0 if dx < 0 else sx - 1
+                z = 0 if dz < 0 else sx - 1
+                col = light_grid[x, :, z]
+                ys = numpy.nonzero(col)[0]
+                if ys.size == 0:
+                    return EMPTY_LIGHT_LIST
+                out = numpy.empty((len(ys), 4), dtype=numpy.uint8)
+                out[:, 0] = x
+                out[:, 1] = ys.astype(numpy.uint8, copy=False)
+                out[:, 2] = z
+                out[:, 3] = col[ys].astype(numpy.uint8, copy=False)
+                return out
+            if dx != 0:
+                x = 0 if dx < 0 else sx - 1
+                plane = light_grid[x, :, :]
+                coords = numpy.argwhere(plane > 0)
+                if coords.size == 0:
+                    return EMPTY_LIGHT_LIST
+                out = numpy.empty((len(coords), 4), dtype=numpy.uint8)
+                out[:, 0] = x
+                out[:, 1] = coords[:, 0].astype(numpy.uint8, copy=False)
+                out[:, 2] = coords[:, 1].astype(numpy.uint8, copy=False)
+                out[:, 3] = plane[coords[:, 0], coords[:, 1]].astype(numpy.uint8, copy=False)
+                return out
+            z = 0 if dz < 0 else sx - 1
+            plane = light_grid[:, :, z]
+            coords = numpy.argwhere(plane > 0)
+            if coords.size == 0:
+                return EMPTY_LIGHT_LIST
+            out = numpy.empty((len(coords), 4), dtype=numpy.uint8)
+            out[:, 0] = coords[:, 0].astype(numpy.uint8, copy=False)
+            out[:, 1] = coords[:, 1].astype(numpy.uint8, copy=False)
+            out[:, 2] = z
+            out[:, 3] = plane[coords[:, 0], coords[:, 1]].astype(numpy.uint8, copy=False)
+            return out
+
+        def _pack_outgoing(light_grid):
+            if not outgoing_boundary_only:
+                outgoing_chunk = _pack_list(light_grid)
+                return {offset: outgoing_chunk for offset in NEIGHBOR_OFFSETS_8}
+            outgoing = {}
+            for dx, dz in NEIGHBOR_OFFSETS_8:
+                outgoing[(dx, dz)] = _pack_boundary(light_grid, dx, dz)
+            return outgoing
 
         def _apply_list(light_grid, entries, offset=(0, 0, 0)):
             if entries is None or len(entries) == 0:
@@ -1130,6 +1183,29 @@ class ModelProxy(object):
                 neighbor_max[:-1, :, :] = numpy.maximum(neighbor_max[:-1, :, :], light_grid[1:, :, :] - 1)
                 neighbor_max[:, :, 1:] = numpy.maximum(neighbor_max[:, :, 1:], light_grid[:, :, :-1] - 1)
                 neighbor_max[:, :, :-1] = numpy.maximum(neighbor_max[:, :, :-1], light_grid[:, :, 1:] - 1)
+                neighbor_max = numpy.maximum(neighbor_max, 0)
+                new_light = numpy.where(air_mask, numpy.maximum(light_grid, neighbor_max), 0)
+                if numpy.array_equal(new_light, light_grid):
+                    break
+                light_grid = new_light
+            return light_grid
+
+        def _relax_4way_sloped(light_grid, air_mask):
+            """Relax sideways, allowing 1-block vertical steps per lateral move."""
+            for _ in range(MAX_LIGHT - 1):
+                neighbor_max = numpy.zeros_like(light_grid)
+                neighbor_max[1:, :, :] = numpy.maximum(neighbor_max[1:, :, :], light_grid[:-1, :, :] - 1)
+                neighbor_max[:-1, :, :] = numpy.maximum(neighbor_max[:-1, :, :], light_grid[1:, :, :] - 1)
+                neighbor_max[:, :, 1:] = numpy.maximum(neighbor_max[:, :, 1:], light_grid[:, :, :-1] - 1)
+                neighbor_max[:, :, :-1] = numpy.maximum(neighbor_max[:, :, :-1], light_grid[:, :, 1:] - 1)
+                neighbor_max[1:, 1:, :] = numpy.maximum(neighbor_max[1:, 1:, :], light_grid[:-1, :-1, :] - 1)
+                neighbor_max[1:, :-1, :] = numpy.maximum(neighbor_max[1:, :-1, :], light_grid[:-1, 1:, :] - 1)
+                neighbor_max[:-1, 1:, :] = numpy.maximum(neighbor_max[:-1, 1:, :], light_grid[1:, :-1, :] - 1)
+                neighbor_max[:-1, :-1, :] = numpy.maximum(neighbor_max[:-1, :-1, :], light_grid[1:, 1:, :] - 1)
+                neighbor_max[:, 1:, 1:] = numpy.maximum(neighbor_max[:, 1:, 1:], light_grid[:, :-1, :-1] - 1)
+                neighbor_max[:, 1:, :-1] = numpy.maximum(neighbor_max[:, 1:, :-1], light_grid[:, :-1, 1:] - 1)
+                neighbor_max[:, :-1, 1:] = numpy.maximum(neighbor_max[:, :-1, 1:], light_grid[:, 1:, :-1] - 1)
+                neighbor_max[:, :-1, :-1] = numpy.maximum(neighbor_max[:, :-1, :-1], light_grid[:, 1:, 1:] - 1)
                 neighbor_max = numpy.maximum(neighbor_max, 0)
                 new_light = numpy.where(air_mask, numpy.maximum(light_grid, neighbor_max), 0)
                 if numpy.array_equal(new_light, light_grid):
@@ -1282,6 +1358,8 @@ class ModelProxy(object):
         sky_floor = internal_sky_floor
         sky_side = internal_sky_side if sidefill_enabled else EMPTY_LIGHT_LIST
         torch_side = internal_torch if torch_fill_enabled else EMPTY_LIGHT_LIST
+        edge_sky_counts = (0, 0, 0, 0)
+        edge_torch_counts = (0, 0, 0, 0)
         light_ms = 0.0
         light_torch_ms = 0.0
         light_sky_ms = 0.0
@@ -1307,12 +1385,24 @@ class ModelProxy(object):
             y_grid = numpy.arange(SECTOR_HEIGHT)[None, :, None]
             center = tile[sx:2 * sx, :, sx:2 * sx]
             use_bfs = bool(getattr(config, "LIGHT_PROPAGATION_BFS", False))
+            bfs_source_cap = getattr(config, "LIGHT_BFS_SOURCE_CAP", 4096)
             if torch_fill_enabled:
                 torch_start = time.perf_counter()
                 torch = numpy.zeros(tile.shape, dtype=numpy.int16)
                 center_torch_sources = BLOCK_LIGHT_LUT[center]
                 torch[sx:2 * sx, :, sx:2 * sx] = center_torch_sources
-                if use_bfs:
+                if incoming_torch:
+                    for (dx, dz), entries in incoming_torch.items():
+                        if entries is None or len(entries) == 0:
+                            continue
+                        _apply_list(
+                            torch,
+                            entries,
+                            offset=((dx + 1) * sx, 0, (dz + 1) * sx),
+                        )
+                torch_sources = int(numpy.count_nonzero(torch))
+                use_bfs_torch = use_bfs and (bfs_source_cap is None or torch_sources <= bfs_source_cap)
+                if use_bfs_torch:
                     if debug_light_grids:
                         debug_torch_updates = numpy.zeros(tile.shape, dtype=bool)
                     torch = _relax_bfs(
@@ -1340,36 +1430,47 @@ class ModelProxy(object):
                 sky = numpy.zeros(tile.shape, dtype=numpy.int16)
                 direct_mask = (y_grid >= sky_floor[:, None, :])
                 sky[sx:2 * sx, :, sx:2 * sx] = numpy.where(direct_mask, MAX_LIGHT, 0)
+                if incoming_sky:
+                    for (dx, dz), entries in incoming_sky.items():
+                        if entries is None or len(entries) == 0:
+                            continue
+                        _apply_list(
+                            sky,
+                            entries,
+                            offset=((dx + 1) * sx, 0, (dz + 1) * sx),
+                        )
                 sky_air_mask = air_tile & (y_grid < sky_floor_tile[:, None, :])
-                if use_bfs:
+                sky_sources = int(numpy.count_nonzero(sky))
+                use_bfs_sky = use_bfs and (bfs_source_cap is None or sky_sources <= bfs_source_cap)
+                if use_bfs_sky:
                     if debug_light_grids:
                         debug_sky_updates = numpy.zeros(tile.shape, dtype=bool)
                     sky = _relax_bfs(
                         sky,
                         sky_air_mask,
-                        ((1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)),
+                        (
+                            (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1),
+                            (1, 1, 0), (1, -1, 0), (-1, 1, 0), (-1, -1, 0),
+                            (0, 1, 1), (0, -1, 1), (0, 1, -1), (0, -1, -1),
+                        ),
                         debug_updates=debug_sky_updates,
                     )
                 else:
-                    sky = _relax_4way(sky, sky_air_mask)
+                    sky = _relax_4way_sloped(sky, sky_air_mask)
                 if debug_light_grids:
                     debug_sky = sky
                     debug_sky_direct = numpy.zeros(tile.shape, dtype=bool)
                     debug_sky_direct[sx:2 * sx, :, sx:2 * sx] = direct_mask
                 center_sky = sky[sx:2 * sx, :, sx:2 * sx]
                 sky_side = _pack_list(numpy.where(direct_mask, 0, center_sky))
-                outgoing_sky_chunk = _pack_list(center_sky)
-                for dx, dz in NEIGHBOR_OFFSETS_8:
-                    outgoing_sky[(dx, dz)] = outgoing_sky_chunk
+                outgoing_sky = _pack_outgoing(center_sky)
             else:
                 sky_side = EMPTY_LIGHT_LIST
             light_sky_ms = (time.perf_counter() - sky_start) * 1000.0
             if torch_fill_enabled:
                 center_torch = torch[sx:2 * sx, :, sx:2 * sx]
                 torch_side = _pack_list(center_torch)
-                outgoing_torch_chunk = _pack_list(center_torch)
-                for dx, dz in NEIGHBOR_OFFSETS_8:
-                    outgoing_torch[(dx, dz)] = outgoing_torch_chunk
+                outgoing_torch = _pack_outgoing(center_torch)
             else:
                 torch_side = EMPTY_LIGHT_LIST
             if not sidefill_enabled and not torch_fill_enabled:
@@ -1384,6 +1485,8 @@ class ModelProxy(object):
                 "torch_side": torch_side,
                 "outgoing_sky": outgoing_sky,
                 "outgoing_torch": outgoing_torch,
+                "edge_sky_counts": edge_sky_counts,
+                "edge_torch_counts": edge_torch_counts,
                 "light_ms": light_ms,
                 "light_torch_ms": light_torch_ms,
                 "light_sky_ms": light_sky_ms,
@@ -1441,6 +1544,18 @@ class ModelProxy(object):
         if MAX_LIGHT > 0:
             torch_full /= float(MAX_LIGHT)
             sky_full /= float(MAX_LIGHT)
+        edge_torch_counts = (
+            int(numpy.count_nonzero(torch_full[0, :, :])),
+            int(numpy.count_nonzero(torch_full[-1, :, :])),
+            int(numpy.count_nonzero(torch_full[:, :, 0])),
+            int(numpy.count_nonzero(torch_full[:, :, -1])),
+        )
+        edge_sky_counts = (
+            int(numpy.count_nonzero(sky_full[0, :, :])),
+            int(numpy.count_nonzero(sky_full[-1, :, :])),
+            int(numpy.count_nonzero(sky_full[:, :, 0])),
+            int(numpy.count_nonzero(sky_full[:, :, -1])),
+        )
 
         exposed_torch = numpy.zeros(blocks.shape + (6,), dtype=numpy.float32)
         exposed_sky = numpy.zeros(blocks.shape + (6,), dtype=numpy.float32)
@@ -1591,6 +1706,8 @@ class ModelProxy(object):
             "torch_side": torch_side,
             "outgoing_sky": outgoing_sky,
             "outgoing_torch": outgoing_torch,
+            "edge_sky_counts": edge_sky_counts,
+            "edge_torch_counts": edge_torch_counts,
             "light_ms": light_ms,
             "light_torch_ms": light_torch_ms,
             "light_sky_ms": light_sky_ms,
@@ -1639,31 +1756,41 @@ class ModelProxy(object):
             return
         use_priority = sector.mesh_job_priority or priority
         if self.mesh_active_jobs >= self.mesh_active_cap:
+            self._defer_mesh_job(sector, priority=use_priority)
             return
         sector.mesh_job_pending = True
         sector.mesh_job_dirty = False
         sector.mesh_gen += 1
         recompute_internal = sector.light_dirty_internal
         build_mesh = sector.shown
-        if build_mesh and not use_priority and not self._neighbors_have_light(sector):
+        if build_mesh and sector.light_dirty_internal and not self._neighbors_have_light(sector):
             build_mesh = False
         require_diagonals = recompute_internal
         if build_mesh or recompute_internal:
             if not self._neighbors_ready(sector, require_diagonals=require_diagonals):
                 sector.mesh_job_pending = False
+                self._defer_mesh_job(sector, priority=use_priority)
                 return
         if recompute_internal and not self._neighbors_ready(sector, require_diagonals=True):
             recompute_internal = False
             sector.light_dirty_internal = True
             sector.light_neighbors_ready = False
+        if build_mesh and sector.light_dirty_internal:
+            build_mesh = False
         if not build_mesh and not recompute_internal:
             sector.mesh_job_pending = False
+            if sector.invalidate_vt or sector.vt_data is None:
+                self._defer_mesh_job(sector, priority=use_priority)
             return
         light_blocks = None
         if recompute_internal:
             light_blocks = self._gather_blocks_tile_3x3(sector, allow_missing=False)
             sector.light_neighbors_ready = True
         blocks = None
+        incoming_sky = sector.incoming_sky
+        incoming_torch = sector.incoming_torch
+        if build_mesh or recompute_internal:
+            incoming_sky, incoming_torch = self._build_incoming_from_neighbors(sector)
         if build_mesh:
             blocks = self._gather_blocks_halo(sector, require_diagonals=False)
             if blocks is None:
@@ -1672,6 +1799,7 @@ class ModelProxy(object):
                     blocks = None
                 else:
                     sector.mesh_job_pending = False
+                    self._defer_mesh_job(sector, priority=use_priority)
                     return
         self.mesh_jobs_submitted_total += 1
         ao_strength = getattr(config, 'AO_STRENGTH', 0.0)
@@ -1691,8 +1819,8 @@ class ModelProxy(object):
                 ao_strength,
                 ao_enabled,
                 ambient,
-                sector.incoming_sky,
-                sector.incoming_torch,
+                incoming_sky,
+                incoming_torch,
                 sector.sky_floor,
                 sector.sky_side,
                 sector.torch_side,
@@ -1714,8 +1842,8 @@ class ModelProxy(object):
                   ao_strength,
                 ao_enabled,
                 ambient,
-                sector.incoming_sky,
-                sector.incoming_torch,
+                incoming_sky,
+                incoming_torch,
                 sector.sky_floor,
                   sector.sky_side,
                 sector.torch_side,
@@ -1783,13 +1911,29 @@ class ModelProxy(object):
             sector.sky_floor = result.get("sky_floor", sector.sky_floor)
             sector.sky_side = result.get("sky_side", sector.sky_side)
             sector.torch_side = result.get("torch_side", sector.torch_side)
+            sector.edge_sky_counts = result.get("edge_sky_counts", sector.edge_sky_counts)
+            sector.edge_torch_counts = result.get("edge_torch_counts", sector.edge_torch_counts)
             sector.light_dirty_internal = False
             sector.light_dirty_incoming = False
             outgoing_sky = result.get("outgoing_sky") or {}
             outgoing_torch = result.get("outgoing_torch") or {}
             if outgoing_sky or outgoing_torch:
                 self._apply_outgoing_light(sector, outgoing_sky, outgoing_torch)
+            if light_ms > 0.0 and getattr(config, "LIGHT_PULL_BOUNDARY_FROM_NEIGHBORS", True):
+                x0, _, z0 = sector.position
+                for dx, dz in NEIGHBOR_OFFSETS_8:
+                    npos = (x0 + dx * SECTOR_SIZE, 0, z0 + dz * SECTOR_SIZE)
+                    neighbor = self.sectors.get(npos)
+                    if neighbor is None or not neighbor.shown:
+                        continue
+                    # Onion rule: only re-mesh when neighbor light ring is complete.
+                    if neighbor.light_dirty_internal or not self._neighbors_have_light(neighbor):
+                        continue
+                    neighbor.invalidate()
+                    self._submit_mesh_job(neighbor, priority=neighbor.edit_inflight)
             if result["vt_data"] is None:
+                if sector.shown and self._neighbors_have_light(sector):
+                    self._submit_mesh_job(sector, priority=sector.edit_inflight)
                 continue
             if elapsed_ms is not None:
                 mesh_ms = max(0.0, elapsed_ms - light_ms)
@@ -1837,16 +1981,21 @@ class ModelProxy(object):
                 old_sky = neighbor.incoming_sky[key]
                 if not _light_list_equal(old_sky, new_sky):
                     neighbor.incoming_sky[key] = new_sky
+                    neighbor.incoming_sky_updates += 1
                     changed = True
             if key in neighbor.incoming_torch:
                 new_torch = outgoing_torch.get((dx, dz), EMPTY_LIGHT_LIST)
                 old_torch = neighbor.incoming_torch[key]
                 if not _light_list_equal(old_torch, new_torch):
                     neighbor.incoming_torch[key] = new_torch
+                    neighbor.incoming_torch_updates += 1
                     changed = True
             if not changed:
                 continue
             neighbor.light_dirty_incoming = True
+            if not neighbor.light_dirty_internal and self._neighbors_ready(neighbor, require_diagonals=True):
+                neighbor.light_dirty_internal = True
+                neighbor.light_neighbors_ready = False
             neighbor.invalidate()
             if neighbor.shown:
                 self._submit_mesh_job(neighbor, priority=neighbor.edit_inflight)
@@ -2420,8 +2569,11 @@ class ModelProxy(object):
         for sector in self.sectors.values():
             if sector.mesh_job_pending:
                 continue
-            if sector.vt_data is None:
+            needs_mesh = sector.vt_data is None or sector.invalidate_vt
+            if needs_mesh:
                 if not self._mesh_ready(sector):
+                    continue
+                if sector.light_dirty_internal and not self._neighbors_have_light(sector):
                     continue
             else:
                 if not (self._needs_light(sector) and self._lighting_ready(sector)):
@@ -2486,6 +2638,128 @@ class ModelProxy(object):
         ]
         return all(p in self.sectors for p in diag)
 
+    def _pack_plane_entries(self, plane, x_fixed=None, z_fixed=None):
+        coords = numpy.argwhere(plane > 0)
+        if coords.size == 0:
+            return EMPTY_LIGHT_LIST
+        out = numpy.empty((len(coords), 4), dtype=numpy.uint8)
+        if x_fixed is not None:
+            out[:, 0] = x_fixed
+            out[:, 1] = coords[:, 0].astype(numpy.uint8, copy=False)
+            out[:, 2] = coords[:, 1].astype(numpy.uint8, copy=False)
+            out[:, 3] = plane[coords[:, 0], coords[:, 1]].astype(numpy.uint8, copy=False)
+        else:
+            out[:, 0] = coords[:, 1].astype(numpy.uint8, copy=False)
+            out[:, 1] = coords[:, 0].astype(numpy.uint8, copy=False)
+            out[:, 2] = z_fixed
+            out[:, 3] = plane[coords[:, 0], coords[:, 1]].astype(numpy.uint8, copy=False)
+        return out
+
+    def _pack_line_entries(self, line, x_fixed, z_fixed):
+        ys = numpy.nonzero(line)[0]
+        if ys.size == 0:
+            return EMPTY_LIGHT_LIST
+        out = numpy.empty((len(ys), 4), dtype=numpy.uint8)
+        out[:, 0] = x_fixed
+        out[:, 1] = ys.astype(numpy.uint8, copy=False)
+        out[:, 2] = z_fixed
+        out[:, 3] = line[ys].astype(numpy.uint8, copy=False)
+        return out
+
+    def _boundary_sky_entries(self, neighbor, dx, dz):
+        sx = SECTOR_SIZE
+        sy = SECTOR_HEIGHT
+        sky_floor = neighbor.sky_floor
+        sky_side = neighbor.sky_side
+        y_grid = numpy.arange(sy)[:, None]
+        if dx != 0 and dz != 0:
+            x = 0 if dx > 0 else sx - 1
+            z = 0 if dz > 0 else sx - 1
+            floor_val = sky_floor[x, z]
+            line = numpy.where(y_grid[:, 0] >= floor_val, MAX_LIGHT, 0).astype(numpy.uint8)
+            if sky_side is not None and len(sky_side):
+                mask = (sky_side[:, 0] == x) & (sky_side[:, 2] == z)
+                if mask.any():
+                    entries = sky_side[mask]
+                    line[entries[:, 1]] = numpy.maximum(line[entries[:, 1]], entries[:, 3])
+            return self._pack_line_entries(line, x, z)
+        if dx != 0:
+            x = 0 if dx > 0 else sx - 1
+            floor_col = sky_floor[x, :]
+            plane = numpy.where(y_grid >= floor_col[None, :], MAX_LIGHT, 0).astype(numpy.uint8)
+            if sky_side is not None and len(sky_side):
+                mask = (sky_side[:, 0] == x)
+                if mask.any():
+                    entries = sky_side[mask]
+                    plane[entries[:, 1], entries[:, 2]] = numpy.maximum(
+                        plane[entries[:, 1], entries[:, 2]], entries[:, 3]
+                    )
+            return self._pack_plane_entries(plane, x_fixed=x)
+        z = 0 if dz > 0 else sx - 1
+        floor_row = sky_floor[:, z]
+        plane = numpy.where(y_grid >= floor_row[None, :], MAX_LIGHT, 0).astype(numpy.uint8)
+        if sky_side is not None and len(sky_side):
+            mask = (sky_side[:, 2] == z)
+            if mask.any():
+                entries = sky_side[mask]
+                plane[entries[:, 1], entries[:, 0]] = numpy.maximum(
+                    plane[entries[:, 1], entries[:, 0]], entries[:, 3]
+                )
+        return self._pack_plane_entries(plane, z_fixed=z)
+
+    def _boundary_torch_entries(self, neighbor, dx, dz):
+        sx = SECTOR_SIZE
+        sy = SECTOR_HEIGHT
+        torch_side = neighbor.torch_side
+        if torch_side is None or len(torch_side) == 0:
+            return EMPTY_LIGHT_LIST
+        if dx != 0 and dz != 0:
+            x = 0 if dx > 0 else sx - 1
+            z = 0 if dz > 0 else sx - 1
+            mask = (torch_side[:, 0] == x) & (torch_side[:, 2] == z)
+            if not mask.any():
+                return EMPTY_LIGHT_LIST
+            entries = torch_side[mask]
+            line = numpy.zeros((sy,), dtype=numpy.uint8)
+            line[entries[:, 1]] = numpy.maximum(line[entries[:, 1]], entries[:, 3])
+            return self._pack_line_entries(line, x, z)
+        if dx != 0:
+            x = 0 if dx > 0 else sx - 1
+            mask = (torch_side[:, 0] == x)
+            if not mask.any():
+                return EMPTY_LIGHT_LIST
+            entries = torch_side[mask]
+            plane = numpy.zeros((sy, sx), dtype=numpy.uint8)
+            plane[entries[:, 1], entries[:, 2]] = numpy.maximum(
+                plane[entries[:, 1], entries[:, 2]], entries[:, 3]
+            )
+            return self._pack_plane_entries(plane, x_fixed=x)
+        z = 0 if dz > 0 else sx - 1
+        mask = (torch_side[:, 2] == z)
+        if not mask.any():
+            return EMPTY_LIGHT_LIST
+        entries = torch_side[mask]
+        plane = numpy.zeros((sy, sx), dtype=numpy.uint8)
+        plane[entries[:, 1], entries[:, 0]] = numpy.maximum(
+            plane[entries[:, 1], entries[:, 0]], entries[:, 3]
+        )
+        return self._pack_plane_entries(plane, z_fixed=z)
+
+    def _build_incoming_from_neighbors(self, sector):
+        if not getattr(config, 'LIGHT_PULL_BOUNDARY_FROM_NEIGHBORS', True):
+            return sector.incoming_sky, sector.incoming_torch
+        incoming_sky = dict(sector.incoming_sky)
+        incoming_torch = dict(sector.incoming_torch)
+        x0, _, z0 = sector.position
+        for dx, dz in NEIGHBOR_OFFSETS_8:
+            npos = (x0 + dx * SECTOR_SIZE, 0, z0 + dz * SECTOR_SIZE)
+            neighbor = self.sectors.get(npos)
+            if neighbor is None or neighbor.light_dirty_internal:
+                continue
+            incoming_sky[(dx, dz)] = self._boundary_sky_entries(neighbor, dx, dz)
+            incoming_torch[(dx, dz)] = self._boundary_torch_entries(neighbor, dx, dz)
+        return incoming_sky, incoming_torch
+
     def _gather_blocks_halo(self, sector, require_diagonals=True):
         """Assemble a temporary padded blocks array from neighbors."""
         if not self._neighbors_ready(sector, require_diagonals=require_diagonals):
@@ -2548,9 +2822,12 @@ class ModelProxy(object):
         sector.light_dirty_internal = True
         if sector.shown:
             if priority and self._neighbors_ready(sector, require_diagonals=False):
-                self._rebuild_sector_now_fast(sector, priority=True)
-                self._defer_work_frame = self.frame_id
-                self._defer_mesh_job(sector, priority=True)
+                if self._neighbors_have_light(sector) and not self._needs_light(sector):
+                    self._rebuild_sector_now_fast(sector, priority=True)
+                    self._defer_work_frame = self.frame_id
+                    self._defer_mesh_job(sector, priority=True)
+                else:
+                    self._submit_mesh_job(sector, priority=priority)
             else:
                 self._submit_mesh_job(sector, priority=priority)
         on_edge = True
@@ -2569,9 +2846,12 @@ class ModelProxy(object):
             n.invalidate()
             if n.shown:
                 if priority and self._neighbors_ready(n, require_diagonals=False):
-                    self._rebuild_sector_now_fast(n, priority=True)
-                    self._defer_work_frame = self.frame_id
-                    self._defer_mesh_job(n, priority=True)
+                    if self._neighbors_have_light(n) and not self._needs_light(n):
+                        self._rebuild_sector_now_fast(n, priority=True)
+                        self._defer_work_frame = self.frame_id
+                        self._defer_mesh_job(n, priority=True)
+                    else:
+                        self._submit_mesh_job(n, priority=priority)
                 else:
                     self._submit_mesh_job(n, priority=priority)
 
@@ -2894,6 +3174,10 @@ class ModelProxy(object):
                 s.sky_floor[:] = 0
                 s.sky_side = EMPTY_LIGHT_LIST
                 s.torch_side = EMPTY_LIGHT_LIST
+                s.incoming_sky_updates = 0
+                s.incoming_torch_updates = 0
+                s.edge_sky_counts = (0, 0, 0, 0)
+                s.edge_torch_counts = (0, 0, 0, 0)
                 s.light_dirty_internal = True
                 s.light_dirty_incoming = True
                 s.light_neighbors_ready = False
@@ -2921,6 +3205,10 @@ class ModelProxy(object):
                     s.vt_upload_prepared = False
                 s.vt_clear_pending = True
                 s.light_neighbors_ready = False
+                s.incoming_sky_updates = 0
+                s.incoming_torch_updates = 0
+                s.edge_sky_counts = (0, 0, 0, 0)
+                s.edge_torch_counts = (0, 0, 0, 0)
                 self.sectors[sectorize(spos)] = s
                 self._invalidate_and_rebuild(s)
                 self._mark_neighbor_outgoing_dirty(s.position)

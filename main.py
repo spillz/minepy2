@@ -1851,6 +1851,15 @@ class Window(pyglet.window.Window):
                         waiting = "light_recalc"
                     else:
                         waiting = "idle"
+                    def _incoming_stats(incoming):
+                        nonempty = 0
+                        total_entries = 0
+                        for entries in incoming.values():
+                            if entries is None or len(entries) == 0:
+                                continue
+                            nonempty += 1
+                            total_entries += len(entries)
+                        return nonempty, total_entries
 
                     def _quad_count(entry):
                         if not entry or entry[0] <= 0:
@@ -1901,6 +1910,12 @@ class Window(pyglet.window.Window):
                     active_token_text = "None" if active_token is None else str(active_token)
                     dirty = "Y" if s.mesh_job_dirty else "N"
                     inflight = "Y" if s.edit_inflight else "N"
+                    sky_nonempty, sky_entries = _incoming_stats(s.incoming_sky)
+                    torch_nonempty, torch_entries = _incoming_stats(s.incoming_torch)
+                    sky_updates = getattr(s, "incoming_sky_updates", 0)
+                    torch_updates = getattr(s, "incoming_torch_updates", 0)
+                    edge_sky_counts = getattr(s, "edge_sky_counts", (0, 0, 0, 0))
+                    edge_torch_counts = getattr(s, "edge_torch_counts", (0, 0, 0, 0))
 
                     sector_state.append(
                         f"light={light} mesh_ready={'Y' if mesh_ready else 'N'} "
@@ -1910,6 +1925,17 @@ class Window(pyglet.window.Window):
                         f"verts={solid_verts}/{water_verts} "
                         f"upload={upload_solid}/{upload_water} "
                         f"{vt_info} wait={waiting}"
+                    )
+                    sector_state.append(
+                        f"edge_sky={sky_nonempty}/8 e={sky_entries} u={sky_updates} "
+                        f"edge_torch={torch_nonempty}/8 e={torch_entries} u={torch_updates}"
+                    )
+                    sector_state.append(
+                        "edge_use sky(W/E/N/S)=%d/%d/%d/%d torch(W/E/N/S)=%d/%d/%d/%d"
+                        % (
+                            edge_sky_counts[0], edge_sky_counts[1], edge_sky_counts[2], edge_sky_counts[3],
+                            edge_torch_counts[0], edge_torch_counts[1], edge_torch_counts[2], edge_torch_counts[3],
+                        )
                     )
                     sector_debug.append(
                         f"tris={solid_tris_actual}/{solid_tris_expected} verts={solid_verts}/"
@@ -2079,6 +2105,9 @@ class Window(pyglet.window.Window):
         layout_dirty |= self._set_label_text(self.keybind_label, keybind_text)
         if hud_profile:
             _profile_mark("set_label_keybind")
+
+        if layout_dirty:
+            self._hud_layout_dirty = True
 
         if self._hud_layout_dirty:
             wrap_width = max(120, self.width - 20)
