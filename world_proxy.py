@@ -1804,6 +1804,15 @@ class ModelProxy(object):
             sky_faces = numpy.take_along_axis(sky_flat, face_dirs, axis=1)
             torch_light = torch_faces[:, :, None, None]  # (N,max_faces,1,1)
             sky_light = sky_faces[:, :, None, None]
+            try:
+                light_gamma = float(getattr(config, 'LIGHT_GAMMA', 1.0))
+            except Exception:
+                light_gamma = 1.0
+            if light_gamma < 0.01:
+                light_gamma = 0.01
+            if abs(light_gamma - 1.0) > 1e-6:
+                torch_light = torch_light ** light_gamma
+                sky_light = sky_light ** light_gamma
             if ao is not None:
                 ao_faces = numpy.take_along_axis(ao, face_dirs[:, :, None], axis=1)
                 ao_flat = numpy.where(face_mask[..., None], ao_faces, 1.0)

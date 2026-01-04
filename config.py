@@ -152,6 +152,7 @@ MAX_SEAM_REBUILDS_PER_TICK = None
 AMBIENT_LIGHT = 0.1  # minimum light level (0-1 range)
 MAX_LIGHT = 15  # integer light level range (0..MAX_LIGHT)
 SKY_INTENSITY = 1.0  # global sky light multiplier (0..1)
+LIGHT_GAMMA = 3.0  # 1.0 = linear, 2.0 = quadratic falloff
 SKY_SIDEFILL_ENABLED = True  # indirect sky light from sides/seams
 TORCH_FILL_ENABLED = True # torch light propagation to nearby blocks
 LIGHT_PROPAGATION_BFS = True  # use numpy frontier BFS instead of dense relaxation
@@ -164,7 +165,7 @@ DAY_LENGTH_SECONDS = 1200.0
 DAY_START_PHASE = 0.0  # 0.0 = midday, 0.5 = midnight
 DAY_LIGHT_CURVE = 1.0  # >1.0 darkens nights, <1.0 brightens nights
 SUN_LIGHT_DIR = (0.35, 1.0, 0.65)  # midday light direction (x, y, z)
-DAY_AMBIENT_LIGHT = 0.18
+DAY_AMBIENT_LIGHT = 0.1
 NIGHT_AMBIENT_LIGHT = 0.06
 DAY_SKY_INTENSITY = 1.0
 NIGHT_SKY_INTENSITY = 0.25
