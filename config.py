@@ -29,6 +29,11 @@ WATER_COLOR = [40,90,128]
 WATER_ALPHA  = 0.95
 UNDERWATER_COLOR =  [70,128,168, 228]#
 
+FOCUSED_BLOCK_OUTLINE_PAD = 0.02
+FOCUSED_BLOCK_FACE_PAD = 0.03
+FOCUSED_BLOCK_OUTLINE_COLOR = (255, 255, 255, 255)
+FOCUSED_BLOCK_FACE_COLOR = (255, 210, 80, 255)
+
 GRAVITY = 20.0
 MAX_JUMP_HEIGHT = 1.0 # About the height of a block.
 # To derive the formula for calculating jump speed, first solve

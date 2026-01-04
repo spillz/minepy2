@@ -48,6 +48,8 @@ from blocks import (
     BLOCK_COLORS,
     BLOCK_SOLID,
     BLOCK_COLLIDES,
+    _mesh_aabb_min as BLOCK_RENDER_AABB_MIN,
+    _mesh_aabb_max as BLOCK_RENDER_AABB_MAX,
     BLOCK_PICKER_FACE,
     BLOCK_INVENTORY,
     ORIENTED_BLOCK_IDS,
@@ -66,6 +68,15 @@ from blocks import (
     STAIR_BASE_IDS,
     STAIR_ORIENTED_IDS,
     STAIR_ORIENTED_UP_IDS,
+)
+
+FOCUSED_BLOCK_EDGES = np.array(
+    [
+        [0, 1], [1, 2], [2, 3], [3, 0],
+        [4, 5], [5, 6], [6, 7], [7, 4],
+        [0, 4], [1, 5], [2, 6], [3, 7],
+    ],
+    dtype=np.int32,
 )
 WATER = BLOCK_ID['Water']
 
@@ -182,6 +193,8 @@ class Window(pyglet.window.Window):
 
         # Instance of the model that handles the world.
         self.model = world.ModelProxy(self.block_program)
+        self._focus_outline_vlist = None
+        self._focus_face_vlist = None
 
         # Entity rendering setup
         saved_player_state = world_entity_store.load_entity_state("player")
@@ -1103,6 +1116,11 @@ class Window(pyglet.window.Window):
                             self.model.add_blocks(updates, priority=True)
                             return
                 if previous:
+                    if block is None:
+                        return
+                    support_id = self.model[block]
+                    if not BLOCK_SOLID[support_id]:
+                        return
                     px, py, pz = util.normalize(self.position)
                     if not (previous == (px, py, pz) or previous == (px, py-1, pz)):
                         block_id = BLOCK_ID[self.block]
@@ -2256,7 +2274,145 @@ class Window(pyglet.window.Window):
 
     def draw_focused_block(self):
         """ Draw edges around the block under the crosshairs for placement feedback. """
-        return  # temporarily disabled due to pyglet draw API mismatch
+        if not self.exclusive or self.camera_mode != 'first_person':
+            return
+
+        vector = self.get_sight_vector()
+        _, _, eye = self.get_view_projection()  # eye is Vec3
+        hit_origin = (eye.x, eye.y, eye.z)
+        block, previous = self.model.hit_test(hit_origin, vector)
+        if not block:
+            return
+
+        block_id = self.model[block]
+        if block_id is None or block_id == 0:
+            return
+
+        self.set_3d()
+        self._ensure_focus_vlists()
+
+        block_pos = np.array(block, dtype='f4')
+        render_min = BLOCK_RENDER_AABB_MIN[block_id]
+        render_max = BLOCK_RENDER_AABB_MAX[block_id]
+        outline_pad = getattr(config, "FOCUSED_BLOCK_OUTLINE_PAD", 0.02)
+        outline_min = render_min - outline_pad
+        outline_max = render_max + outline_pad
+        outline_world_min = block_pos + outline_min
+        outline_world_max = block_pos + outline_max
+        outline_positions = self._build_focus_outline_positions(outline_world_min, outline_world_max)
+        self._focus_outline_vlist.position[:] = outline_positions.ravel()
+
+        self.block_program.bind()
+        self.block_program['u_use_texture'] = False
+        self.block_program['u_use_vertex_color'] = True
+        self._focus_outline_vlist.draw(gl.GL_LINES)
+
+        if previous is not None and BLOCK_SOLID[block_id]:
+            face = (
+                previous[0] - block[0],
+                previous[1] - block[1],
+                previous[2] - block[2],
+            )
+            if abs(face[0]) + abs(face[1]) + abs(face[2]) == 1:
+                face_pad = getattr(config, "FOCUSED_BLOCK_FACE_PAD", 0.03)
+                face_positions, face_normal = self._build_focus_face_cross_positions(
+                    block_pos + render_min,
+                    block_pos + render_max,
+                    face,
+                    face_pad,
+                )
+                self._focus_face_vlist.position[:] = face_positions.ravel()
+                self._focus_face_vlist.normal[:] = np.tile(face_normal, (4, 1)).ravel()
+                self._focus_face_vlist.draw(gl.GL_LINES)
+
+        self.block_program['u_use_texture'] = True
+        self.block_program.unbind()
+
+    def _ensure_focus_vlists(self):
+        if self._focus_outline_vlist is None:
+            outline_pos = np.zeros((24, 3), dtype='f4')
+            outline_tex = np.zeros((24, 2), dtype='f4')
+            outline_norm = np.tile(np.array([0.0, 1.0, 0.0], dtype='f4'), (24, 1))
+            outline_color = np.tile(
+                np.array(getattr(config, "FOCUSED_BLOCK_OUTLINE_COLOR", (255, 255, 255, 255)), dtype='f4'),
+                (24, 1),
+            )
+            outline_light = np.ones((24, 2), dtype='f4')
+            self._focus_outline_vlist = self.block_program.vertex_list(
+                24,
+                gl.GL_LINES,
+                position=('f', outline_pos.ravel()),
+                tex_coords=('f', outline_tex.ravel()),
+                normal=('f', outline_norm.ravel()),
+                color=('f', outline_color.ravel()),
+                light=('f', outline_light.ravel()),
+            )
+        if self._focus_face_vlist is None:
+            face_pos = np.zeros((4, 3), dtype='f4')
+            face_tex = np.zeros((4, 2), dtype='f4')
+            face_norm = np.tile(np.array([0.0, 1.0, 0.0], dtype='f4'), (4, 1))
+            face_color = np.tile(
+                np.array(getattr(config, "FOCUSED_BLOCK_FACE_COLOR", (255, 210, 80, 255)), dtype='f4'),
+                (4, 1),
+            )
+            face_light = np.ones((4, 2), dtype='f4')
+            self._focus_face_vlist = self.block_program.vertex_list(
+                4,
+                gl.GL_LINES,
+                position=('f', face_pos.ravel()),
+                tex_coords=('f', face_tex.ravel()),
+                normal=('f', face_norm.ravel()),
+                color=('f', face_color.ravel()),
+                light=('f', face_light.ravel()),
+            )
+
+    def _build_focus_outline_positions(self, min_v, max_v):
+        x0, y0, z0 = min_v
+        x1, y1, z1 = max_v
+        corners = np.array(
+            [
+                [x0, y0, z0],
+                [x1, y0, z0],
+                [x1, y1, z0],
+                [x0, y1, z0],
+                [x0, y0, z1],
+                [x1, y0, z1],
+                [x1, y1, z1],
+                [x0, y1, z1],
+            ],
+            dtype='f4',
+        )
+        return corners[FOCUSED_BLOCK_EDGES].reshape(-1, 3)
+
+    def _build_focus_face_cross_positions(self, min_v, max_v, face, pad):
+        dx, dy, dz = face
+        x0, y0, z0 = min_v
+        x1, y1, z1 = max_v
+        if dx != 0:
+            x = (x0 if dx < 0 else x1) + dx * pad
+            ym = 0.5 * (y0 + y1)
+            zm = 0.5 * (z0 + z1)
+            positions = np.array(
+                [[x, ym, z0], [x, ym, z1], [x, y0, zm], [x, y1, zm]],
+                dtype='f4',
+            )
+        elif dy != 0:
+            y = (y0 if dy < 0 else y1) + dy * pad
+            xm = 0.5 * (x0 + x1)
+            zm = 0.5 * (z0 + z1)
+            positions = np.array(
+                [[x0, y, zm], [x1, y, zm], [xm, y, z0], [xm, y, z1]],
+                dtype='f4',
+            )
+        else:
+            z = (z0 if dz < 0 else z1) + dz * pad
+            xm = 0.5 * (x0 + x1)
+            ym = 0.5 * (y0 + y1)
+            positions = np.array(
+                [[x0, ym, z], [x1, ym, z], [xm, y0, z], [xm, y1, z]],
+                dtype='f4',
+            )
+        return positions, np.array([dx, dy, dz], dtype='f4')
 
     def draw_reticle(self):
         """ Draw the crosshairs in the center of the screen.

@@ -337,6 +337,7 @@ class WallTorch(Block):
     occludes = False
     glow = 1.0
     collision = 'mesh'
+    picker_face = 2
 
 class WallTorchSouth(WallTorch):
     name = 'Wall Torch South'
