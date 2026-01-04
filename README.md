@@ -1,6 +1,6 @@
 # Minepy
 
-Minepy is a fork of a fork of fogleman's simple Minecraft-inspired voxel world demo (https://github.com/fogleman/minecraft) written in Python. 12 years ago, I started working on the original fork with the help of my 6 and 7 year old sons and abruptly stopped for various reasons. On an AI-inspired impulse, I have decided to revisit it in late 2025. In that time, Python 2 was long ago replaced by Python 3, Pyglet 1 (fixed function graphic pipeline) by Pylet 2 (Shaders!), and the world has moved on from Minecraft clones!
+Minepy is a fork of a fork of fogleman's simple Minecraft-inspired voxel world demo (https://github.com/fogleman/minecraft) written in Python. 12 years ago, I started working on the original fork with the help of my then 6 and 7 year old sons and abruptly stopped for various reasons. On an AI-inspired impulse, I have decided to revisit it in late 2025. In that time, Python 2 was long ago replaced by Python 3, Pyglet 1 (fixed function graphic pipeline) by Pyglet 2 (Shaders!), and the world has moved on from Minecraft clones!
 
 ![Scene 1](screenshots/scene1.png)
 
