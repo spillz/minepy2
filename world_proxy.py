@@ -138,6 +138,8 @@ class SectorProxy(object):
         self.incoming_torch_updates = 0
         self.edge_sky_counts = (0, 0, 0, 0)
         self.edge_torch_counts = (0, 0, 0, 0)
+        self.defer_upload = False
+        self.edit_group_id = None
         self.light_dirty_internal = True
         self.light_dirty_incoming = True
         self.light_neighbors_ready = False
@@ -578,6 +580,13 @@ class ModelProxy(object):
         self._loader_thread = None
         self._defer_work_frame = -1
         self._deferred_mesh_jobs = {}
+        self._priority_light_queue = deque()
+        self._priority_light_set = set()
+        self._priority_mesh_queue = deque()
+        self._priority_mesh_set = set()
+        self._edit_group_id = 0
+        self._edit_group_members = {}
+        self._edit_group_pending = {}
         self.stats_shown_sectors = 0
         self.stats_total_sectors = 0
         self.stats_drawn_tris_solid = 0
@@ -834,6 +843,158 @@ class ModelProxy(object):
             return
         prev = self._deferred_mesh_jobs.get(sector, False)
         self._deferred_mesh_jobs[sector] = prev or bool(priority)
+
+    def _remove_from_edit_group(self, sector):
+        gid = getattr(sector, "edit_group_id", None)
+        if gid is None:
+            return
+        pending = self._edit_group_pending.get(gid)
+        if pending is not None:
+            pending.discard(sector)
+        members = self._edit_group_members.get(gid)
+        if members is not None:
+            members.discard(sector)
+        sector.edit_group_id = None
+
+    def _start_edge_edit_group(self, sectors):
+        self._edit_group_id += 1
+        gid = self._edit_group_id
+        members = set()
+        for sector in sectors:
+            if sector is None:
+                continue
+            self._remove_from_edit_group(sector)
+            sector.defer_upload = True
+            sector.edit_group_id = gid
+            members.add(sector)
+        if members:
+            self._edit_group_members[gid] = set(members)
+            self._edit_group_pending[gid] = set(members)
+        return gid
+
+    def _mark_edit_group_complete(self, sector):
+        gid = getattr(sector, "edit_group_id", None)
+        if gid is None:
+            sector.defer_upload = False
+            return
+        pending = self._edit_group_pending.get(gid)
+        if pending is None:
+            sector.defer_upload = False
+            sector.edit_group_id = None
+            return
+        pending.discard(sector)
+        if pending:
+            return
+        members = self._edit_group_members.pop(gid, set())
+        self._edit_group_pending.pop(gid, None)
+        for member in members:
+            if member is None:
+                continue
+            member.defer_upload = False
+            member.edit_group_id = None
+            if member.shown:
+                self._queue_upload(member, priority=True)
+
+    def _queue_priority_light(self, sector):
+        if sector is None:
+            return
+        if sector in self._priority_light_set:
+            return
+        self._priority_light_set.add(sector)
+        self._priority_light_queue.append(sector)
+
+    def _queue_priority_mesh(self, sector):
+        if sector is None:
+            return
+        if sector in self._priority_mesh_set:
+            return
+        self._priority_mesh_set.add(sector)
+        self._priority_mesh_queue.append(sector)
+
+    def _process_priority_work(self):
+        """Run priority light/mesh steps on the main thread within a small budget."""
+        start = time.perf_counter()
+        budget_ms = float(getattr(config, 'PRIORITY_WORK_BUDGET_MS', 1.5))
+        did_work = False
+        while True:
+            if (time.perf_counter() - start) * 1000.0 >= budget_ms:
+                return did_work
+            if self._priority_light_queue:
+                sector = self._priority_light_queue.popleft()
+                self._priority_light_set.discard(sector)
+                if sector.mesh_job_pending:
+                    self._queue_priority_light(sector)
+                    did_work = True
+                    continue
+                if not self._neighbors_ready(sector, require_diagonals=True):
+                    self._queue_priority_light(sector)
+                    did_work = True
+                    continue
+                light_blocks = self._gather_blocks_tile_3x3(sector, allow_missing=False)
+                if light_blocks is None:
+                    self._queue_priority_light(sector)
+                    did_work = True
+                    continue
+                incoming_sky, incoming_torch = self._build_incoming_from_neighbors(sector)
+                ao_strength = getattr(config, 'AO_STRENGTH', 0.0)
+                ao_enabled = getattr(config, 'AO_ENABLED', True)
+                ambient = getattr(config, 'AMBIENT_LIGHT', 0.0)
+                result = self._build_mesh_job(
+                    None,
+                    light_blocks,
+                    sector.position,
+                    ao_strength,
+                    ao_enabled,
+                    ambient,
+                    incoming_sky,
+                    incoming_torch,
+                    sector.sky_floor,
+                    sector.sky_side,
+                    sector.torch_side,
+                    True,
+                    None,
+                    False,
+                )
+                light_ms = float(result.get("light_ms") or 0.0)
+                if light_ms > 0.0:
+                    self._note_sector_light(sector.position, light_ms)
+                sector.sky_floor = result.get("sky_floor", sector.sky_floor)
+                sector.sky_side = result.get("sky_side", sector.sky_side)
+                sector.torch_side = result.get("torch_side", sector.torch_side)
+                sector.edge_sky_counts = result.get("edge_sky_counts", sector.edge_sky_counts)
+                sector.edge_torch_counts = result.get("edge_torch_counts", sector.edge_torch_counts)
+                sector.light_dirty_internal = False
+                sector.light_dirty_incoming = False
+                sector.light_neighbors_ready = True
+                outgoing_sky = result.get("outgoing_sky") or {}
+                outgoing_torch = result.get("outgoing_torch") or {}
+                if outgoing_sky or outgoing_torch:
+                    self._apply_outgoing_light(sector, outgoing_sky, outgoing_torch)
+                self._queue_priority_mesh(sector)
+                did_work = True
+                continue
+            if self._priority_mesh_queue:
+                sector = self._priority_mesh_queue.popleft()
+                self._priority_mesh_set.discard(sector)
+                if sector.mesh_job_pending:
+                    self._queue_priority_mesh(sector)
+                    did_work = True
+                    continue
+                if not self._mesh_ready(sector):
+                    self._queue_priority_mesh(sector)
+                    did_work = True
+                    continue
+                ignore_light_dirty = getattr(config, 'PRIORITY_MESH_IGNORE_LIGHT_DIRTY', True)
+                if sector.light_dirty_internal and not ignore_light_dirty:
+                    self._queue_priority_mesh(sector)
+                    did_work = True
+                    continue
+                self._rebuild_sector_now_fast(sector, priority=True)
+                if getattr(sector, "defer_upload", False):
+                    self._mark_edit_group_complete(sector)
+                did_work = True
+                continue
+            return did_work
 
     def _maybe_log_queue_state(self):
         if not getattr(config, 'LOG_QUEUE_STATE', False):
@@ -1727,6 +1888,8 @@ class ModelProxy(object):
 
     def _queue_upload(self, sector, priority=False):
         """Queue a sector for upload/rebuild; avoid reshuffling if already queued."""
+        if getattr(sector, "defer_upload", False):
+            return
         if sector in self.pending_upload_set:
             return
         self.pending_upload_set.add(sector)
@@ -1993,12 +2156,14 @@ class ModelProxy(object):
             if not changed:
                 continue
             neighbor.light_dirty_incoming = True
-            if not neighbor.light_dirty_internal and self._neighbors_ready(neighbor, require_diagonals=True):
+            can_relight = self._neighbors_ready(neighbor, require_diagonals=True)
+            if not neighbor.light_dirty_internal and can_relight:
                 neighbor.light_dirty_internal = True
                 neighbor.light_neighbors_ready = False
-            neighbor.invalidate()
-            if neighbor.shown:
-                self._submit_mesh_job(neighbor, priority=neighbor.edit_inflight)
+            if can_relight:
+                neighbor.invalidate()
+                if neighbor.shown:
+                    self._submit_mesh_job(neighbor, priority=neighbor.edit_inflight)
 
     def _mark_neighbor_outgoing_dirty(self, sector_pos):
         """Force neighbors to recompute outgoing light when a sector becomes available."""
@@ -2109,7 +2274,8 @@ class ModelProxy(object):
         if sector.shown:
             if priority:
                 self._dequeue_upload(sector)
-                sector.check_show(add_to_batch=True)
+                if not getattr(sector, "defer_upload", False):
+                    sector.check_show(add_to_batch=True)
             else:
                 self._queue_upload(sector, priority=priority)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -2161,6 +2327,7 @@ class ModelProxy(object):
             self.pending_uploads.remove(sector)
         except ValueError:
             pass
+        self._remove_from_edit_group(sector)
         sector._clear_vt_lists()
         sector._clear_pending_vt()
         sector.vt_data = None
@@ -2230,16 +2397,9 @@ class ModelProxy(object):
             else:
                 self._submit_mesh_job(s, priority=True)
             s.edit_inflight = True
-            blocks = s.blocks
-            sector_data = [(spos, blocks)]
-            for np in [(1,0,0), (-1,0,0), (0,0,1), (0,0,-1)]:
-                nspos = sectorize((position[0]+np[0],position[1]+np[1],position[2]+np[2]))
-                if nspos != spos and nspos in self.sectors:
-                    nblocks = self.sectors[nspos].blocks
-                    sector_data.append((nspos, nblocks))
             s.edit_token += 1
             self.sector_edit_tokens[spos] = s.edit_token
-            self.loader_requests.insert(0,['set_block', [notify_server, position, block, sector_data, s.edit_token]])
+            self.loader_requests.insert(0, ['set_block', [notify_server, position, block, s.edit_token]])
             # Immediate visual patch
             if getattr(config, 'USE_PATCH_MESH', False):
                 if not keep_patches:
@@ -2302,13 +2462,12 @@ class ModelProxy(object):
                 )
             else:
                 self._submit_mesh_job(s, priority=True)
-        sector_data = [(spos, sector.blocks) for spos, sector in sector_updates.items()]
         token_map = {}
         for spos, sector in sector_updates.items():
             sector.edit_token += 1
             self.sector_edit_tokens[spos] = sector.edit_token
             token_map[spos] = sector.edit_token
-        self.loader_requests.insert(0, ['set_blocks', [notify_server, updates, sector_data, token_map]])
+        self.loader_requests.insert(0, ['set_blocks', [notify_server, updates, token_map]])
         # Immediate visual patch geometry.
         if getattr(config, 'USE_PATCH_MESH', False):
             for position, block in updates:
@@ -2821,13 +2980,8 @@ class ModelProxy(object):
         sector.invalidate()
         sector.light_dirty_internal = True
         if sector.shown:
-            if priority and self._neighbors_ready(sector, require_diagonals=False):
-                if self._neighbors_have_light(sector) and not self._needs_light(sector):
-                    self._rebuild_sector_now_fast(sector, priority=True)
-                    self._defer_work_frame = self.frame_id
-                    self._defer_mesh_job(sector, priority=True)
-                else:
-                    self._submit_mesh_job(sector, priority=priority)
+            if priority:
+                self._queue_priority_light(sector)
             else:
                 self._submit_mesh_job(sector, priority=priority)
         on_edge = True
@@ -2835,7 +2989,27 @@ class ModelProxy(object):
             on_edge = rel[0] in (0, SECTOR_SIZE - 1) or rel[2] in (0, SECTOR_SIZE - 1)
         if not on_edge:
             return
-        neighbor_offsets = ((1, 0), (-1, 0), (0, 1), (0, -1))
+        if rel is None:
+            neighbor_offsets = ((1, 0), (-1, 0), (0, 1), (0, -1))
+        else:
+            neighbor_offsets = []
+            if rel[0] == 0:
+                neighbor_offsets.append((-1, 0))
+            elif rel[0] == SECTOR_SIZE - 1:
+                neighbor_offsets.append((1, 0))
+            if rel[2] == 0:
+                neighbor_offsets.append((0, -1))
+            elif rel[2] == SECTOR_SIZE - 1:
+                neighbor_offsets.append((0, 1))
+        neighbor_offsets = tuple(neighbor_offsets)
+        if priority and on_edge:
+            group_sectors = [sector]
+            for dx, dz in neighbor_offsets:
+                npos = (sector.position[0] + dx * SECTOR_SIZE, 0, sector.position[2] + dz * SECTOR_SIZE)
+                n = self.sectors.get(npos)
+                if n is not None:
+                    group_sectors.append(n)
+            self._start_edge_edit_group(group_sectors)
         for dx, dz in neighbor_offsets:
             if dx == 0 and dz == 0:
                 continue
@@ -2845,13 +3019,8 @@ class ModelProxy(object):
                 continue
             n.invalidate()
             if n.shown:
-                if priority and self._neighbors_ready(n, require_diagonals=False):
-                    if self._neighbors_have_light(n) and not self._needs_light(n):
-                        self._rebuild_sector_now_fast(n, priority=True)
-                        self._defer_work_frame = self.frame_id
-                        self._defer_mesh_job(n, priority=True)
-                    else:
-                        self._submit_mesh_job(n, priority=priority)
+                if priority:
+                    self._queue_priority_mesh(n)
                 else:
                     self._submit_mesh_job(n, priority=priority)
 
@@ -2969,12 +3138,54 @@ class ModelProxy(object):
                         elif isinstance(token, int):
                             if self.sector_edit_tokens.get(spos, 0) != token:
                                 continue
+                        # For local edits, we already applied blocks; avoid full reload.
+                        if spos in self.sectors:
+                            s = self.sectors[spos]
+                            s.edit_inflight = False
+                            continue
                     if getattr(config, 'LOG_LOADER_FLOW', False):
                         logutil.log("CLIENT", f"loader_resp sector={spos}")
                     self._update_sector(spos, b, v, light)
                     self._note_sector_load(spos, per_sector_ms)
                     self.loader_sectors_received_total += 1
                     self.loader_recent.append(spos)
+            if msg == 'set_block_ack':
+                self.n_responses += 1
+                self.active_loader_request = [None, None]
+                if isinstance(data, (list, tuple)) and len(data) == 3:
+                    pos, block_id, token = data
+                else:
+                    pos = data[0] if data else None
+                    token = None
+                if pos is not None:
+                    spos = sectorize(pos)
+                    if token is not None and self.sector_edit_tokens.get(spos, 0) != token:
+                        continue
+                    s = self.sectors.get(spos)
+                    if s is not None:
+                        s.edit_inflight = False
+                continue
+            if msg == 'set_blocks_ack':
+                self.n_responses += 1
+                self.active_loader_request = [None, None]
+                updates = []
+                token_map = None
+                if isinstance(data, (list, tuple)):
+                    if len(data) == 2:
+                        updates, token_map = data
+                    elif len(data) == 1:
+                        updates = data[0]
+                if token_map is None:
+                    token_map = {}
+                for pos, _block in updates:
+                    spos = sectorize(pos)
+                    token = token_map.get(spos)
+                    if token is not None and self.sector_edit_tokens.get(spos, 0) != token:
+                        continue
+                    s = self.sectors.get(spos)
+                    if s is not None:
+                        s.edit_inflight = False
+                continue
             if msg == 'seed':
                 self.n_responses += 1
                 self.world_seed = data
@@ -3005,7 +3216,10 @@ class ModelProxy(object):
             if missing_near:
                 break
 
-        if not missing_any and inflight == 0 and not self.loader_requests and processed_msgs == 0:
+        priority_processed = self._process_priority_work()
+        priority_work = priority_processed or bool(self._priority_light_queue) or bool(self._priority_mesh_queue)
+
+        if not missing_any and inflight == 0 and not self.loader_requests and processed_msgs == 0 and not priority_work:
             if _ipc_ok() and self.server and self.server.poll():
                 try:
                     msg, data = self.server.recv()
@@ -3014,12 +3228,15 @@ class ModelProxy(object):
                     if msg == 'player_set_block':
                         logutil.log("SERVER", f"player_set_block {data}")
                         pos, block = data
-                        self.add_block(pos, block, False, priority=False)
+                        if self[pos] != block:
+                            self.add_block(pos, block, False, priority=False)
                 except EOFError:
                     logutil.log("SERVER", "server returned EOF", level="WARN")
             return
 
-        priority_work = self.pending_priority_jobs > 0 or bool(self._deferred_mesh_jobs)
+        priority_work = (priority_work
+                         or self.pending_priority_jobs > 0
+                         or bool(self._deferred_mesh_jobs))
         if not priority_work:
             for sector in self.sectors.values():
                 if not sector.edit_inflight:
@@ -3073,6 +3290,10 @@ class ModelProxy(object):
 
         if priority_work:
             allow_send = False
+            if self.loader_requests:
+                req_type = self.loader_requests[0][0]
+                if req_type in ('set_block', 'set_blocks'):
+                    allow_send = True
 
         block_on_mesh = getattr(config, 'LOADER_BLOCK_ON_MESH_BACKLOG', False)
         if block_on_mesh and allow_send and self._has_mesh_backlog():
@@ -3081,7 +3302,8 @@ class ModelProxy(object):
             allow_near = missing_near and len(self.sectors) < min_loaded
             if not allow_near and self._mesh_backlog_count() >= backlog_min:
                 if self.mesh_active_jobs >= self.mesh_active_cap:
-                    allow_send = False
+                    if not self.loader_requests or self.loader_requests[0][0] not in ('set_block', 'set_blocks'):
+                        allow_send = False
                 self.stat_loader_block_mesh_total += 1
 
         if allow_send and len(self.loader_requests) > 0:
@@ -3108,7 +3330,8 @@ class ModelProxy(object):
                 if msg == 'player_set_block':
                     logutil.log("SERVER", f"player_set_block {data}")
                     pos, block = data
-                    self.add_block(pos, block, False, priority=False)
+                    if self[pos] != block:
+                        self.add_block(pos, block, False, priority=False)
             except EOFError:
                 logutil.log("SERVER", "server returned EOF", level="WARN")
 
@@ -3178,6 +3401,8 @@ class ModelProxy(object):
                 s.incoming_torch_updates = 0
                 s.edge_sky_counts = (0, 0, 0, 0)
                 s.edge_torch_counts = (0, 0, 0, 0)
+                s.defer_upload = False
+                s.edit_group_id = None
                 s.light_dirty_internal = True
                 s.light_dirty_incoming = True
                 s.light_neighbors_ready = False
@@ -3209,6 +3434,8 @@ class ModelProxy(object):
                 s.incoming_torch_updates = 0
                 s.edge_sky_counts = (0, 0, 0, 0)
                 s.edge_torch_counts = (0, 0, 0, 0)
+                s.defer_upload = False
+                s.edit_group_id = None
                 self.sectors[sectorize(spos)] = s
                 self._invalidate_and_rebuild(s)
                 self._mark_neighbor_outgoing_dirty(s.position)

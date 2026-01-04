@@ -130,57 +130,74 @@ class WorldLoader(object):
             if msg == 'set_block':
                 # data may include an optional client token at the end
                 if len(data) == 4:
+                    notify_server, pos, block_id, token = data
+                    sector_data = None
+                elif len(data) == 5:
+                    notify_server, pos, block_id, sector_data, token = data
+                else:
                     notify_server, pos, block_id, sector_data = data
                     token = None
-                else:
-                    notify_server, pos, block_id, sector_data, token = data
                 sector_result = []
-                for spos, blocks in sector_data:
-                    self.blocks = blocks
-                    self.set_block(pos, spos, block_id)
-                    self.light = None
-                    self.vt_data = None
-                    sector_result.append((spos, self.blocks, self.vt_data, self.light))
-                t0 = time.perf_counter()
-                payload = pickle.dumps(['sector_blocks2',sector_result, token],-1)
-                t_dump = (time.perf_counter() - t0) * 1000.0
-                t1 = time.perf_counter()
-                cpipe.send_bytes(payload)
-                t_send = (time.perf_counter() - t1) * 1000.0
-                loader_log('pickle.dumps+send set_block batch: %.1fms dump, %.1fms send, %d bytes', t_dump, t_send, len(payload))
+                if sector_data:
+                    for spos, blocks in sector_data:
+                        self.blocks = blocks
+                        self.set_block(pos, spos, block_id)
+                        self.light = None
+                        self.vt_data = None
+                        sector_result.append((spos, self.blocks, self.vt_data, self.light))
+                    t0 = time.perf_counter()
+                    payload = pickle.dumps(['sector_blocks2', sector_result, token], -1)
+                    t_dump = (time.perf_counter() - t0) * 1000.0
+                    t1 = time.perf_counter()
+                    cpipe.send_bytes(payload)
+                    t_send = (time.perf_counter() - t1) * 1000.0
+                    loader_log('pickle.dumps+send set_block batch: %.1fms dump, %.1fms send, %d bytes', t_dump, t_send, len(payload))
+                else:
+                    self.db.set_block(pos, block_id)
+                    cpipe.send(['set_block_ack', [pos, block_id, token]])
                 if spipe is not None:
                     if notify_server:
                         spipe.send(('set_block', [pos, block_id]))
                 else:
-                    self.db.set_block(pos, block_id)
+                    if sector_data:
+                        self.db.set_block(pos, block_id)
             if msg == 'set_blocks':
                 if len(data) == 3:
+                    notify_server, updates, token = data
+                    sector_data = None
+                elif len(data) == 4:
+                    notify_server, updates, sector_data, token = data
+                else:
                     notify_server, updates, sector_data = data
                     token = None
-                else:
-                    notify_server, updates, sector_data, token = data
                 sector_result = []
-                for spos, blocks in sector_data:
-                    self.blocks = blocks
+                if sector_data:
+                    for spos, blocks in sector_data:
+                        self.blocks = blocks
+                        for pos, block_id in updates:
+                            self.set_block(pos, spos, block_id)
+                        self.light = None
+                        self.vt_data = None
+                        sector_result.append((spos, self.blocks, self.vt_data, self.light))
+                    t0 = time.perf_counter()
+                    payload = pickle.dumps(['sector_blocks2', sector_result, token], -1)
+                    t_dump = (time.perf_counter() - t0) * 1000.0
+                    t1 = time.perf_counter()
+                    cpipe.send_bytes(payload)
+                    t_send = (time.perf_counter() - t1) * 1000.0
+                    loader_log('pickle.dumps+send set_blocks batch: %.1fms dump, %.1fms send, %d bytes', t_dump, t_send, len(payload))
+                else:
                     for pos, block_id in updates:
-                        self.set_block(pos, spos, block_id)
-                    self.light = None
-                    self.vt_data = None
-                    sector_result.append((spos, self.blocks, self.vt_data, self.light))
-                t0 = time.perf_counter()
-                payload = pickle.dumps(['sector_blocks2', sector_result, token], -1)
-                t_dump = (time.perf_counter() - t0) * 1000.0
-                t1 = time.perf_counter()
-                cpipe.send_bytes(payload)
-                t_send = (time.perf_counter() - t1) * 1000.0
-                loader_log('pickle.dumps+send set_blocks batch: %.1fms dump, %.1fms send, %d bytes', t_dump, t_send, len(payload))
+                        self.db.set_block(pos, block_id)
+                    cpipe.send(['set_blocks_ack', [updates, token]])
                 if spipe is not None:
                     if notify_server:
                         for pos, block_id in updates:
                             spipe.send(('set_block', [pos, block_id]))
                 else:
-                    for pos, block_id in updates:
-                        self.db.set_block(pos, block_id)
+                    if sector_data:
+                        for pos, block_id in updates:
+                            self.db.set_block(pos, block_id)
 
     def _initialize(self, position, sector_block_delta):
         """ Initialize the sector by procedurally generating terrain using
