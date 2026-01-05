@@ -626,11 +626,21 @@ class Window(pyglet.window.Window):
         if self.model is None:
             return {}
         states = {}
+        now = time.perf_counter()
+        interp = {}
+        if hasattr(self.model, "get_interpolated_remote_players"):
+            interp = self.model.get_interpolated_remote_players(now=now)
         for player_id, info in getattr(self.model, "remote_players", {}).items():
             pos = info.get("position", (0.0, 0.0, 0.0))
             rot = info.get("rotation", (0.0, 0.0))
             vel = info.get("velocity", (0.0, 0.0, 0.0))
             name = info.get("name", f"Player {player_id}")
+            interp_info = interp.get(player_id)
+            if interp_info:
+                pos = interp_info.get("position", pos)
+                rot = interp_info.get("rotation", rot)
+                vel = interp_info.get("velocity", vel)
+                name = interp_info.get("name", name)
             moving = np.linalg.norm(np.asarray(vel, dtype=float)) > 0.1
             states[player_id] = {
                 "id": player_id,

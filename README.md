@@ -25,7 +25,7 @@ There are constants in `config.py` that you can edit to tune the game and experi
 
 ## How to Play
 
-This is not a survival game (yet). There is no day/night cycle (yet), no mobs (yet), no player avatars (yet). Just explore and build.
+This is not a survival game (yet). For now, just explore and build. There is an experimental day/night cycle and some basic creatures that populate the world.
 
 Moving
 

@@ -3420,6 +3420,70 @@ class ModelProxy(object):
             result[entity_id] = state
         return result
 
+    def get_interpolated_remote_players(self, now=None):
+        if now is None:
+            now = time.perf_counter()
+        render_time = now - self._entity_interp_delay
+        result = {}
+        for player_id, info in self.remote_players.items():
+            history = self._remote_player_history.get(player_id)
+            if not history:
+                result[player_id] = info
+                continue
+            if len(history) == 1:
+                result[player_id] = {
+                    "position": history[-1][1],
+                    "rotation": history[-1][2],
+                    "velocity": history[-1][3],
+                    "name": info.get("name"),
+                }
+                continue
+            prev = None
+            next_state = None
+            for sample_time, pos, rot, vel in history:
+                if sample_time <= render_time:
+                    prev = (sample_time, pos, rot, vel)
+                if sample_time >= render_time:
+                    next_state = (sample_time, pos, rot, vel)
+                    break
+            if prev is None:
+                result[player_id] = info
+                continue
+            if next_state is None:
+                last_time, pos, rot, vel = history[-1]
+                dt = render_time - last_time
+                if dt > self._entity_interp_extrap:
+                    result[player_id] = info
+                    continue
+                vel = numpy.asarray(vel or (0.0, 0.0, 0.0), dtype=numpy.float32)
+                pos = numpy.asarray(pos or (0.0, 0.0, 0.0), dtype=numpy.float32)
+                result[player_id] = {
+                    "position": (pos + vel * dt).tolist(),
+                    "rotation": rot,
+                    "velocity": vel.tolist(),
+                    "name": info.get("name"),
+                }
+                continue
+            t0, pos0, rot0, vel0 = prev
+            t1, pos1, rot1, vel1 = next_state
+            if t1 <= t0:
+                result[player_id] = info
+                continue
+            t = (render_time - t0) / (t1 - t0)
+            p0 = numpy.asarray(pos0 or (0.0, 0.0, 0.0), dtype=numpy.float32)
+            p1 = numpy.asarray(pos1 or (0.0, 0.0, 0.0), dtype=numpy.float32)
+            r0 = numpy.asarray(rot0 or (0.0, 0.0), dtype=numpy.float32)
+            r1 = numpy.asarray(rot1 or (0.0, 0.0), dtype=numpy.float32)
+            pos = p0 + (p1 - p0) * t
+            rot = r0 + (r1 - r0) * t
+            result[player_id] = {
+                "position": pos.tolist(),
+                "rotation": rot.tolist(),
+                "velocity": vel1,
+                "name": info.get("name"),
+            }
+        return result
+
     def update_sectors(self, old, new, player_pos=None, look_vec=None, frustum_circle=None, ipc_budget_ms=None, allow_send=True):
         """
         the observer has moved from sector old to new
