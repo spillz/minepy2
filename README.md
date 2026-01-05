@@ -76,7 +76,7 @@ Notes:
 
 - `LAN` will bind to the machine's LAN IP.
 - The host is first to connect; when a host disconnects in standalone mode, the next player becomes host.
-- Player identity is based on `PLAYER_NAME`/`name` for now.
+- Player `name` is the unique player identifier so if you reconnect with the same name you will spawn in the place you last occupied.
 
 ## Anything else?
 
