@@ -675,6 +675,7 @@ class ModelProxy(object):
         self.name_sent_once = False
         self.pending_entity_seed = None
         self.player_state_request = False
+        self._remote_player_history = {}
 
         loader_server_pipe = None
         self.server = None
@@ -3214,6 +3215,7 @@ class ModelProxy(object):
                     pid = None
                 if pid is not None:
                     self.remote_players.pop(pid, None)
+                    self._remote_player_history.pop(pid, None)
                     self.players = [p for p in self.players if p.id != pid]
             return
         if msg == 'player_set_name':
@@ -3340,6 +3342,11 @@ class ModelProxy(object):
                 info["velocity"] = ((p1 - p0) / dt).tolist()
         if rotation is not None:
             info["rotation"] = rotation
+        history = self._remote_player_history.get(pid)
+        if history is None:
+            history = deque(maxlen=3)
+            self._remote_player_history[pid] = history
+        history.append((now, info.get("position"), info.get("rotation"), info.get("velocity")))
 
     def _process_server_messages(self, ipc_ok=None):
         if not self.server:
