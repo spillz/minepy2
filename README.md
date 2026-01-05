@@ -50,9 +50,35 @@ Quitting
 
 ![Scene 3](screenshots/scene3.png)
 
-## Anything else?
+## Multiplayer
 
-There is a server that runs in the background. This can also run standalone (see `server.py`) and that will allow you to host a multiplayer game on a LAN. I'll document that properly one of these days.
+Minepy supports two multiplayer models:
+
+Host + client (server is a child of the host):
+
+```
+python main.py -serve <LAN|address[:port]> <name>
+```
+
+Standalone server:
+
+```
+python server.py <LAN|address[:port]>
+```
+
+Client:
+
+```
+python main.py <address[:port]> <name>
+```
+
+Notes:
+
+- `LAN` will bind to the machine's LAN IP.
+- The host is first to connect; when a host disconnects in standalone mode, the next player becomes host.
+- Player identity is based on `PLAYER_NAME`/`name` for now.
+
+## Anything else?
 
 I'm also working on a JavaScript version. Why? Mostly because it runs in the browser. Also because JavaScript runs a lot faster than Python so it will be an interesting comparison.
 

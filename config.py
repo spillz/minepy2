@@ -54,6 +54,7 @@ ENTITY_SPAWN_CHANCE = 0.01
 ENTITY_SPAWN_RADIUS = 3
 
 SERVER_IP = None
+PLAYER_NAME = "Player"
 SERVER_PORT = 20226
 
 LOADER_IP = 'localhost'
@@ -82,6 +83,10 @@ USE_PATCH_MESH = False
 LOG_COLOR = True
 # Log file path (None or "" to disable file output).
 LOG_FILE_PATH = "log.txt"
+# Log file path for server process.
+SERVER_LOG_FILE_PATH = "log-server.txt"
+# Persistent server state (players/entities).
+SERVER_STATE_PATH = "server_state.pkl"
 # Log file path for loader process (None or "" to use LOG_FILE_PATH).
 LOG_LOADER_FILE_PATH = None
 # When True, append to existing log; when False, truncate on first log (main process).
@@ -89,6 +94,8 @@ LOG_FILE_APPEND = False
 
 # Log main-loop timings and frame boundaries.
 LOG_MAIN_LOOP = True
+# Enable verbose client/server connection logs.
+SERVER_CONN_VERBOSE = False
 # Log detailed map generation timings.
 LOG_MAPGEN_TIMINGS = True
 # Log per-stage cave carving timings.

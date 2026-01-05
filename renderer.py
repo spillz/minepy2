@@ -177,7 +177,8 @@ class AnimatedEntityRenderer:
         root_offset = self.model.get('root_offset', (0.0, 0.0, 0.0))
         base_offset_y = root_part_size[1] / 2.0 if root_part_size is not None else 0.0
         base_offset = Vec3(0.0, base_offset_y, 0.0)
-        model_matrix = Mat4.from_translation(entity_state['pos'] + Vec3(*root_offset) + base_offset)
+        pos_vec = Vec3(pos[0], pos[1], pos[2])
+        model_matrix = Mat4.from_translation(pos_vec + Vec3(*root_offset) + base_offset)
         model_matrix = model_matrix.rotate(math.radians(rot[0]), Vec3(0, 1, 0))
 
         # Find the root part and start the recursive drawing

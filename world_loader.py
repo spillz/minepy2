@@ -153,7 +153,8 @@ class WorldLoader(object):
                     t_send = (time.perf_counter() - t1) * 1000.0
                     loader_log('pickle.dumps+send set_block batch: %.1fms dump, %.1fms send, %d bytes', t_dump, t_send, len(payload))
                 else:
-                    self.db.set_block(pos, block_id)
+                    if self.db is not None:
+                        self.db.set_block(pos, block_id)
                     cpipe.send(['set_block_ack', [pos, block_id, token]])
                 if spipe is not None:
                     if notify_server:
@@ -187,8 +188,9 @@ class WorldLoader(object):
                     t_send = (time.perf_counter() - t1) * 1000.0
                     loader_log('pickle.dumps+send set_blocks batch: %.1fms dump, %.1fms send, %d bytes', t_dump, t_send, len(payload))
                 else:
-                    for pos, block_id in updates:
-                        self.db.set_block(pos, block_id)
+                    if self.db is not None:
+                        for pos, block_id in updates:
+                            self.db.set_block(pos, block_id)
                     cpipe.send(['set_blocks_ack', [updates, token]])
                 if spipe is not None:
                     if notify_server:

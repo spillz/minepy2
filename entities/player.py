@@ -260,6 +260,7 @@ class Player(BaseEntity):
         return {
             "pos": tuple(self.position.tolist()),
             "rot": tuple(self.rotation.tolist()),
+            "vel": tuple(self.velocity.tolist()),
             "flying": self.flying,
             "on_ground": self.on_ground,
         }

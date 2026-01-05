@@ -2,6 +2,129 @@ import numpy as np
 import logutil
 from blocks import BLOCK_COLLIDES
 
+ENTITY_TYPE_IDS = {
+    "base_entity": 0,
+    "player": 1,
+    "snake": 2,
+    "snail": 3,
+    "seagull": 4,
+    "dog": 5,
+}
+ENTITY_TYPE_NAMES = {value: key for key, value in ENTITY_TYPE_IDS.items()}
+ENTITY_ANIM_IDS = {
+    "idle": 0,
+    "walk": 1,
+}
+ENTITY_ANIM_NAMES = {value: key for key, value in ENTITY_ANIM_IDS.items()}
+
+ENTITY_FLAG_ON_GROUND = 1
+_BASE_ENTITY_KEYS = {
+    "id",
+    "type",
+    "pos",
+    "rot",
+    "vel",
+    "on_ground",
+    "animation",
+}
+
+
+def pack_entity_batch(entity_states):
+    ids = []
+    type_ids = []
+    anim_ids = []
+    pos = []
+    rot = []
+    vel = []
+    flags = []
+    extras = {}
+    types = []
+    anims = []
+    for state in entity_states:
+        if not isinstance(state, dict):
+            continue
+        entity_id = state.get("id")
+        if entity_id is None:
+            continue
+        ids.append(int(entity_id))
+        entity_type = state.get("type", "base_entity")
+        type_id = ENTITY_TYPE_IDS.get(entity_type, 0)
+        type_ids.append(type_id)
+        types.append(entity_type)
+        anim_name = state.get("animation", "idle")
+        anim_id = ENTITY_ANIM_IDS.get(anim_name, 0)
+        anim_ids.append(anim_id)
+        anims.append(anim_name)
+        pos.append(state.get("pos", (0.0, 0.0, 0.0)))
+        rot.append(state.get("rot", (0.0, 0.0)))
+        vel.append(state.get("vel", (0.0, 0.0, 0.0)))
+        flags.append(ENTITY_FLAG_ON_GROUND if state.get("on_ground") else 0)
+        extra = {k: v for k, v in state.items() if k not in _BASE_ENTITY_KEYS}
+        if extra:
+            extras[int(entity_id)] = extra
+    payload = {
+        "ids": np.asarray(ids, dtype=np.int32),
+        "type_id": np.asarray(type_ids, dtype=np.uint8),
+        "anim_id": np.asarray(anim_ids, dtype=np.uint8),
+        "pos": np.asarray(pos, dtype=np.float32),
+        "rot": np.asarray(rot, dtype=np.float32),
+        "vel": np.asarray(vel, dtype=np.float32),
+        "flags": np.asarray(flags, dtype=np.uint8),
+    }
+    if extras:
+        payload["extras"] = extras
+    if any(tid == 0 for tid in type_ids):
+        payload["types"] = types
+    if any(aid == 0 for aid in anim_ids):
+        payload["anims"] = anims
+    return payload
+
+
+def unpack_entity_batch(payload):
+    if payload is None:
+        return []
+    ids = np.asarray(payload.get("ids", []), dtype=np.int32)
+    type_ids = np.asarray(payload.get("type_id", []), dtype=np.uint8)
+    anim_ids = np.asarray(payload.get("anim_id", []), dtype=np.uint8)
+    pos = np.asarray(payload.get("pos", []), dtype=np.float32)
+    rot = np.asarray(payload.get("rot", []), dtype=np.float32)
+    vel = np.asarray(payload.get("vel", []), dtype=np.float32)
+    flags = np.asarray(payload.get("flags", []), dtype=np.uint8)
+    extras = payload.get("extras", {}) or {}
+    types = payload.get("types")
+    anims = payload.get("anims")
+
+    count = int(len(ids))
+    states = []
+    for i in range(count):
+        entity_id = int(ids[i])
+        type_id = int(type_ids[i]) if i < len(type_ids) else 0
+        anim_id = int(anim_ids[i]) if i < len(anim_ids) else 0
+        entity_type = ENTITY_TYPE_NAMES.get(type_id)
+        if entity_type is None and types and i < len(types):
+            entity_type = types[i]
+        if entity_type is None:
+            entity_type = "base_entity"
+        anim_name = ENTITY_ANIM_NAMES.get(anim_id)
+        if anim_name is None and anims and i < len(anims):
+            anim_name = anims[i]
+        if anim_name is None:
+            anim_name = "idle"
+        state = {
+            "id": entity_id,
+            "type": entity_type,
+            "pos": pos[i] if i < len(pos) else np.zeros(3, dtype=np.float32),
+            "rot": rot[i] if i < len(rot) else np.zeros(2, dtype=np.float32),
+            "vel": vel[i] if i < len(vel) else np.zeros(3, dtype=np.float32),
+            "on_ground": bool(flags[i] & ENTITY_FLAG_ON_GROUND) if i < len(flags) else False,
+            "animation": anim_name,
+        }
+        extra = extras.get(entity_id)
+        if extra:
+            state.update(extra)
+        states.append(state)
+    return states
+
 class BaseEntity:
     """
     The base class for all non-block objects in the world.
@@ -105,6 +228,8 @@ class BaseEntity:
             'type': self.type,
             'pos': list(self.position),
             'rot': list(self.rotation),
+            'vel': list(self.velocity),
+            'on_ground': bool(self.on_ground),
             # Also include animation state for the client renderer
             'animation': 'walk' if np.linalg.norm(self.velocity) > 0.1 else 'idle'
         }
@@ -118,5 +243,7 @@ class BaseEntity:
         self.type = data.get('type', self.type)
         self.position = np.array(data.get('pos', self.position))
         self.rotation = np.array(data.get('rot', self.rotation))
+        self.velocity = np.array(data.get('vel', self.velocity))
+        self.on_ground = bool(data.get('on_ground', self.on_ground))
         # Client can use this to drive the right animation
         self.current_animation = data.get('animation', 'idle')

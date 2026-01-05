@@ -2,6 +2,7 @@ import math
 import random
 import time
 import sys
+import multiprocessing
 from datetime import datetime
 
 # pyglet imports
@@ -30,8 +31,10 @@ import config
 import shaders
 import renderer
 import world_entity_store
+import entity as entity_codec
 import logutil
 import mapgen
+import server as server_module
 from entities.player import HUMANOID_MODEL, Player
 from entities.snake import SNAKE_MODEL, SnakeEntity
 from entities.snail import SNAIL_MODEL, SnailEntity
@@ -197,20 +200,40 @@ class Window(pyglet.window.Window):
         self._focus_face_vlist = None
 
         # Entity rendering setup
-        saved_player_state = world_entity_store.load_entity_state("player")
+        saved_player_state = None
+        if getattr(config, "SERVER_IP", None) is None:
+            saved_player_state = world_entity_store.load_entity_state("player")
         has_saved_player = saved_player_state is not None
         if saved_player_state:
             self.position = tuple(saved_player_state.get("pos", self.position))
-            self.rotation = tuple(saved_player_state.get("rot", self.rotation))
+            camera_rot = saved_player_state.get("camera_rot")
+            if camera_rot is not None:
+                self.rotation = tuple(camera_rot)
+            else:
+                self.rotation = tuple(saved_player_state.get("rot", self.rotation))
             self.flying = saved_player_state.get("flying", self.flying)
+            saved_vel = saved_player_state.get("vel")
+            saved_camera_mode = saved_player_state.get("camera_mode")
+            saved_camera_dist = saved_player_state.get("third_person_distance")
+        player_name = getattr(config, "PLAYER_NAME", "Player")
         self.player_entity = Player(self.model, HUMANOID_MODEL, position=self.position)
+        self.player_entity.name = player_name
         self.player_entity.id = 0
         self.player_entity.position = np.array(self.position, dtype=float)
         self.player_entity.rotation = np.array(self.rotation, dtype=float)
         if saved_player_state:
             self.player_entity.on_ground = saved_player_state.get("on_ground", False)
+            if saved_vel is not None:
+                self.player_entity.velocity = np.array(saved_vel, dtype=float)
             if self.player_entity.on_ground:
                 self.player_entity.velocity[1] = 0.0
+            saved_rot = saved_player_state.get("rot")
+            if saved_rot is not None and camera_rot is not None:
+                self.player_entity.rotation = np.array(saved_rot, dtype=float)
+            if saved_camera_mode is not None:
+                self.camera_mode = saved_camera_mode
+            if saved_camera_dist is not None:
+                self.third_person_distance = float(saved_camera_dist)
         if not has_saved_player:
             # New player spawns should snap to ground; saved positions are restored verbatim.
             grounded_pos, _ = self.model.collide(
@@ -254,6 +277,14 @@ class Window(pyglet.window.Window):
         self._entity_persist_interval = 5.0
         self._entity_persist_timer = self._entity_persist_interval
         self._persist_entity_states()
+        self._entity_net_interval = float(getattr(config, "ENTITY_NET_INTERVAL", 0.1))
+        self._entity_snapshot_interval = float(getattr(config, "ENTITY_SNAPSHOT_INTERVAL", 1.0))
+        self._entity_net_timer = 0.0
+        self._entity_snapshot_timer = 0.0
+        self._player_net_interval = float(getattr(config, "PLAYER_NET_INTERVAL", 0.1))
+        self._player_net_timer = 0.0
+        self._player_name_sent = False
+        self._player_name_labels = {}
         self.frame_id = 0
 
 
@@ -502,6 +533,265 @@ class Window(pyglet.window.Window):
             return ORIENT_WEST if dx > 0 else ORIENT_EAST
         return ORIENT_NORTH if dz > 0 else ORIENT_SOUTH
 
+    def _multiplayer_active(self):
+        return self.model is not None and self.model.server is not None
+
+    def _is_multiplayer_host(self):
+        return self._multiplayer_active() and self.model.is_host()
+
+    def _is_multiplayer_client(self):
+        return self._multiplayer_active() and not self.model.is_host()
+
+    def _queue_entity_batch(self, message, states):
+        if not self._is_multiplayer_host() or not states:
+            return
+        payload = entity_codec.pack_entity_batch(states)
+        self.model.queue_server_message(message, payload)
+
+    def _queue_entity_spawn(self, entity_state):
+        self._queue_entity_batch("entity_spawn", [entity_state])
+
+    def _queue_entity_despawn(self, entity_id):
+        if not self._is_multiplayer_host():
+            return
+        self.model.queue_server_message("entity_despawn", {"ids": [int(entity_id)]})
+
+    def _network_entity_tick(self, dt):
+        if not self._is_multiplayer_host():
+            return
+        self._entity_net_timer += dt
+        self._entity_snapshot_timer += dt
+        if getattr(self.model, "entity_snapshot_requested", False):
+            self.model.entity_snapshot_requested = False
+            snapshot = [
+                state for state in self.entities.values()
+                if state.get("type") != "player"
+            ]
+            self._queue_entity_batch("entity_snapshot", snapshot)
+        if self._entity_net_interval > 0 and self._entity_net_timer >= self._entity_net_interval:
+            self._entity_net_timer %= self._entity_net_interval
+            updates = [
+                state for state in self.entities.values()
+                if state.get("type") != "player"
+            ]
+            self._queue_entity_batch("entity_update", updates)
+        if self._entity_snapshot_interval > 0 and self._entity_snapshot_timer >= self._entity_snapshot_interval:
+            self._entity_snapshot_timer %= self._entity_snapshot_interval
+            snapshot = [
+                state for state in self.entities.values()
+                if state.get("type") != "player"
+            ]
+            self._queue_entity_batch("entity_snapshot", snapshot)
+
+    def _network_player_tick(self, dt):
+        if not self._multiplayer_active():
+            return
+        accepted_name = getattr(self.model, "accepted_player_name", None)
+        if accepted_name and accepted_name != self.player_entity.name:
+            self.player_entity.name = accepted_name
+            config.PLAYER_NAME = accepted_name
+            self._player_name_sent = True
+        if self.player_entity.name != getattr(config, "PLAYER_NAME", self.player_entity.name):
+            self.player_entity.name = getattr(config, "PLAYER_NAME", self.player_entity.name)
+            self._player_name_sent = False
+            self.model.name_sent_once = False
+        self._player_net_timer += dt
+        if (not self._player_name_sent
+                and self.model.player is not None
+                and not self.model.name_request_pending
+                and not self.model.name_sent_once):
+            self.model.queue_server_message("set_name", self.player_entity.name)
+            self._player_name_sent = True
+            self.model.name_request_pending = True
+            self.model.name_sent_once = True
+        if getattr(self.model, "player_state_request", False):
+            self.model.player_state_request = False
+            state = self.player_entity.serialize_state()
+            state["camera_rot"] = tuple(self.rotation)
+            state["camera_mode"] = self.camera_mode
+            state["third_person_distance"] = self.third_person_distance
+            self.model.queue_server_message("set_position", [state.get("pos"), state.get("rot"), state])
+        if self._player_net_interval <= 0:
+            return
+        if self._player_net_timer < self._player_net_interval:
+            return
+        self._player_net_timer %= self._player_net_interval
+        state = self.player_entity.serialize_state()
+        state["camera_rot"] = tuple(self.rotation)
+        state["camera_mode"] = self.camera_mode
+        state["third_person_distance"] = self.third_person_distance
+        self.model.queue_server_message("set_position", [state.get("pos"), state.get("rot"), state])
+
+    def _remote_player_states(self):
+        if self.model is None:
+            return {}
+        states = {}
+        for player_id, info in getattr(self.model, "remote_players", {}).items():
+            pos = info.get("position", (0.0, 0.0, 0.0))
+            rot = info.get("rotation", (0.0, 0.0))
+            vel = info.get("velocity", (0.0, 0.0, 0.0))
+            name = info.get("name", f"Player {player_id}")
+            moving = np.linalg.norm(np.asarray(vel, dtype=float)) > 0.1
+            states[player_id] = {
+                "id": player_id,
+                "type": "player",
+                "pos": pos,
+                "rot": rot,
+                "vel": vel,
+                "on_ground": False,
+                "animation": "walk" if moving else "idle",
+                "name": name,
+            }
+        return states
+
+    def _sync_player_id_from_server(self):
+        if self.model is None or self.model.player is None:
+            return
+        server_id = self.model.player.id
+        if server_id is None:
+            return
+        if self.player_entity.id == server_id:
+            return
+        old_id = self.player_entity.id
+        self.player_entity.id = server_id
+        if old_id in self.entity_objects:
+            self.entity_objects.pop(old_id, None)
+        self.entity_objects[self.player_entity.id] = self.player_entity
+
+    def _apply_pending_spawn_state(self):
+        if self.model is None:
+            return
+        state = getattr(self.model, "pending_spawn_state", None)
+        if not state:
+            return
+        pos = state.get("pos")
+        rot = state.get("rot")
+        camera_rot = state.get("camera_rot")
+        vel = state.get("vel")
+        flying = state.get("flying")
+        on_ground = state.get("on_ground")
+        camera_mode = state.get("camera_mode")
+        camera_dist = state.get("third_person_distance")
+        if pos is not None:
+            self.player_entity.position = np.array(pos, dtype=float)
+            self.position = tuple(self.player_entity.position)
+        if rot is not None:
+            self.player_entity.rotation = np.array(rot, dtype=float)
+            if camera_rot is None:
+                self.rotation = (-float(rot[0]), float(rot[1]))
+        if camera_rot is not None:
+            self.rotation = tuple(camera_rot)
+        if camera_mode is not None:
+            self.camera_mode = camera_mode
+        if camera_dist is not None:
+            self.third_person_distance = float(camera_dist)
+        if vel is not None:
+            self.player_entity.velocity = np.array(vel, dtype=float)
+        else:
+            self.player_entity.velocity[:] = 0.0
+        if flying is not None:
+            self.player_entity.flying = bool(flying)
+            self.flying = bool(flying)
+        if on_ground is not None:
+            self.player_entity.on_ground = bool(on_ground)
+        self.model.pending_spawn_state = None
+
+    def _apply_entity_seed(self):
+        if not self._is_multiplayer_host():
+            return
+        seed = getattr(self.model, "pending_entity_seed", None)
+        if not seed:
+            return
+        states = entity_codec.unpack_entity_batch(seed)
+        if not states:
+            self.model.pending_entity_seed = None
+            return
+        self.entity_objects = {self.player_entity.id: self.player_entity}
+        self._entity_sector_map = {}
+        self._sector_entity_state = {}
+        max_id = self.player_entity.id
+        for state in states:
+            etype = state.get("type")
+            pos = state.get("pos", (0.0, 0.0, 0.0))
+            rot = state.get("rot", (0.0, 0.0))
+            ent_id = int(state.get("id", 0))
+            entity = None
+            if etype == "snake":
+                entity = SnakeEntity(self.model, player_position=pos, entity_id=ent_id)
+            elif etype == "snail":
+                entity = SnailEntity(self.model, player_position=pos, entity_id=ent_id)
+            elif etype == "seagull":
+                entity = SeagullEntity(self.model, player_position=pos, entity_id=ent_id)
+            elif etype == "dog":
+                entity = Dog(self.model, entity_id=ent_id, saved_state={"pos": pos, "rot": rot})
+            if entity is None:
+                continue
+            entity.id = ent_id
+            entity.position = np.array(pos, dtype=float)
+            entity.rotation = np.array(rot, dtype=float)
+            entity.velocity = np.array(state.get("vel", (0.0, 0.0, 0.0)), dtype=float)
+            entity.current_animation = state.get("animation", "idle")
+            if etype == "snake":
+                segs = state.get("segment_positions")
+                if segs:
+                    entity.segment_positions = np.array(segs, dtype=float)
+            self.entity_objects[ent_id] = entity
+            max_id = max(max_id, ent_id)
+        self._next_entity_id = max_id + 1
+        self.entities = {eid: ent.to_network_dict() for eid, ent in self.entity_objects.items()}
+        self.model.pending_entity_seed = None
+
+    def _world_to_screen(self, world_pos, projection, view, eye_world):
+        width, height = self.get_size()
+        rel = np.array(world_pos, dtype=float) - np.array(eye_world, dtype=float)
+        vec = np.array([rel[0], rel[1], rel[2], 1.0], dtype=float)
+        view_mat = np.array(view, dtype=float).reshape(4, 4)
+        proj_mat = np.array(projection, dtype=float).reshape(4, 4)
+        clip = proj_mat @ (view_mat @ vec)
+        w = clip[3]
+        if w <= 1e-6:
+            return None
+        ndc = clip[:3] / w
+        if ndc[2] < -1.0 or ndc[2] > 1.0:
+            return None
+        sx = (ndc[0] * 0.5 + 0.5) * width
+        sy = (ndc[1] * 0.5 + 0.5) * height
+        if sx < 0 or sx > width or sy < 0 or sy > height:
+            return None
+        return sx, sy
+
+    def _draw_player_name_labels(self):
+        if not self._multiplayer_active():
+            return
+        projection, view, eye_world = self.get_view_projection()
+        remote_states = self._remote_player_states()
+        alive_ids = set()
+        for player_id, state in remote_states.items():
+            alive_ids.add(player_id)
+            name = state.get("name", f"Player {player_id}")
+            pos = state.get("pos", (0.0, 0.0, 0.0))
+            label_pos = (pos[0], pos[1] + float(PLAYER_HEIGHT) + 0.4, pos[2])
+            screen = self._world_to_screen(label_pos, projection, view, eye_world)
+            if screen is None:
+                continue
+            label = self._player_name_labels.get(player_id)
+            if label is None:
+                label = pyglet.text.Label(
+                    name,
+                    font_name='Consolas',
+                    font_size=10,
+                    color=(255, 255, 255, 255),
+                    anchor_x='center',
+                    anchor_y='bottom',
+                )
+                self._player_name_labels[player_id] = label
+            label.text = name
+            label.x, label.y = screen
+            label.draw()
+        for stale_id in list(self._player_name_labels.keys()):
+            if stale_id not in alive_ids:
+                self._player_name_labels.pop(stale_id, None)
+
     def _face_orient(self, face):
         """Return orientation from a hit face (block - empty)."""
         dx, dy, dz = face
@@ -613,7 +903,11 @@ class Window(pyglet.window.Window):
             )
             update_sectors_ms = (time.perf_counter() - t1) * 1000.0
             self.sector = sector
-        self._sync_sector_entities(sector)
+        self._sync_player_id_from_server()
+        self._apply_pending_spawn_state()
+        self._apply_entity_seed()
+        if not self._is_multiplayer_client():
+            self._sync_sector_entities(sector)
         self.model.mesh_budget_deadline = None
         t2 = time.perf_counter()
         self.model.process_pending_mesh_jobs(frustum_circle=frustum_circle, allow_submit=True)
@@ -670,6 +964,8 @@ class Window(pyglet.window.Window):
             "MAINLOOP",
             f"entities enabled={enabled_entities} updates={entity_updates_total} substeps={substeps} ms={entity_ms_total:.2f}",
         )
+        self._network_entity_tick(dt)
+        self._network_player_tick(dt)
         self.last_update_ms = total_ms
 
     def _ensure_biome_generator(self):
@@ -756,6 +1052,7 @@ class Window(pyglet.window.Window):
         else:
             return None
         self.entity_objects[entity_id] = entity
+        self._queue_entity_spawn(entity.to_network_dict())
         return entity
 
     def _spawn_from_surface_hint(self, sector, local_x, local_y, local_z):
@@ -863,6 +1160,7 @@ class Window(pyglet.window.Window):
         entity = self.entity_objects.pop(entity_id, None)
         if entity is None:
             return
+        self._queue_entity_despawn(entity_id)
         sector_pos = self._entity_sector_map.pop(entity_id, None)
         if sector_pos is None:
             return
@@ -966,7 +1264,7 @@ class Window(pyglet.window.Window):
             "flying": self.flying,
             "world_model": self.model,
             "camera_rotation": camera_rot,
-            "apply_camera_rotation": is_moving and not ladder_aligning,
+            "apply_camera_rotation": not ladder_aligning,
             "player_position": self.player_entity.position.copy(),
             "camera_mode": self.camera_mode,
             "strafe": (0, 0) if ladder_aligning else tuple(self.strafe),
@@ -975,30 +1273,31 @@ class Window(pyglet.window.Window):
         t0 = time.perf_counter()
         update_count = 0
         updated_entities = {}
+        multiplayer_client = self._is_multiplayer_client()
 
         for entity in self.entity_objects.values():
             if not self._entity_is_enabled(entity):
+                continue
+            if multiplayer_client and entity is not self.player_entity:
                 continue
             if not self.model.is_sector_ready(entity.position, radius=0):
                 continue
             entity.update(dt, context)
             update_count += 1
             
-            # Update the renderer's current animation based on the entity's state
-            entity_renderer = self.entity_renderers.get(entity.type)
-            if entity_renderer:
-                if isinstance(entity_renderer, renderer.SnakeRenderer):
-                    # SnakeRenderer has its own update for segments, and AnimatedEntityRenderer for the head.
-                    # The head's animation is set here.
-                    entity_renderer.head_renderer.set_animation(entity.current_animation)
-                else:
-                    entity_renderer.set_animation(entity.current_animation)
-
             updated_entities[entity.id] = entity.to_network_dict()
             if entity is self.player_entity:
                 context["player_position"] = entity.position.copy()
 
-        self.entities = updated_entities
+        if multiplayer_client:
+            now = time.perf_counter()
+            self.entities = self.model.get_interpolated_entities(now=now)
+            self.entities[self.player_entity.id] = self.player_entity.to_network_dict()
+        else:
+            self.entities = updated_entities
+        remote_players = self._remote_player_states()
+        if remote_players:
+            self.entities.update(remote_players)
         entity_ms = (time.perf_counter() - t0) * 1000.0
         self.position = tuple(self.player_entity.position)
         if getattr(self.player_entity, "camera_yaw_follow", False):
@@ -1049,6 +1348,9 @@ class Window(pyglet.window.Window):
 
     def _persist_entity_states(self):
         state = self.player_entity.serialize_state()
+        state["camera_rot"] = tuple(self.rotation)
+        state["camera_mode"] = self.camera_mode
+        state["third_person_distance"] = self.third_person_distance
         if state is not None:
             world_entity_store.save_entity_state(self.player_entity.type, state)
 
@@ -1374,7 +1676,15 @@ class Window(pyglet.window.Window):
 
     def on_close(self):
         self._persist_entity_states()
+        if self._multiplayer_active():
+            state = self.player_entity.serialize_state()
+            state["camera_rot"] = tuple(self.rotation)
+            state["camera_mode"] = self.camera_mode
+            state["third_person_distance"] = self.third_person_distance
+            self.model.queue_server_message("set_position", [state.get("pos"), state.get("rot"), state])
         self.model.quit()
+        if hasattr(self, "server_process") and self.server_process is not None:
+            self.server_process.terminate()
         pyglet.window.Window.on_close(self)
 
     def set_2d(self):
@@ -1507,11 +1817,28 @@ class Window(pyglet.window.Window):
         self.block_program['u_use_texture'] = False
         # self.block_program['u_use_vertex_color'] = False
         for entity_id, entity_state in self.entities.items():
-            if entity_state['type'] == 'player' and self.camera_mode == 'first_person':
+            if entity_id == self.player_entity.id:
                 continue
             r = self.entity_renderers.get(entity_state['type'])
             if r:
+                anim = entity_state.get('animation')
+                if isinstance(r, renderer.SnakeRenderer):
+                    if anim:
+                        r.head_renderer.set_animation(anim)
+                elif anim:
+                    r.set_animation(anim)
                 r.draw(entity_state)
+        if self.camera_mode == 'third_person':
+            local_state = self.player_entity.to_network_dict()
+            local_state["pos"] = self.player_entity.position.copy()
+            local_state["rot"] = self.player_entity.rotation.copy()
+            local_state["animation"] = self.player_entity.current_animation
+            r = self.entity_renderers.get(local_state['type'])
+            if r:
+                anim = local_state.get('animation')
+                if anim:
+                    r.set_animation(anim)
+                r.draw(local_state)
         self.block_program['u_use_texture'] = True
         # self.block_program['u_use_vertex_color'] = True
         entity_draw_ms = (time.perf_counter() - t0) * 1000.0
@@ -1529,6 +1856,7 @@ class Window(pyglet.window.Window):
             self.draw_underwater_overlay()
         hud_start = time.perf_counter()
         self.draw_label()
+        self._draw_player_name_labels()
         self._last_hud_ms = (time.perf_counter() - hud_start) * 1000.0
         if self.camera_mode == 'first_person':
             self.draw_reticle()
@@ -2490,21 +2818,53 @@ def setup():
     setup_fog()
 
 
+def _parse_server_arg(arg):
+    if arg == 'LAN':
+        return server_module.get_network_ip(), config.SERVER_PORT
+    if ':' in arg:
+        host, port = arg.split(':', 1)
+        try:
+            port_val = int(port)
+        except ValueError:
+            port_val = config.SERVER_PORT
+        return host, port_val
+    return arg, config.SERVER_PORT
+
+
 def main():
     logutil.log("MAIN", f"minepy2 start {datetime.now().isoformat(sep=' ', timespec='seconds')}")
+    server_proc = None
     if len(sys.argv)>1:
         arg = sys.argv[1]
-        if ':' in arg:
-            host, port = arg.split(':', 1)
+        if arg == '-serve':
+            if len(sys.argv) < 3:
+                print("Usage: python main.py -serve <LAN|address[:port]> <name>")
+                return
+            addr_arg = sys.argv[2]
+            name_arg = sys.argv[3] if len(sys.argv) > 3 else None
+            host, port = _parse_server_arg(addr_arg)
             config.SERVER_IP = host
-            try:
-                config.SERVER_PORT = int(port)
-            except ValueError:
-                pass
+            config.SERVER_PORT = port
+            if name_arg:
+                config.PLAYER_NAME = name_arg
+            server_proc = multiprocessing.Process(
+                target=server_module.start_server,
+                args=(host, port),
+                daemon=True,
+            )
+            server_proc.start()
+            logutil.log("MAIN", f"Hosting server at {config.SERVER_IP}:{config.SERVER_PORT}")
         else:
-            config.SERVER_IP = arg
-        logutil.log("MAIN", f"Using server IP address {config.SERVER_IP}:{config.SERVER_PORT}")
+            name_arg = sys.argv[2] if len(sys.argv) > 2 else None
+            host, port = _parse_server_arg(arg)
+            config.SERVER_IP = host
+            config.SERVER_PORT = port
+            if name_arg:
+                config.PLAYER_NAME = name_arg
+            logutil.log("MAIN", f"Using server IP address {config.SERVER_IP}:{config.SERVER_PORT}")
     window = Window(width=300, height=200, caption='Pyglet', resizable=True, vsync=False)
+    if server_proc is not None:
+        window.server_process = server_proc
     # Hide the mouse cursor and prevent the mouse from leaving the window.
     window.set_exclusive_mouse(True)
     setup()
@@ -2516,6 +2876,8 @@ def main():
         logutil.log("MAIN", "terminating child processes")
         window.model.quit()
         window.set_exclusive_mouse(False)
+        if server_proc is not None:
+            server_proc.terminate()
 
 
 if __name__ == '__main__':

@@ -8,6 +8,7 @@ class Player(object):
         counter+=1
         self.name = 'FRED'
         self.position = (0,0,0)
+        self.rotation = (0.0, 0.0)
         self.comms_queue = []
 
     def __repr__(self):
@@ -21,6 +22,7 @@ class ClientPlayer(object):
         self.id = player.id
         self.name = player.name
         self.position = player.position
+        self.rotation = getattr(player, "rotation", (0.0, 0.0))
     
     def __repr__(self):
         return self.name

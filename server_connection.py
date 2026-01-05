@@ -8,10 +8,15 @@ from config import SERVER_PORT
 from players import Player
 import world_loader
 
-import logging
-logging.basicConfig(level = logging.INFO)
-def sconn_log(*args):
-    logging.log(logging.INFO,*args)
+import logutil
+import config
+
+def sconn_log(msg, *args):
+    if not getattr(config, "SERVER_CONN_VERBOSE", False):
+        return
+    if args:
+        msg = msg % args
+    logutil.log("S_CONN", msg)
 
 class ClientServerConnectionHandler(object):
     '''
@@ -134,7 +139,11 @@ class ClientServerConnectionHandler(object):
 
 
 def _start_server_connection(client_pipe, loader_pipe, SERVER_IP):
-    conn = ClientServerConnectionHandler(client_pipe, loader_pipe, SERVER_IP)
+    try:
+        conn = ClientServerConnectionHandler(client_pipe, loader_pipe, SERVER_IP)
+    except Exception as exc:
+        print(f"CLIENT: failed to connect to server {SERVER_IP}:{SERVER_PORT} ({exc})")
+        return
     conn.communicate_loop()
 
 class ClientServerConnectionProxy(object):

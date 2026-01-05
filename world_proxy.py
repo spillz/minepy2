@@ -83,6 +83,7 @@ from blocks import (
 )
 import mapgen
 import numpy
+import entity as entity_codec
 
 WATER = BLOCK_ID['Water']
 MAX_LIGHT = getattr(config, 'MAX_LIGHT', 15)
@@ -659,6 +660,21 @@ class ModelProxy(object):
         self.n_requests = 0
         self.n_responses = 0
         self.world_seed = None
+        self.player = None
+        self.players = []
+        self.host_id = None
+        self._server_outbox = deque()
+        self._entity_history = {}
+        self._entity_interp_delay = float(getattr(config, "ENTITY_INTERP_DELAY", 0.15))
+        self._entity_interp_extrap = float(getattr(config, "ENTITY_INTERP_EXTRAP", 0.25))
+        self.remote_players = {}
+        self.accepted_player_name = None
+        self.pending_spawn_state = None
+        self.entity_snapshot_requested = False
+        self.name_request_pending = False
+        self.name_sent_once = False
+        self.pending_entity_seed = None
+        self.player_state_request = False
 
         loader_server_pipe = None
         self.server = None
@@ -681,7 +697,11 @@ class ModelProxy(object):
             if config.SERVER_IP is not None:
                 logutil.log("MAIN", f"Starting server on {config.SERVER_IP}")
                 self.server = server_connection.start_server_connection(config.SERVER_IP)
-                loader_server_pipe = self.server.loader_pipe
+                if self.server.proc is not None and not self.server.proc.is_alive():
+                    print(f"CLIENT: server connection failed for {config.SERVER_IP}:{config.SERVER_PORT}")
+                    self.server = None
+                if self.server is not None:
+                    loader_server_pipe = self.server.loader_pipe
             logutil.log("MAIN", "Starting sector loader")
             self.loader = world_loader.start_loader(loader_server_pipe)
             self.loader_requests.append(['get_seed', []])
@@ -3097,6 +3117,302 @@ class ModelProxy(object):
                     return False
         return True
 
+    def is_host(self):
+        return self.server is not None and self.player is not None and self.host_id == self.player.id
+
+    def queue_server_message(self, message, data):
+        if self.server is None:
+            return
+        if data is None:
+            data = []
+        elif not isinstance(data, (list, tuple)):
+            data = [data]
+        self._server_outbox.append([message, data])
+
+    def _process_server_outbox(self):
+        if not self.server:
+            return
+        while self._server_outbox:
+            payload = self._server_outbox.popleft()
+            self.server.send(payload)
+
+    def _handle_entity_batch(self, payload, snapshot=False):
+        states = entity_codec.unpack_entity_batch(payload)
+        now = time.perf_counter()
+        active_ids = set()
+        for state in states:
+            entity_id = state.get("id")
+            if entity_id is None:
+                continue
+            active_ids.add(entity_id)
+            history = self._entity_history.get(entity_id)
+            if history is None:
+                history = deque(maxlen=3)
+                self._entity_history[entity_id] = history
+            history.append((now, state))
+        if snapshot:
+            for existing_id in list(self._entity_history.keys()):
+                if existing_id not in active_ids:
+                    self._entity_history.pop(existing_id, None)
+
+    def _handle_entity_despawn(self, payload):
+        ids = payload.get("ids", payload) if isinstance(payload, dict) else payload
+        if ids is None:
+            return
+        for entity_id in list(ids):
+            self._entity_history.pop(int(entity_id), None)
+
+    def _handle_server_message(self, msg, data):
+        if msg == 'connected':
+            self.player, self.players = data
+            self._sync_remote_players_from_list(self.players)
+            if self.player is not None:
+                desired = getattr(config, "PLAYER_NAME", None)
+                if desired and desired != self.player.name:
+                    self.player.name = desired
+                    self.queue_server_message("set_name", desired)
+                    self.accepted_player_name = None
+                    self.name_request_pending = True
+                    self.name_sent_once = True
+            others = [p for p in self.players if self.player is None or p.id != self.player.id]
+            if others:
+                roster = ", ".join(f"{p.name}({p.id})" for p in others)
+            else:
+                roster = "none"
+            print(
+                f"CLIENT: connected to {config.SERVER_IP}:{config.SERVER_PORT} "
+                f"as {self.player.name}({self.player.id}); others={roster}"
+            )
+            return
+        if msg == 'host_assign':
+            if isinstance(data, (list, tuple)) and data:
+                self.host_id = data[0]
+            else:
+                self.host_id = data
+            if self.is_host():
+                self.entity_snapshot_requested = True
+            return
+        if msg == 'other_player_join':
+            if isinstance(data, (list, tuple)) and data:
+                player = data[0]
+            else:
+                player = data
+            if player is not None:
+                self.players.append(player)
+                self._sync_remote_players_from_list([player])
+            return
+        if msg == 'other_player_leave':
+            player_id = None
+            if isinstance(data, (list, tuple)) and data:
+                player_id = data[0]
+            else:
+                player_id = data
+            if player_id is not None:
+                try:
+                    pid = int(player_id)
+                except (TypeError, ValueError):
+                    pid = None
+                if pid is not None:
+                    self.remote_players.pop(pid, None)
+                    self.players = [p for p in self.players if p.id != pid]
+            return
+        if msg == 'player_set_name':
+            player_id = None
+            name = None
+            if isinstance(data, (list, tuple)):
+                if len(data) >= 2:
+                    player_id, name = data[0], data[1]
+                elif len(data) == 1:
+                    name = data[0]
+            if player_id is not None:
+                if self.player is not None and player_id == self.player.id:
+                    self.accepted_player_name = name
+                    self.name_request_pending = False
+                if self.player is not None:
+                    for p in self.players:
+                        if p.id == player_id:
+                            p.name = name
+                            break
+                self._update_remote_player_name(player_id, name)
+            return
+        if msg == 'player_set_position':
+            player_id = None
+            position = None
+            rotation = None
+            if isinstance(data, (list, tuple)):
+                if len(data) >= 3:
+                    player_id, position, rotation = data[0], data[1], data[2]
+                elif len(data) == 2:
+                    player_id, position = data[0], data[1]
+                elif len(data) == 1:
+                    position = data[0]
+            if player_id is not None and position is not None:
+                self._update_remote_player_position(player_id, position, rotation)
+            return
+        if msg == 'player_spawn_state':
+            state = None
+            if isinstance(data, (list, tuple)) and data:
+                state = data[0]
+            elif isinstance(data, dict):
+                state = data
+            if state:
+                self.pending_spawn_state = state
+            return
+        if msg == 'player_set_block':
+            logutil.log("SERVER", f"player_set_block {data}")
+            pos, block = data
+            if self[pos] != block:
+                self.add_block(pos, block, False, priority=False)
+            return
+        if msg == 'entity_snapshot':
+            self._handle_entity_batch(data, snapshot=True)
+            return
+        if msg == 'entity_update':
+            self._handle_entity_batch(data, snapshot=False)
+            return
+        if msg == 'entity_spawn':
+            self._handle_entity_batch(data, snapshot=False)
+            return
+        if msg == 'entity_despawn':
+            self._handle_entity_despawn(data)
+            return
+        if msg == 'entity_request_snapshot':
+            self.entity_snapshot_requested = True
+            return
+        if msg == 'entity_seed_snapshot':
+            seed = None
+            if isinstance(data, (list, tuple)) and data:
+                seed = data[0]
+            elif isinstance(data, dict):
+                seed = data
+            if seed:
+                self.pending_entity_seed = seed
+            return
+        if msg == 'player_state_request':
+            self.player_state_request = True
+            return
+
+    def _sync_remote_players_from_list(self, players):
+        if not players:
+            return
+        for player in players:
+            if self.player is not None and player.id == self.player.id:
+                continue
+            info = self.remote_players.get(player.id)
+            if info is None:
+                info = {}
+                self.remote_players[player.id] = info
+            info["name"] = getattr(player, "name", "Player")
+            info["position"] = getattr(player, "position", (0.0, 0.0, 0.0))
+            info["rotation"] = getattr(player, "rotation", (0.0, 0.0))
+
+    def _update_remote_player_name(self, player_id, name):
+        try:
+            pid = int(player_id)
+        except (TypeError, ValueError):
+            return
+        info = self.remote_players.get(pid)
+        if info is None:
+            info = {}
+            self.remote_players[pid] = info
+        if name is not None:
+            info["name"] = name
+
+    def _update_remote_player_position(self, player_id, position, rotation=None):
+        try:
+            pid = int(player_id)
+        except (TypeError, ValueError):
+            return
+        info = self.remote_players.get(pid)
+        if info is None:
+            info = {}
+            self.remote_players[pid] = info
+        now = time.perf_counter()
+        prev_pos = info.get("position")
+        prev_time = info.get("last_time")
+        info["position"] = position
+        info["last_time"] = now
+        if prev_pos is not None and prev_time is not None:
+            dt = now - prev_time
+            if dt > 1e-6:
+                p0 = numpy.asarray(prev_pos, dtype=numpy.float32)
+                p1 = numpy.asarray(position, dtype=numpy.float32)
+                info["velocity"] = ((p1 - p0) / dt).tolist()
+        if rotation is not None:
+            info["rotation"] = rotation
+
+    def _process_server_messages(self, ipc_ok=None):
+        if not self.server:
+            return
+        self._process_server_outbox()
+        if ipc_ok is None:
+            ipc_ok = True
+        while ipc_ok and self.server.poll():
+            try:
+                msg, data = self.server.recv()
+                self._handle_server_message(msg, data)
+            except EOFError:
+                logutil.log("SERVER", "server returned EOF", level="WARN")
+                break
+
+    def get_interpolated_entities(self, now=None):
+        if now is None:
+            now = time.perf_counter()
+        render_time = now - self._entity_interp_delay
+        result = {}
+        for entity_id, history in self._entity_history.items():
+            if not history:
+                continue
+            if len(history) == 1:
+                result[entity_id] = history[-1][1]
+                continue
+            prev = None
+            next_state = None
+            for sample_time, sample_state in history:
+                if sample_time <= render_time:
+                    prev = (sample_time, sample_state)
+                if sample_time >= render_time:
+                    next_state = (sample_time, sample_state)
+                    break
+            if prev is None:
+                result[entity_id] = history[0][1]
+                continue
+            if next_state is None:
+                last_time, last_state = history[-1]
+                dt = render_time - last_time
+                if dt > self._entity_interp_extrap:
+                    result[entity_id] = last_state
+                    continue
+                vel = numpy.asarray(last_state.get("vel", (0.0, 0.0, 0.0)), dtype=numpy.float32)
+                pos = numpy.asarray(last_state.get("pos", (0.0, 0.0, 0.0)), dtype=numpy.float32)
+                state = dict(last_state)
+                state["pos"] = pos + vel * dt
+                result[entity_id] = state
+                continue
+            t0, state0 = prev
+            t1, state1 = next_state
+            if t1 <= t0:
+                result[entity_id] = state1
+                continue
+            t = (render_time - t0) / (t1 - t0)
+            pos0 = numpy.asarray(state0.get("pos", (0.0, 0.0, 0.0)), dtype=numpy.float32)
+            pos1 = numpy.asarray(state1.get("pos", (0.0, 0.0, 0.0)), dtype=numpy.float32)
+            rot0 = numpy.asarray(state0.get("rot", (0.0, 0.0)), dtype=numpy.float32)
+            rot1 = numpy.asarray(state1.get("rot", (0.0, 0.0)), dtype=numpy.float32)
+            pos = pos0 + (pos1 - pos0) * t
+            rot = rot0 + (rot1 - rot0) * t
+            state = dict(state0)
+            state["pos"] = pos
+            state["rot"] = rot
+            seg0 = state0.get("segment_positions")
+            seg1 = state1.get("segment_positions")
+            if seg0 is not None and seg1 is not None and len(seg0) == len(seg1):
+                a0 = numpy.asarray(seg0, dtype=numpy.float32)
+                a1 = numpy.asarray(seg1, dtype=numpy.float32)
+                state["segment_positions"] = (a0 + (a1 - a0) * t).tolist()
+            result[entity_id] = state
+        return result
+
     def update_sectors(self, old, new, player_pos=None, look_vec=None, frustum_circle=None, ipc_budget_ms=None, allow_send=True):
         """
         the observer has moved from sector old to new
@@ -3134,6 +3450,8 @@ class ModelProxy(object):
             deadline = None
 
         prev_ref = self.update_ref_pos
+
+        self._process_server_messages(ipc_ok=_ipc_ok())
 
         # Process any queued loader messages without blocking.
         processed_msgs = 0
@@ -3275,18 +3593,7 @@ class ModelProxy(object):
         priority_work = priority_processed or bool(self._priority_light_queue) or bool(self._priority_mesh_queue)
 
         if not missing_any and inflight == 0 and not self.loader_requests and processed_msgs == 0 and not priority_work:
-            if _ipc_ok() and self.server and self.server.poll():
-                try:
-                    msg, data = self.server.recv()
-                    if msg == 'connected':
-                        self.player, self.players = data
-                    if msg == 'player_set_block':
-                        logutil.log("SERVER", f"player_set_block {data}")
-                        pos, block = data
-                        if self[pos] != block:
-                            self.add_block(pos, block, False, priority=False)
-                except EOFError:
-                    logutil.log("SERVER", "server returned EOF", level="WARN")
+            self._process_server_messages(ipc_ok=_ipc_ok())
             return
 
         priority_work = (priority_work
@@ -3377,18 +3684,7 @@ class ModelProxy(object):
                     self.loader.send(self.loader_requests.pop(0))
                     self.stat_loader_sent_total += 1
 
-        if _ipc_ok() and self.server and self.server.poll():
-            try:
-                msg, data = self.server.recv()
-                if msg == 'connected':
-                    self.player, self.players = data
-                if msg == 'player_set_block':
-                    logutil.log("SERVER", f"player_set_block {data}")
-                    pos, block = data
-                    if self[pos] != block:
-                        self.add_block(pos, block, False, priority=False)
-            except EOFError:
-                logutil.log("SERVER", "server returned EOF", level="WARN")
+        self._process_server_messages(ipc_ok=_ipc_ok())
 
     def _build_block_vt(self, block_id, pos):
         face_count = int(BLOCK_FACE_COUNT[block_id])
