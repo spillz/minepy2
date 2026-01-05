@@ -48,6 +48,7 @@ FRAGMENT_SOURCE = """
 
 uniform sampler2D u_texture;
 uniform vec3 u_light_dir;
+uniform float u_light_dir_exp;
 uniform float u_ambient_light;
 uniform float u_sky_intensity;
 uniform vec3 u_fog_color;
@@ -69,6 +70,7 @@ out vec4 out_color;
 void main() {
     vec3 n = normalize(v_normal);
     float light = max(dot(n, normalize(u_light_dir)), 0.0);
+    light = pow(light, u_light_dir_exp);
     vec3 color = u_use_vertex_color ? v_color.rgb : vec3(1.0);
     vec4 tex_color = u_use_texture ? texture(u_texture, v_tex_coords) : vec4(1.0);
     float alpha = tex_color.a * (u_water_pass ? u_water_alpha : 1.0);

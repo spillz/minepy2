@@ -160,6 +160,8 @@ AMBIENT_LIGHT = 0.1  # minimum light level (0-1 range)
 MAX_LIGHT = 15  # integer light level range (0..MAX_LIGHT)
 SKY_INTENSITY = 1.0  # global sky light multiplier (0..1)
 LIGHT_GAMMA = 3.0  # 1.0 = linear, 2.0 = quadratic falloff
+# Exponent for directional light falloff (1.0 = linear Lambert).
+LIGHT_DIR_EXP = 1.0
 SKY_SIDEFILL_ENABLED = True  # indirect sky light from sides/seams
 TORCH_FILL_ENABLED = True # torch light propagation to nearby blocks
 LIGHT_PROPAGATION_BFS = True  # use numpy frontier BFS instead of dense relaxation
@@ -171,13 +173,36 @@ DAY_NIGHT_CYCLE_ENABLED = True
 DAY_LENGTH_SECONDS = 1200.0
 DAY_START_PHASE = 0.0  # 0.0 = midday, 0.5 = midnight
 DAY_LIGHT_CURVE = 1.0  # >1.0 darkens nights, <1.0 brightens nights
-SUN_LIGHT_DIR = (0.35, 1.0, 0.65)  # midday light direction (x, y, z)
-DAY_AMBIENT_LIGHT = 0.1
+SUN_LIGHT_DIR = (0.35, 1.0, 0.65)  # fallback light direction (x, y, z)
+# Sun path settings: noon azimuth and max elevation.
+SUN_PATH_AZIMUTH_DEG = 180.0  # noon direction (0=N, 90=E, 180=S, 270=W)
+SUN_PATH_SPAN_DEG = 90.0  # sunrise/sunset offset from noon bearing (this doesn't work well for anything other than 90 right now because it implies shorter/longer days)
+SUN_PATH_NOON_NORTH = False  # True => noon in the north instead of south
+SUN_MAX_ELEV_DEG = 75.0  # 90=overhead at noon
+DAY_AMBIENT_LIGHT = 0.06
 NIGHT_AMBIENT_LIGHT = 0.06
 DAY_SKY_INTENSITY = 1.0
-NIGHT_SKY_INTENSITY = 0.25
+NIGHT_SKY_INTENSITY = 0.125
 DAY_FOG_COLOR = (0.5, 0.69, 1.0)
 NIGHT_FOG_COLOR = (0.02, 0.03, 0.06)
+# Twilight range for sky intensity/fog blending around sunrise/sunset.
+SUN_TWILIGHT_RANGE = 0.12
+# Sunrise/sunset tint base/variance (0..1 RGB).
+SUN_TINT_BASE = (1.0, 0.55, 0.35)
+SUN_TINT_VARIANCE = (0.08, 0.08, 0.08)
+# Extra boost for the sun quad/halo colors.
+SUN_TINT_BOOST = 2.0
+# Sun quad settings (screen fraction of min dimension).
+SUN_ENABLED = True
+SUN_SIZE = 0.04
+SUN_HORIZON_SCALE = 0.3
+SUN_DISTANCE = 400.0
+SUN_GLOW_STEPS = 4
+SUN_GLOW_ALPHA = 120
+# Strength of the sun-centered sky gradient (0..1+).
+SUN_GRADIENT_STRENGTH = 1.3
+# Far plane for rendering the sun quad (should exceed SUN_DISTANCE).
+SUN_FAR_PLANE = 900.0
 # Ambient occlusion settings (darken inner edges/corners of exposed faces).
 AO_ENABLED = True
 AO_STRENGTH = 0.6

@@ -576,6 +576,7 @@ class ModelProxy(object):
         self.player_sector = None
         self.player_pos = None
         self.player_look = None
+        self.collisions_enabled = True
         self._last_queue_log_frame = -1
         self._last_missing_log_frame = -1
         self.loader_messages = queue.SimpleQueue()
@@ -4029,6 +4030,8 @@ class ModelProxy(object):
         vertical_collision : bool
             True if the entity collided with the ground or ceiling.
         """
+        if not self.collisions_enabled:
+            return position, False
         width, height, depth = bounding_box
         prev = prev_position if prev_position is not None else position
         p = [position[0], position[1], position[2]]

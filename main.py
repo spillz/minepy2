@@ -91,6 +91,41 @@ def pad_header(title, width=40):
         return title
     return '='*pad + ' ' + title + ' ' + '='*pad
 
+def _clamp(x, lo, hi):
+    return lo if x < lo else hi if x > hi else x
+
+def _norm(v: np.ndarray, eps=1e-9) -> np.ndarray:
+    n = np.linalg.norm(v)
+    if n < eps:
+        return np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    return (v / n).astype(np.float32)
+
+def _dir_from_az_elev_deg(az_deg: float, elev_rad: float) -> np.ndarray:
+    """
+    Your convention:
+      az=0 => north => (0,0,-1)
+      az=90 => east  => (1,0, 0)
+      az=180 => south => (0,0, 1)
+    """
+    az = math.radians(az_deg % 360.0)
+    ce = math.cos(elev_rad)
+    x = ce * math.sin(az)
+    y = math.sin(elev_rad)
+    z = ce * (-math.cos(az))
+    return _norm(np.array([x, y, z], dtype=np.float32))
+
+def _rodrigues_rotate(v: np.ndarray, axis: np.ndarray, theta: float) -> np.ndarray:
+    """
+    Rotate vector v around unit axis by theta (radians).
+    """
+    k = axis
+    ct = math.cos(theta)
+    st = math.sin(theta)
+    # v' = v ct + (k×v) st + k (k·v) (1-ct)
+    return (v * ct
+            + np.cross(k, v) * st
+            + k * (np.dot(k, v)) * (1.0 - ct)).astype(np.float32)
+
 class Window(pyglet.window.Window):
 
     def __init__(self, *args, **kwargs):
@@ -168,6 +203,7 @@ class Window(pyglet.window.Window):
         self.block_program = shaders.create_block_shader()
         self.block_program['u_texture'] = 0
         self.block_program['u_light_dir'] = getattr(config, 'SUN_LIGHT_DIR', (0.35, 1.0, 0.65))
+        self.block_program['u_light_dir_exp'] = getattr(config, 'LIGHT_DIR_EXP', 1.0)
         self.block_program['u_fog_color'] = getattr(config, 'DAY_FOG_COLOR', (0.5, 0.69, 1.0))
         self.block_program['u_water_pass'] = False
         self.block_program['u_water_alpha'] = getattr(config, 'WATER_ALPHA', 0.8)
@@ -181,16 +217,26 @@ class Window(pyglet.window.Window):
             self.block_program['u_fog_end'] = DIST
 
         self.day_night_enabled = getattr(config, "DAY_NIGHT_CYCLE_ENABLED", False)
+        self.time_mode = "1x"
         self.day_length = float(getattr(config, "DAY_LENGTH_SECONDS", 1200.0))
         if self.day_length <= 1e-6:
             self.day_length = 1200.0
         self.day_phase = float(getattr(config, "DAY_START_PHASE", 0.0)) % 1.0
+        self._sun_max_elev_rad = math.radians(float(getattr(config, "SUN_MAX_ELEV_DEG", 75.0)))
         sun_dir = getattr(config, "SUN_LIGHT_DIR", (0.35, 1.0, 0.65))
         self._sun_dir_xz = self._normalize_xz_dir(sun_dir)
+        path_azim = getattr(config, "SUN_PATH_AZIMUTH_DEG", None)
+        if path_azim is not None:
+            self._sun_path_azim_deg = float(path_azim) % 360.0
+        else:
+            az_rad = math.atan2(self._sun_dir_xz[0], -self._sun_dir_xz[1])
+            self._sun_path_azim_deg = math.degrees(az_rad) % 360.0
         self._day_light_dir = self._normalize_light_dir(sun_dir[0], sun_dir[1], sun_dir[2])
         self._day_ambient = getattr(config, "AMBIENT_LIGHT", 0.0)
         self._day_sky_intensity = getattr(config, "SKY_INTENSITY", 1.0)
         self._day_fog_color = getattr(config, "DAY_FOG_COLOR", (0.5, 0.69, 1.0))
+        self._sun_tint = self._pick_sun_tint()
+        self._sun_screen_pos = None
         if self.day_night_enabled:
             self._update_day_night(0.0)
 
@@ -294,29 +340,29 @@ class Window(pyglet.window.Window):
         # The label that is displayed in the top left of the canvas.
         self.label = pyglet.text.Label('', font_name='Consolas', font_size=18,
             x=10, y=self.height - 10, anchor_x='left', anchor_y='top',
-            color=(0, 0, 0, 255))
+            color=(255, 255, 255, 255))
         self.hud_info_label = pyglet.text.Label('', font_name='Consolas', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - 4,
             anchor_x='left', anchor_y='top',
-            color=(0, 0, 0, 255), multiline=True, width=self.width - 20)
+            color=(255, 255, 255, 255), multiline=True, width=self.width - 20)
         self.sector_label = pyglet.text.Label('', font_name='Consolas', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - self.hud_info_label.content_height - 8,
             anchor_x='left', anchor_y='top',
-            color=(0, 0, 0, 255), multiline=True, width=self.width - 20)
+            color=(255, 255, 255, 255), multiline=True, width=self.width - 20)
         self.sector_debug_label = pyglet.text.Label('', font_name='Consolas', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - self.hud_info_label.content_height - self.sector_label.content_height - 12,
             anchor_x='left', anchor_y='top',
-            color=(0, 0, 0, 255), multiline=True, width=self.width - 20)
+            color=(255, 255, 255, 255), multiline=True, width=self.width - 20)
         self.entity_label = pyglet.text.Label('', font_name='Consolas', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - self.hud_info_label.content_height - self.sector_label.content_height - self.sector_debug_label.content_height - 16,
             anchor_x='left', anchor_y='top',
-            color=(0, 0, 0, 255), multiline=True, width=self.width - 20)
+            color=(255, 255, 255, 255), multiline=True, width=self.width - 20)
         self.keybind_label = pyglet.text.Label('', font_name='Consolas', font_size=14,
             x=10, y=self.height - 10 - self.label.content_height - self.hud_info_label.content_height - self.sector_label.content_height - self.sector_debug_label.content_height - self.entity_label.content_height - 20,
             anchor_x='left', anchor_y='top',
-            color=(0, 0, 0, 255), multiline=True, width=self.width - 20)
-        self._label_bg = shapes.Rectangle(0, 0, 1, 1, color=(255, 255, 255))
-        self._label_bg.opacity = 80  # more transparent
+            color=(255, 255, 255, 255), multiline=True, width=self.width - 20)
+        self._label_bg = shapes.Rectangle(0, 0, 1, 1, color=(0, 0, 0))
+        self._label_bg.opacity = 140
         self._underwater_overlay = shapes.Rectangle(0, 0, 1, 1, color=config.UNDERWATER_COLOR)
         self.last_draw_ms = 0.0
         self.last_update_ms = 0.0
@@ -325,6 +371,7 @@ class Window(pyglet.window.Window):
         self._hud_probe_void = 'N/A'
         self._hud_probe_mush = 'NA'
         self.hud_visible = True
+        self.hud_mode = "minimal"
         self.hud_details_visible = False
         self.vsync_enabled = False
         self._hud_stats_start = time.perf_counter()
@@ -477,6 +524,76 @@ class Window(pyglet.window.Window):
         except Exception:
             return False
 
+    def _hud_time_of_day(self):
+        if not getattr(self, "day_night_enabled", False):
+            return "NA"
+        phase = float(getattr(self, "day_phase", 0.0)) % 1.0
+        hour = ((phase + 0.5) * 24.0) % 24.0
+        if hour >= 23.0 or hour < 1.0:
+            return "Midnight"
+        if hour < 2.0:
+            return "Wolf hour"
+        if hour < 4.0:
+            return "Owl hour"
+        if hour < 6.0:
+            return "Daybreak"
+        if hour < 7.0:
+            return "Sunrise"
+        if hour < 10.0:
+            return "Early morning"
+        if hour < 12.0:
+            return "Late morning"
+        if hour < 14.0:
+            return "Midday"
+        if hour < 16.0:
+            return "Early afternoon"
+        if hour < 18.0:
+            return "Late afternoon"
+        if hour < 19.0:
+            return "Sunset"
+        if hour < 21.0:
+            return "Early evening"
+        return "Late evening"
+
+    def _seed_word(self, seed):
+        if seed is None:
+            return "NA"
+        try:
+            seed_val = int(seed)
+        except Exception:
+            return "NA"
+        consonants = [
+            "b", "c", "d", "f", "g", "h", "j", "k",
+            "l", "m", "n", "p", "r", "s", "t", "v",
+            "w", "y", "z",
+        ]
+        vowels = ["a", "e", "i", "o", "u"]
+        rng = random.Random(seed_val)
+        syllables = []
+        for _ in range(4):
+            syllables.append(rng.choice(consonants) + rng.choice(vowels))
+        return "".join(syllables).capitalize()
+
+    def _hud_cardinal(self, yaw_deg):
+        dirs = [
+            "N", "NNE", "NE", "ENE",
+            "E", "ESE", "SE", "SSE",
+            "S", "SSW", "SW", "WSW",
+            "W", "WNW", "NW", "NNW",
+        ]
+        yaw = float(yaw_deg) % 360.0
+        idx = int(round(yaw / 22.5)) % 16
+        return dirs[idx]
+
+    def _hud_cardinal_text(self, abbrev):
+        full = {
+            "N": "North",
+            "E": "East",
+            "S": "South",
+            "W": "West",
+        }
+        return full.get(abbrev, abbrev)
+
     def _yaw_lerp(self, start, end, t):
         delta = ((end - start + 180.0) % 360.0) - 180.0
         return start + delta * t
@@ -495,36 +612,173 @@ class Window(pyglet.window.Window):
             return (0.35, 0.65)
         return (x / mag, z / mag)
 
+    def _pick_sun_tint(self):
+        base = getattr(config, "SUN_TINT_BASE", (1.0, 0.55, 0.35))
+        variance = getattr(config, "SUN_TINT_VARIANCE", (0.08, 0.08, 0.08))
+        tint = []
+        for idx in range(3):
+            v = base[idx] + random.uniform(-variance[idx], variance[idx])
+            tint.append(max(0.0, min(1.0, v)))
+        return tuple(tint)
+
+    def _boost_sun_color(self, color):
+        boost = getattr(config, "SUN_TINT_BOOST", 1.6)
+        return tuple(int(max(0, min(255, c * 255 * boost))) for c in color)
+
+    def _compute_sun_world_dir(self, hour_angle: float) -> np.ndarray:
+        """
+        Returns unit vector (x,y,z) sun direction in world space using a planar orbit.
+
+        Conventions preserved:
+        - hour_angle in [-pi, +pi], with noon at 0
+        - sunrise ~ -pi/2, sunset ~ +pi/2 for the stylized cycle
+        """
+        noon_azim = float(getattr(config, "SUN_PATH_AZIMUTH_DEG", 180.0)) % 360.0
+        span = float(getattr(config, "SUN_PATH_SPAN_DEG", 90.0))
+
+        if bool(getattr(config, "SUN_PATH_NOON_NORTH", False)):
+            noon_azim = (noon_azim + 180.0) % 360.0
+
+        max_elev_rad = self._sun_max_elev_rad  # use the already-initialized value
+
+        # Anchor directions
+        v_noon = _dir_from_az_elev_deg(noon_azim, max_elev_rad)
+        v_rise = _dir_from_az_elev_deg(noon_azim - span, 0.0)
+        v_set  = _dir_from_az_elev_deg(noon_azim + span, 0.0)
+
+        # Orbit plane normal
+        n = _norm(np.cross(v_noon, v_rise))
+
+        # Angular distance from noon to sunrise along the orbit
+        t0 = math.acos(_clamp(float(np.dot(v_noon, v_rise)), -1.0, 1.0))
+
+        # Ensure axis orientation: positive theta should move toward sunset
+        test = _rodrigues_rotate(v_noon, n, +t0)
+        if float(np.dot(test, v_set)) < float(np.dot(v_noon, v_set)):
+            n = -n
+
+        # Map hour_angle to u in [-1, +1] across the daylight half, clamp at night.
+        # sunrise (-pi/2) => u=-1 ; noon (0) => u=0 ; sunset (+pi/2) => u=+1
+        u = (2.0 * hour_angle) / math.pi
+        u_day = _clamp(u, -1.0, +1.0)
+
+        theta = u_day * t0
+        v = _rodrigues_rotate(v_noon, n, theta)
+        return _norm(v)
+
     def _update_day_night(self, dt):
         if not self.day_night_enabled:
             return
-        if self.day_length > 1e-6:
-            self.day_phase = (self.day_phase + dt / self.day_length) % 1.0
-        angle = self.day_phase * 2.0 * math.pi
-        sun_elev = math.cos(angle)
-        day_factor = 0.5 + 0.5 * sun_elev
-        curve = getattr(config, "DAY_LIGHT_CURVE", 1.0)
+
+        # Advance time
+        if self.time_mode == "10x":
+            speed = 10.0
+        elif self.time_mode == "0x":
+            speed = 0.0
+        else:
+            speed = 1.0
+
+        if speed != 0.0 and self.day_length > 1e-6:
+            self.day_phase = (self.day_phase + (dt * speed) / self.day_length) % 1.0
+
+        # ------------------------------------------------------------------
+        # Phase convention preserved: day_phase=0 => NOON.
+        # hour_angle in [-pi, +pi], noon at 0, sunset +pi/2, midnight +/-pi, sunrise -pi/2.
+        # ------------------------------------------------------------------
+        hour_angle = (self.day_phase * 2.0 * math.pi + math.pi) % (2.0 * math.pi) - math.pi
+        sun_elev_norm = math.cos(hour_angle)  # identical to previous cos(angle) behavior, but wrapped
+
+        # ------------------------------------------------------------------
+        # Visibility + twilight: keep your prior semantics so colors/tints stay tuned
+        # NOTE: your SUN_TWILIGHT_RANGE is being treated as a threshold in "cos-space" (as before)
+        # ------------------------------------------------------------------
+        twilight = float(getattr(config, "SUN_TWILIGHT_RANGE", 0.12))
+        twilight = max(twilight, 1e-6)
+
+        twilight_factor = max(0.0, 1.0 - min(1.0, abs(sun_elev_norm) / twilight))
+        self._sun_twilight_factor = twilight_factor
+
+        self._sun_visibility = max(0.0, min(1.0, (sun_elev_norm + twilight) / (2.0 * twilight)))
+        sun_visibility = self._sun_visibility
+
+        # Diagnostic (keep it aligned to your legacy driver)
+        self._sun_elev_raw = sun_elev_norm
+
+        # ------------------------------------------------------------------
+        # Sun direction (planar orbit), driven by THE SAME hour_angle
+        # ------------------------------------------------------------------
+        sun_vec = self._compute_sun_world_dir(hour_angle)
+        if sun_vec is None:
+            return
+        sun_vec = np.asarray(sun_vec, dtype=np.float32)
+        n = float(np.linalg.norm(sun_vec))
+        if n <= 1e-6:
+            return
+        sun_vec /= n
+
+        self._sun_world_dir = (float(sun_vec[0]), float(sun_vec[1]), float(sun_vec[2]))
+
+        # ------------------------------------------------------------------
+        # Day factor curve (keep legacy semantics if you want)
+        # If you previously used 0.5+0.5*cos(...) this matches it.
+        # ------------------------------------------------------------------
+        day_factor = max(0.0, min(1.0, 0.5 + 0.5 * sun_elev_norm))
+        curve = float(getattr(config, "DAY_LIGHT_CURVE", 1.0))
         if curve != 1.0:
             day_factor = day_factor ** curve
 
-        day_ambient = getattr(config, "DAY_AMBIENT_LIGHT", getattr(config, "AMBIENT_LIGHT", 0.1))
-        night_ambient = getattr(config, "NIGHT_AMBIENT_LIGHT", day_ambient)
-        self._day_ambient = night_ambient + (day_ambient - night_ambient) * day_factor
+        # ------------------------------------------------------------------
+        # Lighting & sky parameters: blend using sun_visibility (legacy semantics)
+        # ------------------------------------------------------------------
+        day_ambient = float(getattr(config, "DAY_AMBIENT_LIGHT", getattr(config, "AMBIENT_LIGHT", 0.1)))
+        night_ambient = float(getattr(config, "NIGHT_AMBIENT_LIGHT", day_ambient))
+        self._day_ambient = night_ambient + (day_ambient - night_ambient) * sun_visibility
 
-        day_sky = getattr(config, "DAY_SKY_INTENSITY", getattr(config, "SKY_INTENSITY", 1.0))
-        night_sky = getattr(config, "NIGHT_SKY_INTENSITY", day_sky)
-        self._day_sky_intensity = night_sky + (day_sky - night_sky) * day_factor
+        day_sky = float(getattr(config, "DAY_SKY_INTENSITY", getattr(config, "SKY_INTENSITY", 1.0)))
+        night_sky = float(getattr(config, "NIGHT_SKY_INTENSITY", day_sky))
+        self._day_sky_intensity = night_sky + (day_sky - night_sky) * sun_visibility
 
+        # ------------------------------------------------------------------
+        # Fog color with twilight tint (legacy timing)
+        # ------------------------------------------------------------------
         day_fog = getattr(config, "DAY_FOG_COLOR", (0.5, 0.69, 1.0))
         night_fog = getattr(config, "NIGHT_FOG_COLOR", day_fog)
-        self._day_fog_color = (
-            night_fog[0] + (day_fog[0] - night_fog[0]) * day_factor,
-            night_fog[1] + (day_fog[1] - night_fog[1]) * day_factor,
-            night_fog[2] + (day_fog[2] - night_fog[2]) * day_factor,
+        tint = getattr(self, "_sun_tint", (1.0, 0.55, 0.35))
+
+        base_fog = (
+            night_fog[0] + (day_fog[0] - night_fog[0]) * sun_visibility,
+            night_fog[1] + (day_fog[1] - night_fog[1]) * sun_visibility,
+            night_fog[2] + (day_fog[2] - night_fog[2]) * sun_visibility,
         )
 
-        xz = self._sun_dir_xz
-        self._day_light_dir = self._normalize_light_dir(xz[0], sun_elev, xz[1])
+        self._day_fog_color = (
+            base_fog[0] * (1.0 - twilight_factor) + tint[0] * twilight_factor,
+            base_fog[1] * (1.0 - twilight_factor) + tint[1] * twilight_factor,
+            base_fog[2] * (1.0 - twilight_factor) + tint[2] * twilight_factor,
+        )
+
+        # ------------------------------------------------------------------
+        # Daylight direction for shading:
+        # Follow sun direction above the horizon; at night blend to straight-up.
+        # Use sun_visibility (legacy timing) for the blend.
+        # ------------------------------------------------------------------
+        day_dir = np.array([sun_vec[0], max(0.0, sun_vec[1]), sun_vec[2]], dtype=np.float32)
+        dn = float(np.linalg.norm(day_dir))
+        if dn > 1e-6:
+            day_dir /= dn
+        else:
+            day_dir = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+
+        night_dir = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+
+        mix = night_dir * (1.0 - sun_visibility) + day_dir * sun_visibility
+        mn = float(np.linalg.norm(mix))
+        if mn > 1e-6:
+            mix /= mn
+        else:
+            mix = night_dir
+
+        self._day_light_dir = self._normalize_light_dir(float(mix[0]), float(mix[1]), float(mix[2]))
 
     def _player_back_orient(self):
         """Return orientation for wall-attached blocks based on player facing."""
@@ -801,6 +1055,249 @@ class Window(pyglet.window.Window):
         for stale_id in list(self._player_name_labels.keys()):
             if stale_id not in alive_ids:
                 self._player_name_labels.pop(stale_id, None)
+
+    def _compute_sun_screen_pos(self, projection, view, eye_world, allow_below=False):
+        if not getattr(config, "SUN_ENABLED", True):
+            return None
+        sun_dir = getattr(self, "_sun_world_dir", None)
+        if sun_dir is None:
+            sun_dir = getattr(self, "_day_light_dir", getattr(config, "SUN_LIGHT_DIR", (0.35, 1.0, 0.65)))
+            sun_dir = self._normalize_light_dir(sun_dir[0], sun_dir[1], sun_dir[2])
+        if not allow_below and sun_dir[1] <= 0.0:
+            return None
+        distance = float(getattr(config, "SUN_DISTANCE", 400.0))
+        sun_world = (
+            eye_world[0] + sun_dir[0] * distance,
+            eye_world[1] + sun_dir[1] * distance,
+            eye_world[2] + sun_dir[2] * distance,
+        )
+        screen = self._world_to_screen(sun_world, projection, view, eye_world)
+        if screen is not None:
+            return (screen[0], screen[1], sun_dir[1])
+        # Fallback: project view-space direction to screen.
+        width, height = self.get_size()
+        view_mat = np.array(list(view), dtype='f4').reshape((4, 4), order='F')
+        proj_mat = np.array(list(projection), dtype='f4').reshape((4, 4), order='F')
+        view_dir = view_mat @ np.array([sun_dir[0], sun_dir[1], sun_dir[2], 0.0], dtype='f4')
+        if view_dir[2] >= -1e-6:
+            return None
+        clip = proj_mat @ np.array([view_dir[0], view_dir[1], view_dir[2], 1.0], dtype='f4')
+        w = clip[3]
+        if abs(w) <= 1e-6:
+            return None
+        ndc = clip[:3] / w
+        sx = (ndc[0] * 0.5 + 0.5) * width
+        sy = (ndc[1] * 0.5 + 0.5) * height
+        if sx < 0 or sx > width or sy < 0 or sy > height:
+            return None
+        return (sx, sy, sun_dir[1])
+
+    def _draw_sky_gradient(self):
+        if not getattr(self, "day_night_enabled", False):
+            return
+        projection, view, eye_world = self.get_view_projection()
+        pos = self._compute_sun_screen_pos(projection, view, eye_world, allow_below=True)
+        if pos is None:
+            return
+        sx, sy, _ = pos
+        width, height = self.get_size()
+        base = getattr(self, "_day_fog_color", (0.5, 0.69, 1.0))
+        tint = getattr(self, "_sun_tint", (1.0, 0.55, 0.35))
+        strength = max(0.0, min(1.0, getattr(self, "_sun_twilight_factor", 0.0)))
+        strength = math.sqrt(strength)
+        strength *= float(getattr(config, "SUN_GRADIENT_STRENGTH", 1.0))
+        strength = max(0.0, min(1.0, strength))
+        center = (
+            base[0] * (1.0 - strength) + tint[0] * strength,
+            base[1] * (1.0 - strength) + tint[1] * strength,
+            base[2] * (1.0 - strength) + tint[2] * strength,
+        )
+        center_rgb = [int(max(0, min(255, c * 255))) for c in center]
+        outer_rgb = [int(max(0, min(255, c * 255))) for c in base]
+        def _to_ndc(px, py):
+            return (
+                (px / float(width)) * 2.0 - 1.0,
+                (py / float(height)) * 2.0 - 1.0,
+            )
+        cx, cy = _to_ndc(sx, sy)
+        c0x, c0y = _to_ndc(0.0, 0.0)
+        c1x, c1y = _to_ndc(width, 0.0)
+        c2x, c2y = _to_ndc(width, height)
+        c3x, c3y = _to_ndc(0.0, height)
+        positions = [
+            cx, cy, 0.0,
+            c0x, c0y, 0.0,
+            c1x, c1y, 0.0,
+            c2x, c2y, 0.0,
+            c3x, c3y, 0.0,
+            c0x, c0y, 0.0,
+        ]
+        colors = center_rgb + [0]
+        for _ in range(5):
+            colors += outer_rgb + [0]
+        normals = [0.0, 0.0, 1.0] * 6
+        tex = [0.0, 0.0] * 6
+        light = [1.0, 1.0] * 6
+        prev_use_tex = self.block_program["u_use_texture"]
+        prev_use_color = self.block_program["u_use_vertex_color"]
+        prev_water_pass = self.block_program["u_water_pass"]
+        prev_ambient = self.block_program["u_ambient_light"]
+        prev_light_dir = self.block_program["u_light_dir"]
+        prev_light_exp = self.block_program["u_light_dir_exp"]
+        prev_projection = self.block_program["u_projection"]
+        prev_view = self.block_program["u_view"]
+        prev_camera = self.block_program["u_camera_pos"]
+        prev_model = self.block_program["u_model"]
+        self.block_program.bind()
+        self.block_program["u_use_texture"] = False
+        self.block_program["u_use_vertex_color"] = True
+        self.block_program["u_water_pass"] = False
+        self.block_program["u_ambient_light"] = 1.0
+        self.block_program["u_light_dir"] = (0.0, 0.0, 1.0)
+        self.block_program["u_light_dir_exp"] = 1.0
+        self.block_program["u_projection"] = Mat4()
+        self.block_program["u_view"] = Mat4()
+        self.block_program["u_camera_pos"] = (0.0, 0.0, 0.0)
+        self.block_program["u_model"] = Mat4()
+        vl = self.block_program.vertex_list(
+            6,
+            gl.GL_TRIANGLE_FAN,
+            position=('f', np.array(positions, dtype='f4')),
+            tex_coords=('f', np.array(tex, dtype='f4')),
+            normal=('f', np.array(normals, dtype='f4')),
+            color=('f', np.array(colors, dtype='f4')),
+            light=('f', np.array(light, dtype='f4')),
+        )
+        vl.draw(gl.GL_TRIANGLE_FAN)
+        vl.delete()
+        self.block_program["u_use_texture"] = prev_use_tex
+        self.block_program["u_use_vertex_color"] = prev_use_color
+        self.block_program["u_water_pass"] = prev_water_pass
+        self.block_program["u_ambient_light"] = prev_ambient
+        self.block_program["u_light_dir"] = prev_light_dir
+        self.block_program["u_light_dir_exp"] = prev_light_exp
+        self.block_program["u_projection"] = prev_projection
+        self.block_program["u_view"] = prev_view
+        self.block_program["u_camera_pos"] = prev_camera
+        self.block_program["u_model"] = prev_model
+        self.block_program.unbind()
+
+    def _draw_sun_quad(self, center, right, up, size, color, alpha):
+        half = size * 0.5
+        p1 = center - right * half - up * half
+        p2 = center + right * half - up * half
+        p3 = center + right * half + up * half
+        p4 = center - right * half + up * half
+        positions = [
+            p1.x, p1.y, p1.z,
+            p2.x, p2.y, p2.z,
+            p3.x, p3.y, p3.z,
+            p1.x, p1.y, p1.z,
+            p3.x, p3.y, p3.z,
+            p4.x, p4.y, p4.z,
+        ]
+        tex = [0.0, 0.0] * 6
+        forward = Vec3(*self.get_sight_vector()).normalize()
+        normal = (-forward.x, -forward.y, -forward.z)
+        normals = list(normal) * 6
+        color_vals = [float(color[0]), float(color[1]), float(color[2]), 0.0]
+        colors = color_vals * 6
+        light = [1.0, 1.0] * 6
+        vl = self.block_program.vertex_list(
+            6,
+            gl.GL_TRIANGLES,
+            position=('f', np.array(positions, dtype='f4')),
+            tex_coords=('f', np.array(tex, dtype='f4')),
+            normal=('f', np.array(normals, dtype='f4')),
+            color=('f', np.array(colors, dtype='f4')),
+            light=('f', np.array(light, dtype='f4')),
+        )
+        prev_alpha = self.block_program["u_water_alpha"]
+        self.block_program["u_water_alpha"] = alpha / 255.0
+        vl.draw(gl.GL_TRIANGLES)
+        vl.delete()
+        self.block_program["u_water_alpha"] = prev_alpha
+
+    def _draw_sun(self):
+        if not getattr(config, "SUN_ENABLED", True):
+            return
+        visibility = float(getattr(self, "_sun_visibility", 1.0))
+        if visibility <= 1e-6:
+            return
+        projection, view, eye_world = self.get_view_projection()
+        sun_dir = getattr(self, "_sun_world_dir", None)
+        if sun_dir is None:
+            sun_dir = getattr(self, "_day_light_dir", getattr(config, "SUN_LIGHT_DIR", (0.35, 1.0, 0.65)))
+        sun_dir = Vec3(*sun_dir).normalize()
+        elev = max(0.0, min(1.0, sun_dir.y))
+        size = float(getattr(config, "SUN_SIZE", 0.04))
+        horizon_scale = float(getattr(config, "SUN_HORIZON_SCALE", 0.3))
+        scale = 1.0 + horizon_scale * (1.0 - max(0.0, min(1.0, elev)))
+        distance = float(getattr(config, "SUN_DISTANCE", 400.0))
+        fov_deg = 65.0
+        half_angle = math.radians(fov_deg * size * 0.5)
+        base = distance * math.tan(half_angle) * 2.0
+        sun_size = base * scale
+        center = Vec3(eye_world[0], eye_world[1], eye_world[2]) + sun_dir * distance
+        forward = Vec3(*self.get_sight_vector()).normalize()
+        up = Vec3(0.0, 1.0, 0.0)
+        right = forward.cross(up)
+        right_mag = math.sqrt(right.x * right.x + right.y * right.y + right.z * right.z)
+        if right_mag < 1e-6:
+            up = Vec3(0.0, 0.0, 1.0)
+            right = forward.cross(up)
+            right_mag = math.sqrt(right.x * right.x + right.y * right.y + right.z * right.z)
+            if right_mag < 1e-6:
+                return
+        right = right.normalize()
+        up = right.cross(forward).normalize()
+        glow_steps = int(getattr(config, "SUN_GLOW_STEPS", 4))
+        glow_alpha = int(getattr(config, "SUN_GLOW_ALPHA", 120))
+        glow_color = getattr(self, "_sun_tint", (1.0, 0.55, 0.35))
+        prev_use_tex = self.block_program["u_use_texture"]
+        prev_use_color = self.block_program["u_use_vertex_color"]
+        prev_water_pass = self.block_program["u_water_pass"]
+        prev_model = self.block_program["u_model"]
+        prev_ambient = self.block_program["u_ambient_light"]
+        prev_sky = self.block_program["u_sky_intensity"]
+        prev_light_dir = self.block_program["u_light_dir"]
+        prev_light_exp = self.block_program["u_light_dir_exp"]
+        prev_fog_start = self.block_program["u_fog_start"]
+        prev_fog_end = self.block_program["u_fog_end"]
+        self.block_program["u_use_texture"] = False
+        self.block_program["u_use_vertex_color"] = True
+        self.block_program["u_water_pass"] = True
+        self.block_program["u_model"] = Mat4()
+        self.block_program["u_ambient_light"] = 1.0
+        self.block_program["u_sky_intensity"] = 1.0
+        self.block_program["u_light_dir"] = (0.0, 0.0, 1.0)
+        self.block_program["u_light_dir_exp"] = 1.0
+        self.block_program["u_fog_start"] = 1.0e9
+        self.block_program["u_fog_end"] = 1.0e9 + 1.0
+        gl.glEnable(gl.GL_BLEND)
+        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+        gl.glDepthMask(gl.GL_FALSE)
+        for idx in range(glow_steps, 0, -1):
+            factor = idx / float(glow_steps)
+            extent = sun_size * (1.0 + 2.2 * factor)
+            alpha = int(glow_alpha * factor * factor * visibility)
+            color = self._boost_sun_color(glow_color)
+            self._draw_sun_quad(center, right, up, extent, color, alpha)
+        color = getattr(self, "_sun_tint", (1.0, 0.55, 0.35))
+        color = self._boost_sun_color(color)
+        self._draw_sun_quad(center, right, up, sun_size, color, int(200 * visibility))
+        self.block_program["u_use_texture"] = prev_use_tex
+        self.block_program["u_use_vertex_color"] = prev_use_color
+        self.block_program["u_water_pass"] = prev_water_pass
+        self.block_program["u_model"] = prev_model
+        self.block_program["u_ambient_light"] = prev_ambient
+        self.block_program["u_sky_intensity"] = prev_sky
+        self.block_program["u_light_dir"] = prev_light_dir
+        self.block_program["u_light_dir_exp"] = prev_light_exp
+        self.block_program["u_fog_start"] = prev_fog_start
+        self.block_program["u_fog_end"] = prev_fog_end
+        gl.glDisable(gl.GL_BLEND)
+        gl.glDepthMask(gl.GL_TRUE)
 
     def _face_orient(self, face):
         """Return orientation from a hit face (block - empty)."""
@@ -1274,7 +1771,7 @@ class Window(pyglet.window.Window):
             "flying": self.flying,
             "world_model": self.model,
             "camera_rotation": camera_rot,
-            "apply_camera_rotation": not ladder_aligning,
+            "apply_camera_rotation": is_moving and not ladder_aligning,
             "player_position": self.player_entity.position.copy(),
             "camera_mode": self.camera_mode,
             "strafe": (0, 0) if ladder_aligning else tuple(self.strafe),
@@ -1538,13 +2035,35 @@ class Window(pyglet.window.Window):
             self.set_exclusive_mouse(False)
         elif symbol == key.TAB:
             self.flying = not self.flying
+        elif symbol == key.F4:
+            if modifiers & key.MOD_SHIFT:
+                self.day_phase = 0.75
+            elif modifiers & key.MOD_CTRL:
+                self.day_phase = 0.25
+            else:
+                if self.time_mode == "1x":
+                    self.time_mode = "10x"
+                elif self.time_mode == "10x":
+                    self.time_mode = "0x"
+                else:
+                    self.time_mode = "1x"
         elif symbol == key.F5:
             if self.camera_mode == 'first_person':
                 self.camera_mode = 'third_person'
             else:
                 self.camera_mode = 'first_person'
+        elif symbol == key.F6:
+            self.model.collisions_enabled = not getattr(self.model, "collisions_enabled", True)
+            status = "enabled" if self.model.collisions_enabled else "disabled"
+            logutil.log("MAIN", f"Collisions {status}")
         elif symbol == key.F1:
-            self.hud_visible = not self.hud_visible
+            if not self.hud_visible:
+                self.hud_visible = True
+                self.hud_mode = "minimal"
+            else:
+                self.hud_mode = "full" if self.hud_mode == "minimal" else "minimal"
+            if self.hud_mode == "minimal":
+                self.hud_details_visible = False
             self._hud_layout_dirty = True
         elif symbol == key.F2:
             self.vsync_enabled = not self.vsync_enabled
@@ -1708,7 +2227,9 @@ class Window(pyglet.window.Window):
     def get_view_projection(self):
         width, height = self.get_size()
         aspect = width / float(height)
-        projection = Mat4.perspective_projection(aspect, 0.1, 512.0, 65)
+        sun_far = float(getattr(config, "SUN_FAR_PLANE", 0.0))
+        far_plane = max(512.0, sun_far)
+        projection = Mat4.perspective_projection(aspect, 0.1, far_plane, 65)
 
         camera_pos = self.player_entity.get_camera_position()
         player_head_pos = Vec3(camera_pos[0], camera_pos[1], camera_pos[2])
@@ -1737,6 +2258,7 @@ class Window(pyglet.window.Window):
 
         gl.glViewport(0, 0, width, height)
         projection, view, eye_pos = self.get_view_projection()
+        self._last_view_matrix = view
         # pyglet Mat4 supports direct upload; ensure contiguous float32 arrays
         self.model.set_matrices(projection, view, eye_pos)
         if config.DEBUG_SINGLE_BLOCK and not self._printed_mats:
@@ -1747,6 +2269,20 @@ class Window(pyglet.window.Window):
             self._printed_mats = True
 ##        gl.glLightfv(gl.GL_LIGHT1, gl.GL_POSITION, GLfloat4(0.35,1.0,0.65,0.0))
         #gl.glLightfv(gl.GL_LIGHT0,gl.GL_SPECULAR, GLfloat4(1,1,1,1))
+
+    def _light_dir_view(self, light_dir):
+        if light_dir is None:
+            return (0.0, 1.0, 0.0)
+        view = getattr(self, "_last_view_matrix", None)
+        if view is None:
+            return light_dir
+        view_mat = np.array(list(view), dtype='f4').reshape((4, 4), order='F')
+        vec = np.array([light_dir[0], light_dir[1], light_dir[2], 0.0], dtype='f4')
+        out = view_mat @ vec
+        mag = math.sqrt(float(out[0] * out[0] + out[1] * out[1] + out[2] * out[2]))
+        if mag <= 1e-6:
+            return (0.0, 1.0, 0.0)
+        return (float(out[0] / mag), float(out[1] / mag), float(out[2] / mag))
 
 
     def get_frustum_circle(self):
@@ -1785,13 +2321,16 @@ class Window(pyglet.window.Window):
         # upload_budget = 0.3 * frame_budget
         upload_budget = max(0.5/self.target_fps, 0.5 * frame_budget)
         self.clear()
+        self.set_2d()
+        self._draw_sky_gradient()
         self.set_3d()
 
         if self.day_night_enabled:
             self.block_program['u_ambient_light'] = self._day_ambient
             self.block_program['u_sky_intensity'] = self._day_sky_intensity
-            self.block_program['u_light_dir'] = self._day_light_dir
+            self.block_program['u_light_dir'] = self._light_dir_view(self._day_light_dir)
             self.block_program['u_fog_color'] = self._day_fog_color
+            self.block_program['u_light_dir_exp'] = getattr(config, 'LIGHT_DIR_EXP', 1.0)
             gl.glClearColor(
                 self._day_fog_color[0],
                 self._day_fog_color[1],
@@ -1801,8 +2340,11 @@ class Window(pyglet.window.Window):
         else:
             self.block_program['u_ambient_light'] = getattr(config, 'AMBIENT_LIGHT', 0.0)
             self.block_program['u_sky_intensity'] = getattr(config, 'SKY_INTENSITY', 1.0)
-            self.block_program['u_light_dir'] = getattr(config, 'SUN_LIGHT_DIR', (0.35, 1.0, 0.65))
+            self.block_program['u_light_dir'] = self._light_dir_view(
+                getattr(config, 'SUN_LIGHT_DIR', (0.35, 1.0, 0.65))
+            )
             fog_color = getattr(config, 'DAY_FOG_COLOR', (0.5, 0.69, 1.0))
+            self.block_program['u_light_dir_exp'] = getattr(config, 'LIGHT_DIR_EXP', 1.0)
             self.block_program['u_fog_color'] = fog_color
             gl.glClearColor(
                 fog_color[0],
@@ -1852,6 +2394,8 @@ class Window(pyglet.window.Window):
         self.block_program['u_use_texture'] = True
         # self.block_program['u_use_vertex_color'] = True
         entity_draw_ms = (time.perf_counter() - t0) * 1000.0
+
+        self._draw_sun()
 
         t0 = time.perf_counter()
         # Draw water after entities so it tints submerged parts.
@@ -2084,6 +2628,7 @@ class Window(pyglet.window.Window):
         """
         if not self.hud_visible:
             return
+        minimal_mode = getattr(self, "hud_mode", "minimal") == "minimal"
         hud_profile = getattr(config, 'HUD_PROFILE', False)
         if hud_profile:
             profile_start = time.perf_counter()
@@ -2128,7 +2673,7 @@ class Window(pyglet.window.Window):
         if hud_profile:
             _profile_mark("probe")
         now = time.perf_counter()
-        if self.hud_details_visible:
+        if self.hud_details_visible and not minimal_mode:
             refresh_s = float(getattr(config, "HUD_DETAIL_REFRESH_S", 1.0))
             if now - self._hud_detail_last_update >= refresh_s:
                 self._hud_detail_last_update = now
@@ -2137,15 +2682,27 @@ class Window(pyglet.window.Window):
             self._hud_block_last_update = now
             fps = self._current_fps()
             seed_val = getattr(self.model, "world_seed", None)
-            seed_text = str(seed_val) if seed_val is not None else "NA"
-            self._hud_block1_text = (
-                'FPS(%.1f), pos(%.2f, %.2f, %.2f) sector(%d, 0, %d) rot(%.1f, %.1f) seed %s void %s mush %s' % (
-                    fps, x, y, z, sector[0], sector[2], rx, ry, seed_text, void_text, mush_text
+            seed_text = self._seed_word(seed_val)
+            facing = self._hud_cardinal(rx)
+            time_text = self._hud_time_of_day()
+            rot_text = rx % 360.0
+            if minimal_mode:
+                facing_text = self._hud_cardinal_text(facing)
+                self._hud_block1_text = f"{time_text} on {seed_text} facing {facing_text} (F1 for more)"
+                self._hud_block2_text = ""
+                self._hud_block3_text = ""
+                self._hud_block4_text = ""
+                self._hud_block5_text = ""
+            else:
+                self._hud_block1_text = (
+                    'FPS(%.1f), pos(%.2f, %.2f, %.2f) sector(%d, 0, %d) rot (%s, %.1f, %.1f) '
+                    '%s on %s' % (
+                        fps, x, y, z, sector[0], sector[2], facing, rot_text, ry, time_text, seed_text
+                    )
                 )
-            )
             if hud_profile:
                 _profile_mark("build_block1")
-            if not self.hud_details_visible:
+            if minimal_mode or not self.hud_details_visible:
                 self._hud_block2_text = ""
                 self._hud_block3_text = ""
                 self._hud_block4_text = ""
@@ -2425,7 +2982,7 @@ class Window(pyglet.window.Window):
         sector_text = f"{self._hud_block3_text}\n" if self._hud_block3_text else ""
         debug_text = f"{self._hud_block4_text}\n" if self._hud_block4_text else ""
         entity_text = f"{self._hud_block5_text}\n" if self._hud_block5_text else ""
-        if self.hud_details_visible:
+        if self.hud_details_visible and not minimal_mode:
             detail_update = self._hud_detail_dirty or self._hud_layout_dirty
             if detail_update:
                 layout_dirty |= self._set_label_text(self.hud_info_label, info_text)
@@ -2453,11 +3010,27 @@ class Window(pyglet.window.Window):
         snail_state = "on" if self.snail_enabled else "off"
         seagull_state = "on" if self.seagull_enabled else "off"
         dog_state = "on" if self.dog_enabled else "off"
-        keybind_text = (
-            "Toggles: (F1)HUD=%s (F2)Vsync=%s (F3)Details=%s (F5)Cam=%s (F8)Copy | "
-            "(V)Dog=%s (B)Snail=%s S(N)nake=%s (M)Seagull=%s"
-            % (hud_state, vsync_state, details_state, camera_state, snake_state, snail_state, seagull_state, dog_state)
-        )
+        coll_state = "on" if getattr(self.model, "collisions_enabled", True) else "off"
+        time_mode_text = getattr(self, "time_mode", "1x")
+        if minimal_mode:
+            keybind_text = ""
+        else:
+            keybind_text = (
+                "Toggles: (F1)HUD=%s (F2)Vsync=%s (F3)Debug=%s (F4)Time=%s (F5)Cam=%s (F6)Coll=%s (F8)Copy | "
+                "(V)Dog=%s (B)Snail=%s S(N)nake=%s (M)Seagull=%s"
+                % (
+                    hud_state,
+                    vsync_state,
+                    details_state,
+                    time_mode_text,
+                    camera_state,
+                    coll_state,
+                    dog_state,
+                    snail_state,
+                    snake_state,
+                    seagull_state,
+                )
+            )
         layout_dirty |= self._set_label_text(self.keybind_label, keybind_text)
         if hud_profile:
             _profile_mark("set_label_keybind")
@@ -2488,7 +3061,7 @@ class Window(pyglet.window.Window):
             pad_x = 6
             pad_y = 3
             top = self.label.y
-            bottom = self.keybind_label.y - self.keybind_label.content_height
+            bottom = self.keybind_label.y - self.keybind_label.content_height if not minimal_mode else (self.label.y - self.label.content_height)
             if self.hud_details_visible:
                 entity_width = max(
                     self.label.content_width,
@@ -2502,7 +3075,7 @@ class Window(pyglet.window.Window):
                 entity_width = max(
                     self.label.content_width,
                     self.keybind_label.content_width,
-                )
+                ) if not minimal_mode else self.label.content_width
             bg_width = entity_width + pad_x * 2
             bg_height = (top - bottom) + pad_y * 2
             bg_x = self.label.x - pad_x
