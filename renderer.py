@@ -57,6 +57,15 @@ class AnimatedEntityRenderer:
         self.program = program
         self.animation_time = 0.0
         self.current_animation_name = 'idle'
+        self._fallback_animation_name = 'idle'
+        self._entity_anim_time = {}
+        self._entity_anim_name = {}
+        self._entity_last_seen = {}
+        self._entity_blend = {}
+        self._frame_counter = 0
+        self._last_dt = 0.0
+        self._active_blend = None
+        self._active_entity_id = None
 
         self.batch = pyglet.graphics.Batch()
         self.group = pyglet.graphics.Group()
@@ -102,72 +111,230 @@ class AnimatedEntityRenderer:
             )
 
     def set_animation(self, anim_name):
-        if anim_name != self.current_animation_name:
-            self.current_animation_name = anim_name
-            self.animation_time = 0.0
+        self._fallback_animation_name = anim_name
 
     def update(self, dt):
-        anim = self.model['animations'].get(self.current_animation_name)
-        if anim:
-            self.animation_time += dt
-            duration = anim.get('length', 1.0)
-            if anim.get('loop', False) and duration > 0:
-                self.animation_time %= duration
+        self._last_dt = float(dt)
+        self._frame_counter += 1
+        if self._entity_last_seen:
+            cutoff = self._frame_counter - 300
+            stale = [eid for eid, seen in self._entity_last_seen.items() if seen < cutoff]
+            for eid in stale:
+                self._entity_last_seen.pop(eid, None)
+                self._entity_anim_name.pop(eid, None)
+                self._entity_anim_time.pop(eid, None)
+                self._entity_blend.pop(eid, None)
 
     def get_interpolated_rotation(self, part_name):
         anim = self.model['animations'].get(self.current_animation_name)
+        return self._get_interpolated_rotation_for(part_name, anim, self.animation_time)
+
+    def _get_interpolated_rotation_for(self, part_name, anim, anim_time):
         default_rot = {'pitch': 0, 'yaw': 0, 'roll': 0}
         if not anim or 'keyframes' not in anim:
-            return self.get_parent_rotation(part_name, anim)
+            return self._get_parent_rotation_for(part_name, anim, anim_time)
+        length = float(anim.get('length', 1.0) or 1.0)
+        loop = bool(anim.get('loop', False))
+        eps = 1e-6
 
         keyframes = [kf for kf in anim['keyframes'] if 'rotations' in kf and part_name in kf['rotations']]
-        
+        if loop and length > 0:
+            keyframes = [kf for kf in keyframes if kf.get('time', 0.0) < (length - eps)]
         if not keyframes:
-            return self.get_parent_rotation(part_name, anim)
+            return self._get_parent_rotation_for(part_name, anim, anim_time)
 
-        if keyframes[0]['time'] > self.animation_time:
-            # If before the first keyframe, use its rotation but don't interpolate
-            return keyframes[0]['rotations'][part_name]
-        
-        prev_kf = keyframes[0]
-        next_kf = None
-        for kf in keyframes:
-            if kf['time'] > self.animation_time:
-                next_kf = kf
-                break
-            prev_kf = kf
-        
-        if next_kf is None:
-             return prev_kf['rotations'][part_name]
+        keyframes = sorted(keyframes, key=lambda kf: kf.get('time', 0.0))
+        anim_time = float(anim_time)
+        if loop and length > 0:
+            anim_time %= length
+
+        if anim_time < keyframes[0]['time']:
+            if loop:
+                prev_kf = keyframes[-1]
+                next_kf = keyframes[0]
+                time_diff = (length - prev_kf['time']) + next_kf['time']
+                t = 0.0 if time_diff <= 0 else (anim_time + (length - prev_kf['time'])) / time_diff
+            else:
+                return keyframes[0]['rotations'][part_name]
+        else:
+            prev_kf = keyframes[0]
+            next_kf = None
+            for kf in keyframes:
+                if kf['time'] > anim_time:
+                    next_kf = kf
+                    break
+                prev_kf = kf
+            if next_kf is None:
+                if loop:
+                    next_kf = keyframes[0]
+                    time_diff = (length - prev_kf['time']) + next_kf['time']
+                    t = 0.0 if time_diff <= 0 else (anim_time - prev_kf['time']) / time_diff
+                else:
+                    return prev_kf['rotations'][part_name]
+            else:
+                time_diff = next_kf['time'] - prev_kf['time']
+                t = 0.0 if time_diff <= 0 else (anim_time - prev_kf['time']) / time_diff
 
         prev_rot = prev_kf['rotations'][part_name]
         next_rot = next_kf['rotations'][part_name]
-        
-        time_diff = next_kf['time'] - prev_kf['time']
-        if time_diff <= 0:
-            t = 0
-        else:
-            t = (self.animation_time - prev_kf['time']) / time_diff
-        
         interpolated_rot = {}
         for angle in ['pitch', 'yaw', 'roll']:
             start_angle = prev_rot.get(angle, 0)
             end_angle = next_rot.get(angle, 0)
             interpolated_rot[angle] = start_angle + t * (end_angle - start_angle)
-
         return interpolated_rot
+
+    def get_interpolated_transform(self, part_name):
+        anim = self.model['animations'].get(self.current_animation_name)
+        return self._get_interpolated_transform_for(part_name, anim, self.animation_time)
+
+    def _get_interpolated_transform_for(self, part_name, anim, anim_time):
+        default_transform = {
+            'pitch': 0, 'yaw': 0, 'roll': 0,
+            'dx': 0, 'dy': 0, 'dz': 0,
+            'dwx': 0, 'dwy': 0, 'dwz': 0,
+            'sx': None, 'sy': None, 'sz': None,
+            'dpx': 0, 'dpy': 0, 'dpz': 0,
+        }
+        if not anim or 'keyframes' not in anim:
+            rot = self._get_parent_rotation_for(part_name, anim, anim_time)
+            transform = dict(default_transform)
+            transform.update(rot)
+            return transform
+        length = float(anim.get('length', 1.0) or 1.0)
+        loop = bool(anim.get('loop', False))
+        eps = 1e-6
+
+        keyframes = [kf for kf in anim['keyframes'] if 'transforms' in kf and part_name in kf['transforms']]
+        if loop and length > 0:
+            keyframes = [kf for kf in keyframes if kf.get('time', 0.0) < (length - eps)]
+        if not keyframes:
+            rot = self._get_interpolated_rotation_for(part_name, anim, anim_time)
+            transform = dict(default_transform)
+            transform.update(rot)
+            return transform
+
+        keyframes = sorted(keyframes, key=lambda kf: kf.get('time', 0.0))
+        anim_time = float(anim_time)
+        if loop and length > 0:
+            anim_time %= length
+
+        if anim_time < keyframes[0]['time']:
+            if loop:
+                prev_kf = keyframes[-1]
+                next_kf = keyframes[0]
+                time_diff = (length - prev_kf['time']) + next_kf['time']
+                t = 0.0 if time_diff <= 0 else (anim_time + (length - prev_kf['time'])) / time_diff
+            else:
+                transform = dict(default_transform)
+                transform.update(keyframes[0]['transforms'][part_name])
+                return transform
+        else:
+            prev_kf = keyframes[0]
+            next_kf = None
+            for kf in keyframes:
+                if kf['time'] > anim_time:
+                    next_kf = kf
+                    break
+                prev_kf = kf
+            if next_kf is None:
+                if loop:
+                    next_kf = keyframes[0]
+                    time_diff = (length - prev_kf['time']) + next_kf['time']
+                    t = 0.0 if time_diff <= 0 else (anim_time - prev_kf['time']) / time_diff
+                else:
+                    transform = dict(default_transform)
+                    transform.update(prev_kf['transforms'][part_name])
+                    return transform
+            else:
+                time_diff = next_kf['time'] - prev_kf['time']
+                t = 0.0 if time_diff <= 0 else (anim_time - prev_kf['time']) / time_diff
+
+        prev_tr = prev_kf['transforms'][part_name]
+        next_tr = next_kf['transforms'][part_name]
+        interpolated = dict(default_transform)
+        keys = set(prev_tr.keys()) | set(next_tr.keys())
+        for key in keys:
+            start_val = prev_tr.get(key, default_transform.get(key, 0))
+            end_val = next_tr.get(key, default_transform.get(key, 0))
+            if key in ('sx', 'sy', 'sz'):
+                if start_val is None:
+                    start_val = 1.0
+                if end_val is None:
+                    end_val = 1.0
+            interpolated[key] = start_val + t * (end_val - start_val)
+        return interpolated
+
+    def _blend_transforms(self, a, b, t):
+        default_transform = {
+            'pitch': 0, 'yaw': 0, 'roll': 0,
+            'dx': 0, 'dy': 0, 'dz': 0,
+            'dwx': 0, 'dwy': 0, 'dwz': 0,
+            'sx': None, 'sy': None, 'sz': None,
+            'dpx': 0, 'dpy': 0, 'dpz': 0,
+        }
+        out = dict(default_transform)
+        keys = set(a.keys()) | set(b.keys()) | set(default_transform.keys())
+        for key in keys:
+            start_val = a.get(key, default_transform.get(key, 0))
+            end_val = b.get(key, default_transform.get(key, 0))
+            if key in ('sx', 'sy', 'sz'):
+                if start_val is None:
+                    start_val = 1.0
+                if end_val is None:
+                    end_val = 1.0
+            out[key] = start_val + t * (end_val - start_val)
+        return out
 
     def get_parent_rotation(self, part_name, anim):
         """Recursively find rotation from parent part."""
+        return self._get_parent_rotation_for(part_name, anim, self.animation_time)
+
+    def _get_parent_rotation_for(self, part_name, anim, anim_time):
         part_data = self.model['parts'].get(part_name, {})
         parent_name = part_data.get('parent')
         if parent_name:
-            return self.get_interpolated_rotation(parent_name)
+            return self._get_interpolated_rotation_for(parent_name, anim, anim_time)
         return {'pitch': 0, 'yaw': 0, 'roll': 0}
 
     def draw(self, entity_state):
         pos = entity_state['pos']
         rot = entity_state['rot']
+        anim_name = entity_state.get('animation', self._fallback_animation_name)
+        entity_id = entity_state.get('id')
+        if entity_id is None:
+            entity_id = id(entity_state)
+        prev_anim = self._entity_anim_name.get(entity_id)
+        prev_time = self._entity_anim_time.get(entity_id, 0.0)
+        if prev_anim != anim_name:
+            blend_duration = entity_state.get('anim_blend')
+            if blend_duration is None:
+                blend_duration = self.model.get('animation_blend', 0.0)
+            if blend_duration and prev_anim is not None:
+                self._entity_blend[entity_id] = {
+                    'prev_anim': prev_anim,
+                    'prev_time': prev_time,
+                    'elapsed': 0.0,
+                    'duration': float(blend_duration),
+                }
+            else:
+                self._entity_blend.pop(entity_id, None)
+            self._entity_anim_name[entity_id] = anim_name
+            self._entity_anim_time[entity_id] = 0.0
+        self._entity_last_seen[entity_id] = self._frame_counter
+        anim_time = self._entity_anim_time.get(entity_id, 0.0)
+        if self._last_dt:
+            anim_time += self._last_dt
+            self._entity_anim_time[entity_id] = anim_time
+            blend = self._entity_blend.get(entity_id)
+            if blend is not None:
+                blend['elapsed'] = float(blend.get('elapsed', 0.0)) + self._last_dt
+                if blend['elapsed'] >= blend['duration']:
+                    self._entity_blend.pop(entity_id, None)
+        self.current_animation_name = anim_name
+        self.animation_time = anim_time
+        self._active_entity_id = entity_id
+        self._active_blend = self._entity_blend.get(entity_id)
 
         root_part_name = self.model.get('root_part', 'body')
         root_part_size = None
@@ -184,21 +351,55 @@ class AnimatedEntityRenderer:
         # Find the root part and start the recursive drawing
         if root_part_name in self.model['parts']:
             self._draw_part(root_part_name, model_matrix)
+        self._active_blend = None
+        self._active_entity_id = None
 
     def _draw_part(self, part_name, parent_matrix):
         part_data = self.model['parts'][part_name]
 
         # Get transformations for this part
         pivot = part_data.get('pivot', [0, 0, 0])
-        rotation = self.get_interpolated_rotation(part_name)
+        if self._active_blend:
+            blend = self._active_blend
+            duration = blend.get('duration', 0.0) or 0.0
+            t = 1.0 if duration <= 0 else min(max(blend.get('elapsed', 0.0) / duration, 0.0), 1.0)
+            prev_anim = self.model['animations'].get(blend.get('prev_anim'))
+            prev_time = blend.get('prev_time', 0.0)
+            prev_transform = self._get_interpolated_transform_for(part_name, prev_anim, prev_time)
+            next_anim = self.model['animations'].get(self.current_animation_name)
+            next_transform = self._get_interpolated_transform_for(part_name, next_anim, self.animation_time)
+            transform = self._blend_transforms(prev_transform, next_transform, t)
+        else:
+            transform = self.get_interpolated_transform(part_name)
+        rotation = {
+            'pitch': transform.get('pitch', 0),
+            'yaw': transform.get('yaw', 0),
+            'roll': transform.get('roll', 0),
+        }
         position = part_data.get('position', [0, 0, 0])
+        dx = transform.get('dx', 0)
+        dy = transform.get('dy', 0)
+        dz = transform.get('dz', 0)
+        sx = transform.get('sx')
+        sy = transform.get('sy')
+        sz = transform.get('sz')
+        scale = Vec3(
+            sx if sx is not None else 1.0 + transform.get('dwx', 0),
+            sy if sy is not None else 1.0 + transform.get('dwy', 0),
+            sz if sz is not None else 1.0 + transform.get('dwz', 0),
+        )
 
         # Create transformation matrices using pyglet.math methods
-        pivot_vec = Vec3(*pivot)
+        pivot_vec = Vec3(
+            pivot[0] + transform.get('dpx', 0),
+            pivot[1] + transform.get('dpy', 0),
+            pivot[2] + transform.get('dpz', 0),
+        )
         pivot_mat = Mat4.from_translation(pivot_vec)
 
-        pos_vec = Vec3(*position)
+        pos_vec = Vec3(position[0] + dx, position[1] + dy, position[2] + dz)
         pos_mat = Mat4.from_translation(pos_vec)
+        scale_mat = Mat4.from_scale(scale)
 
         # Apply rotations
         rot_mat = Mat4()
@@ -207,7 +408,7 @@ class AnimatedEntityRenderer:
         rot_mat = rot_mat.rotate(math.radians(rotation.get('yaw', 0)), Vec3(0, 1, 0))
 
         # Final transformation matrix to draw this part's mesh
-        draw_matrix = parent_matrix @ pivot_mat @rot_mat @ pos_mat 
+        draw_matrix = parent_matrix @ pivot_mat @ rot_mat @ pos_mat @ scale_mat 
         
         # Set the model matrix uniform and draw the mesh
         self.program['u_model'] = draw_matrix

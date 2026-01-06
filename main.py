@@ -40,6 +40,7 @@ from entities.snake import SNAKE_MODEL, SnakeEntity
 from entities.snail import SNAIL_MODEL, SnailEntity
 from entities.seagull import SEAGULL_MODEL, SeagullEntity
 from entities.dog import DOG_MODEL, Dog
+from entities.dinotrex import DINOTREX_MODEL, DinoTrexEntity
 from blocks import TEXTURE_PATH
 from config import DIST, TICKS_PER_SEC, FLYING_SPEED, GRAVITY, JUMP_SPEED, \
         MAX_JUMP_HEIGHT, PLAYER_HEIGHT, TERMINAL_VELOCITY, TICKS_PER_SEC, \
@@ -294,6 +295,7 @@ class Window(pyglet.window.Window):
             'snail': renderer.AnimatedEntityRenderer(self.block_program, SNAIL_MODEL),
             'seagull': renderer.AnimatedEntityRenderer(self.block_program, SEAGULL_MODEL),
             'dog': renderer.AnimatedEntityRenderer(self.block_program, DOG_MODEL),
+            'dinotrex': renderer.AnimatedEntityRenderer(self.block_program, DINOTREX_MODEL),
         }
         self.entity_objects = {
             self.player_entity.id: self.player_entity,
@@ -988,6 +990,8 @@ class Window(pyglet.window.Window):
                 entity = SeagullEntity(self.model, player_position=pos, entity_id=ent_id)
             elif etype == "dog":
                 entity = Dog(self.model, entity_id=ent_id, saved_state={"pos": pos, "rot": rot})
+            elif etype == "dinotrex":
+                entity = DinoTrexEntity(self.model, entity_id=ent_id, saved_state={"pos": pos, "rot": rot})
             if entity is None:
                 continue
             entity.id = ent_id
@@ -1556,11 +1560,79 @@ class Window(pyglet.window.Window):
         elif entity_type == "dog":
             entity = Dog(self.model, entity_id=entity_id, saved_state={"pos": spawn_pos, "rot": (0.0, 0.0)})
             entity.snap_to_ground()
+        elif entity_type == "dinotrex":
+            entity = DinoTrexEntity(self.model, entity_id=entity_id, saved_state={"pos": spawn_pos, "rot": (0.0, 0.0)})
+            entity.snap_to_ground()
         else:
             return None
         self.entity_objects[entity_id] = entity
         self._queue_entity_spawn(entity.to_network_dict())
         return entity
+
+    def _spawn_entity_at(self, entity_type, spawn_pos, rotation=(0.0, 0.0), snap_to_ground=False):
+        if entity_type is None or spawn_pos is None:
+            return None
+        entity_id = self._next_entity_id
+        self._next_entity_id += 1
+        spawn_pos = (float(spawn_pos[0]), float(spawn_pos[1]), float(spawn_pos[2]))
+        rot = (float(rotation[0]), float(rotation[1]))
+        entity = None
+        if entity_type == "snake":
+            entity = SnakeEntity(self.model, player_position=spawn_pos, entity_id=entity_id)
+        elif entity_type == "snail":
+            entity = SnailEntity(
+                self.model,
+                player_position=spawn_pos,
+                entity_id=entity_id,
+                saved_state={"pos": spawn_pos, "rot": rot},
+            )
+        elif entity_type == "seagull":
+            entity = SeagullEntity(
+                self.model,
+                player_position=spawn_pos,
+                entity_id=entity_id,
+                saved_state={"pos": spawn_pos, "rot": rot},
+            )
+        elif entity_type == "dog":
+            entity = Dog(self.model, entity_id=entity_id, saved_state={"pos": spawn_pos, "rot": rot})
+        elif entity_type == "dinotrex":
+            entity = DinoTrexEntity(self.model, entity_id=entity_id, saved_state={"pos": spawn_pos, "rot": rot})
+        if entity is None:
+            return None
+        if snap_to_ground and entity_type != "seagull":
+            entity.snap_to_ground()
+        self.entity_objects[entity_id] = entity
+        self._queue_entity_spawn(entity.to_network_dict())
+        return entity
+
+    def _spawn_entity_shortcut(self, entity_type):
+        if self.player_entity is None:
+            return None
+        dx, _, dz = self.get_sight_vector()
+        forward = np.array([dx, dz], dtype=float)
+        norm = np.linalg.norm(forward)
+        if norm < 1e-6:
+            yaw = float(self.rotation[0])
+            forward = np.array(
+                [math.cos(math.radians(yaw - 90.0)), math.sin(math.radians(yaw - 90.0))],
+                dtype=float,
+            )
+            norm = np.linalg.norm(forward)
+        if norm < 1e-6:
+            return None
+        forward /= norm
+        base_pos = self.player_entity.position
+        target_x = float(base_pos[0] + forward[0] * 10.0)
+        target_z = float(base_pos[2] + forward[1] * 10.0)
+        ground_y = None
+        if hasattr(self.model, "find_surface_y"):
+            ground_y = self.model.find_surface_y(target_x, target_z)
+        if ground_y is None:
+            ground_y = float(base_pos[1])
+        spawn_y = float(ground_y + (10.0 if entity_type == "seagull" else 0.0))
+        spawn_pos = (target_x, spawn_y, target_z)
+        snap_to_ground = entity_type != "seagull"
+        return self._spawn_entity_at(entity_type, spawn_pos, snap_to_ground=snap_to_ground)
 
     def _spawn_from_surface_hint(self, sector, local_x, local_y, local_z):
         if (
@@ -2015,6 +2087,21 @@ class Window(pyglet.window.Window):
             Number representing any modifying keys that were pressed.
 
         """
+        if modifiers & key.MOD_CTRL:
+            spawn_type = None
+            if symbol == key.N:
+                spawn_type = "snake"
+            elif symbol == key.B:
+                spawn_type = "snail"
+            elif symbol == key.M:
+                spawn_type = "seagull"
+            elif symbol == key.V:
+                spawn_type = "dog"
+            elif symbol == key.T:
+                spawn_type = "dinotrex"
+            if spawn_type:
+                self._spawn_entity_shortcut(spawn_type)
+                return
         if symbol == key.W:
             self.strafe[0] -= 1
         elif symbol == key.S:

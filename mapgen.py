@@ -464,6 +464,11 @@ class BiomeGenerator:
             cliff_mask = numpy.hypot(gx, gz) > 0.85
         cave_mask = self._cave_column_mask(position, elevation, cliff_mask=cliff_mask)
 
+        desert_mask = (biome == 2) & land_mask
+        desert_open_mask = desert_mask
+        if cliff_mask is not None:
+            desert_open_mask = desert_open_mask & (~cliff_mask)
+
         choices = []
         if forest_canyon_mask.any():
             choices.append(("snake", forest_canyon_mask))
@@ -471,6 +476,8 @@ class BiomeGenerator:
             choices.append(("snail", cave_mask))
         if water_mask.any():
             choices.append(("seagull", water_mask))
+        if desert_open_mask.any():
+            choices.append(("dinotrex", desert_open_mask))
         other_land = land_mask & (~forest_canyon_mask)
         if other_land.any():
             choices.append(("dog", other_land))
