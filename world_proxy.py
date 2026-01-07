@@ -2446,6 +2446,19 @@ class ModelProxy(object):
         y = int(numpy.nonzero(non_air)[0][-1])
         return float(y + 1)
 
+    def find_solid_surface_y(self, x, z):
+        """
+        Find the y-coordinate of the topmost solid block at (x, z).
+        """
+        column = self.get_vertical_column(x, z)
+        if column is None or column.size == 0:
+            return None
+        solid = BLOCK_SOLID[column] != 0
+        if not solid.any():
+            return None
+        y = int(numpy.nonzero(solid)[0][-1])
+        return float(y + 1)
+
     def add_block(self, position, block, notify_server = True, keep_patches=False, priority=False):
         spos = sectorize(position)
         if spos in self.sectors:

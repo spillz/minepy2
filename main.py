@@ -41,6 +41,8 @@ from entities.snail import SNAIL_MODEL, SnailEntity
 from entities.seagull import SEAGULL_MODEL, SeagullEntity
 from entities.dog import DOG_MODEL, Dog
 from entities.dinotrex import DINOTREX_MODEL, DinoTrexEntity
+from entities.mosasaurus import MOSASAURUS_MODEL, MosasaurusEntity
+from entities.fish_school import FISH_MODEL, FishSchoolEntity, FISH_SEGMENT_CONFIGS, FISH_TAIL_LENGTH
 from blocks import TEXTURE_PATH
 from config import DIST, TICKS_PER_SEC, FLYING_SPEED, GRAVITY, JUMP_SPEED, \
         MAX_JUMP_HEIGHT, PLAYER_HEIGHT, TERMINAL_VELOCITY, TICKS_PER_SEC, \
@@ -296,6 +298,14 @@ class Window(pyglet.window.Window):
             'seagull': renderer.AnimatedEntityRenderer(self.block_program, SEAGULL_MODEL),
             'dog': renderer.AnimatedEntityRenderer(self.block_program, DOG_MODEL),
             'dinotrex': renderer.AnimatedEntityRenderer(self.block_program, DINOTREX_MODEL),
+            'mosasaurus': renderer.AnimatedEntityRenderer(self.block_program, MOSASAURUS_MODEL),
+            'fish_school': renderer.SnakeRenderer(
+                self.block_program,
+                FISH_MODEL,
+                segment_configs=FISH_SEGMENT_CONFIGS,
+                tail_length=FISH_TAIL_LENGTH,
+                segment_capacity=FishSchoolEntity.SCHOOL_SIZE,
+            ),
         }
         self.entity_objects = {
             self.player_entity.id: self.player_entity,
@@ -992,6 +1002,10 @@ class Window(pyglet.window.Window):
                 entity = Dog(self.model, entity_id=ent_id, saved_state={"pos": pos, "rot": rot})
             elif etype == "dinotrex":
                 entity = DinoTrexEntity(self.model, entity_id=ent_id, saved_state={"pos": pos, "rot": rot})
+            elif etype == "mosasaurus":
+                entity = MosasaurusEntity(self.model, player_position=pos, entity_id=ent_id, saved_state={"pos": pos, "rot": rot})
+            elif etype == "fish_school":
+                entity = FishSchoolEntity(self.model, player_position=pos, entity_id=ent_id, saved_state={"pos": pos, "rot": rot})
             if entity is None:
                 continue
             entity.id = ent_id
@@ -999,7 +1013,7 @@ class Window(pyglet.window.Window):
             entity.rotation = np.array(rot, dtype=float)
             entity.velocity = np.array(state.get("vel", (0.0, 0.0, 0.0)), dtype=float)
             entity.current_animation = state.get("animation", "idle")
-            if etype == "snake":
+            if etype == "snake" or etype == "fish_school":
                 segs = state.get("segment_positions")
                 if segs:
                     entity.segment_positions = np.array(segs, dtype=float)
@@ -1498,6 +1512,10 @@ class Window(pyglet.window.Window):
             return self.seagull_enabled
         if entity_type == "dog":
             return self.dog_enabled
+        if entity_type == "mosasaurus":
+            return self.mosasaurus_enabled
+        if entity_type == "fish_school":
+            return self.fish_school_enabled
         return True
 
     def _sector_distance(self, a, b):
@@ -1563,6 +1581,10 @@ class Window(pyglet.window.Window):
         elif entity_type == "dinotrex":
             entity = DinoTrexEntity(self.model, entity_id=entity_id, saved_state={"pos": spawn_pos, "rot": (0.0, 0.0)})
             entity.snap_to_ground()
+        elif entity_type == "mosasaurus":
+            entity = MosasaurusEntity(self.model, player_position=spawn_pos, entity_id=entity_id)
+        elif entity_type == "fish_school":
+            entity = FishSchoolEntity(self.model, player_position=spawn_pos, entity_id=entity_id)
         else:
             return None
         self.entity_objects[entity_id] = entity
@@ -1597,9 +1619,13 @@ class Window(pyglet.window.Window):
             entity = Dog(self.model, entity_id=entity_id, saved_state={"pos": spawn_pos, "rot": rot})
         elif entity_type == "dinotrex":
             entity = DinoTrexEntity(self.model, entity_id=entity_id, saved_state={"pos": spawn_pos, "rot": rot})
+        elif entity_type == "mosasaurus":
+            entity = MosasaurusEntity(self.model, player_position=spawn_pos, entity_id=entity_id)
+        elif entity_type == "fish_school":
+            entity = FishSchoolEntity(self.model, player_position=spawn_pos, entity_id=entity_id)
         if entity is None:
             return None
-        if snap_to_ground and entity_type != "seagull":
+        if snap_to_ground and entity_type not in ("seagull", "mosasaurus", "fish_school"):
             entity.snap_to_ground()
         self.entity_objects[entity_id] = entity
         self._queue_entity_spawn(entity.to_network_dict())
@@ -1633,6 +1659,11 @@ class Window(pyglet.window.Window):
         spawn_pos = (target_x, spawn_y, target_z)
         snap_to_ground = entity_type != "seagull"
         return self._spawn_entity_at(entity_type, spawn_pos, snap_to_ground=snap_to_ground)
+
+    def _despawn_non_player_entities(self):
+        ids = [eid for eid, ent in self.entity_objects.items() if ent is not self.player_entity]
+        for eid in ids:
+            self._despawn_entity(eid, reset_sector_spawn=False)
 
     def _spawn_from_surface_hint(self, sector, local_x, local_y, local_z):
         if (
@@ -1923,6 +1954,10 @@ class Window(pyglet.window.Window):
             return self.seagull_enabled
         if entity.type == "dog":
             return self.dog_enabled
+        if entity.type == "mosasaurus":
+            return self.mosasaurus_enabled
+        if entity.type == "fish_school":
+            return self.fish_school_enabled
         return True
 
     def _persist_entity_states(self):
@@ -2089,6 +2124,9 @@ class Window(pyglet.window.Window):
         """
         if modifiers & key.MOD_CTRL:
             spawn_type = None
+            if symbol == key.X:
+                self._despawn_non_player_entities()
+                return
             if symbol == key.N:
                 spawn_type = "snake"
             elif symbol == key.B:

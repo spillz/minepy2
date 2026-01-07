@@ -456,6 +456,8 @@ class BiomeGenerator:
         biome = self._biome_masks(moisture, temperature, elevation, canyon_noise)
         water_mask = elevation <= WATER_LEVEL
         land_mask = ~water_mask
+        water_depth = (WATER_LEVEL - elevation).astype(numpy.float32)
+        deep_water_mask = water_mask & (water_depth >= 15.0)
         forest_canyon_mask = ((biome == 1) | (biome == 4)) & land_mask
 
         cliff_mask = None
@@ -476,6 +478,10 @@ class BiomeGenerator:
             choices.append(("snail", cave_mask))
         if water_mask.any():
             choices.append(("seagull", water_mask))
+        if water_mask.all():
+            choices.append(("fish_school", water_mask))
+        if deep_water_mask.all():
+            choices.append(("mosasaurus", deep_water_mask))
         if desert_open_mask.any():
             choices.append(("dinotrex", desert_open_mask))
         other_land = land_mask & (~forest_canyon_mask)

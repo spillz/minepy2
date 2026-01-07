@@ -423,7 +423,7 @@ class AnimatedEntityRenderer:
 
 
 class SnakeRenderer:
-    def __init__(self, program, model_definition, segment_configs=None, tail_length=12):
+    def __init__(self, program, model_definition, segment_configs=None, tail_length=12, segment_capacity=None):
         self.program = program
         self.head_renderer = AnimatedEntityRenderer(program, model_definition)
         self.tail_length = tail_length
@@ -432,7 +432,7 @@ class SnakeRenderer:
             ((0.34, 0.24, 0.33), (220, 40, 40)),
             ((0.28, 0.20, 0.30), (180, 40, 30)),
         ]
-        self.segment_capacity = SnakeEntity.SEGMENT_COUNT
+        self.segment_capacity = SnakeEntity.SEGMENT_COUNT if segment_capacity is None else int(segment_capacity)
         self._segment_sizes, self._segment_colors = self._build_segment_styles(configs)
         self._buffer = self._prepare_segment_buffer(self._segment_sizes, self._segment_colors)
         self._mesh = self.program.vertex_list(

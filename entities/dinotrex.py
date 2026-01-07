@@ -490,6 +490,43 @@ def build_dinotrex_model() -> Dict[str, Any]:
                 },
             ],
         },
+        "step": {
+            "loop": False,
+            "length": 0.25,
+            "keyframes": [
+                {
+                    "time": 0.0,
+                    "rotations": {
+                        "left_upper_leg": {"pitch": 45},
+                        "right_upper_leg": {"pitch": 5},
+                        "left_lower_leg": {"pitch": -20},
+                        "right_lower_leg": {"pitch": -40},
+                        "left_foot_1": {"pitch": -35, "yaw": 16},
+                        "left_foot_2": {"pitch": -35, "yaw": 0},
+                        "left_foot_3": {"pitch": -35, "yaw": -16},
+                        "left_foot_4": {"pitch": -35, "yaw": 180},
+                        "right_foot_1": {"pitch": 35, "yaw": 16},
+                        "right_foot_2": {"pitch": -35, "yaw": 0},
+                        "right_foot_3": {"pitch": -35, "yaw": -16},
+                        "right_foot_4": {"pitch": 35, "yaw": 180},
+                        "left_hand_1": {"yaw": 16},
+                        "left_hand_2": {"yaw": -16},
+                        "right_hand_1": {"yaw": 16},
+                        "right_hand_2": {"yaw": -16},
+                        "jaw_left": {"pitch": -12},
+                        "jaw_right": {"pitch": -12},
+                        "left_upper_arm": {"pitch": -10},
+                        "right_upper_arm": {"pitch": 10},
+                        "tail_1": {"yaw": 14},
+                        "tail_2": {"yaw": 18},
+                        "tail_3": {"yaw": 20},
+                        "tail_4": {"yaw": 18},
+                        "tail_5": {"yaw": 14},
+                        "tail_6": {"yaw": 10},
+                    },
+                }
+            ],
+        },
     }
 
     return {
@@ -511,6 +548,9 @@ class DinoTrexEntity(BaseEntity):
     IDLE_COOLDOWN = (8.0, 16.0)
     WAKE_DISTANCE = 2.0
     TURN_LERP_SPEED = (1.2, 2.2)
+    STEP_DURATION = 0.28
+    STEP_HEIGHT = 1.05
+    ANIM_BLEND = 0.15
 
     def __init__(self, world, entity_id=6, saved_state=None):
         initial_position = (0, 160, 0)
@@ -529,6 +569,9 @@ class DinoTrexEntity(BaseEntity):
         self._idle_timer = 0.0
         self._idle_cooldown = random.uniform(*self.IDLE_COOLDOWN)
         self._collapsed = True
+        self._step_timer = 0.0
+        self._step_start = None
+        self._step_target = None
         if saved_state:
             rot = saved_state.get("rot")
             if rot is not None:
@@ -539,7 +582,9 @@ class DinoTrexEntity(BaseEntity):
     def update(self, dt, context):
         if dt <= 0:
             return
-        oldanim = self.current_animation
+        if self._step_timer > 0.0:
+            self._advance_step(dt)
+            return
         player_pos = context.get("player_position") if context else None
         if self._collapsed:
             self.velocity[:] = 0.0
@@ -599,9 +644,10 @@ class DinoTrexEntity(BaseEntity):
         if moving:
             delta = self.position - prev_pos
             if (delta[0] * delta[0] + delta[2] * delta[2]) < 1e-4:
-                self._turn_target_angle = self._pick_clear_direction()
-                self._turn_lerp_speed = random.uniform(*self.TURN_LERP_SPEED)
-                self._wander_timer = min(self._wander_timer, 1.2)
+                if not self._try_step():
+                    self._turn_target_angle = self._pick_clear_direction()
+                    self._turn_lerp_speed = random.uniform(*self.TURN_LERP_SPEED)
+                    self._wander_timer = min(self._wander_timer, 1.2)
         self.current_animation = "walk" if moving else "idle"
 
 
@@ -609,10 +655,63 @@ class DinoTrexEntity(BaseEntity):
         data = super().to_network_dict()
         data["type"] = "dinotrex"
         data["animation"] = self.current_animation
+        data["anim_blend"] = self.ANIM_BLEND
         return data
 
     def serialize_state(self):
         return {"pos": tuple(self.position.tolist()), "rot": tuple(self.rotation.tolist())}
+
+    def _try_step(self):
+        if not hasattr(self.world, "find_solid_surface_y"):
+            return False
+        base_y = self.world.find_solid_surface_y(self.position[0], self.position[2])
+        if base_y is None:
+            return False
+        forward = np.array([math.cos(self._wander_angle), math.sin(self._wander_angle)], dtype=float)
+        forward_norm = np.linalg.norm(forward)
+        if forward_norm < 1e-6:
+            return False
+        forward /= forward_norm
+        probe = float(self.bounding_box[2] * 0.5 + 0.2)
+        target_x = float(self.position[0] + forward[0] * probe)
+        target_z = float(self.position[2] + forward[1] * probe)
+        target_y = self.world.find_solid_surface_y(target_x, target_z)
+        if target_y is None:
+            return False
+        rise = target_y - base_y
+        if rise < 0.6 or rise > 1.2:
+            return False
+        self._step_timer = self.STEP_DURATION
+        self._step_start = self.position.copy()
+        self._step_target = np.array([target_x, target_y, target_z], dtype=float)
+        self.velocity[:] = 0.0
+        self.current_animation = "step"
+        return True
+
+    def _advance_step(self, dt):
+        if self._step_start is None or self._step_target is None:
+            self._step_timer = 0.0
+            return
+        elapsed = max(0.0, self.STEP_DURATION - self._step_timer)
+        self._step_timer = max(0.0, self._step_timer - dt)
+        t = min(1.0, elapsed / self.STEP_DURATION) if self.STEP_DURATION > 0 else 1.0
+        lift_phase = 0.4
+        if t <= lift_phase:
+            up_t = t / lift_phase if lift_phase > 0 else 1.0
+            target = self._step_start.copy()
+            target[1] = self._step_start[1] + self.STEP_HEIGHT * up_t
+        else:
+            move_t = (t - lift_phase) / (1.0 - lift_phase)
+            target = self._step_start + (self._step_target - self._step_start) * move_t
+        self.position = target
+        self.velocity[:] = 0.0
+        self.on_ground = True
+        self.current_animation = "step"
+        if self._step_timer <= 0.0:
+            self.position = self._step_target.copy()
+            self._step_start = None
+            self._step_target = None
+            self.current_animation = "walk"
 
     def _pick_clear_direction(self):
         base = self._wander_angle
