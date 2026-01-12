@@ -327,6 +327,8 @@ class Window(pyglet.window.Window):
         self.snail_enabled = True
         self.seagull_enabled = True
         self.dog_enabled = True
+        self.mosasaurus_enabled = True
+        self.fish_school_enabled = True
         self.entities = {
             eid: entity.to_network_dict()
             for eid, entity in self.entity_objects.items()
@@ -2137,6 +2139,10 @@ class Window(pyglet.window.Window):
                 spawn_type = "dog"
             elif symbol == key.T:
                 spawn_type = "dinotrex"
+            elif symbol == key.Y:
+                spawn_type = "mosasaurus"
+            elif symbol == key.U:
+                spawn_type = "fish_school"
             if spawn_type:
                 self._spawn_entity_shortcut(spawn_type)
                 return

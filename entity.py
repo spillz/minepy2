@@ -10,6 +10,8 @@ ENTITY_TYPE_IDS = {
     "seagull": 4,
     "dog": 5,
     "dinotrex": 6,
+    "mosasaurus": 7,
+    "fish_school": 8,
 }
 ENTITY_TYPE_NAMES = {value: key for key, value in ENTITY_TYPE_IDS.items()}
 ENTITY_ANIM_IDS = {
